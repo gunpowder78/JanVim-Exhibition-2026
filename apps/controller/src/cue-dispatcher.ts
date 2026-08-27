@@ -13,10 +13,12 @@ export type MonotonicClock = {
   nowMonotonic: () => number;
 };
 
+type EditorCue = Extract<Cue, { kind: "editor-action" }>;
+
 export interface CueDispatcherDeps {
   clock: MonotonicClock;
   onVisualCue: (cue: Cue) => void;
-  onEditorCue: (cue: Cue) => void;
+  onEditorCue: (cue: EditorCue) => void;
   onSafeBlack: (reason: string) => void;
   onLoopReset: (nextLoopId: string) => void;
   generateLoopId: () => string;
@@ -24,7 +26,7 @@ export interface CueDispatcherDeps {
 }
 
 type PendingEditor = {
-  cue: Cue & { kind: "editor-action" };
+  cue: EditorCue;
   retryCount: number;
   deadlineMs: number;
 };
@@ -34,7 +36,7 @@ const ACK_TIMEOUT_MS = 2_000;
 export class CueDispatcher {
   private readonly clock: MonotonicClock;
   private readonly onVisualCue: (cue: Cue) => void;
-  private readonly onEditorCue: (cue: Cue) => void;
+  private readonly onEditorCue: (cue: EditorCue) => void;
   private readonly onSafeBlack: (reason: string) => void;
   private readonly onLoopReset: (nextLoopId: string) => void;
   private readonly generateLoopId: () => string;
@@ -148,15 +150,29 @@ export class CueDispatcher {
       return;
     }
 
-    if (ack.outcome === "failed") {
+    if (ack.outcome === "failed" || ack.outcome === "rejected") {
       this.pendingEditor = undefined;
       this.state = "safe-black";
-      this.onSafeBlack("editor cue returned failed");
+      this.onSafeBlack(`editor cue returned ${ack.outcome}`);
       return;
     }
 
     this.pendingEditor = undefined;
     this.state = "running";
+  }
+
+  public failPending(reason: string): void {
+    if (this.pendingEditor === undefined) return;
+    this.pendingEditor = undefined;
+    this.state = "safe-black";
+    this.onSafeBlack(reason);
+  }
+
+  public diagnostics(): { pendingEditorCues: number; dispatchedCueIds: number } {
+    return {
+      pendingEditorCues: this.pendingEditor === undefined ? 0 : 1,
+      dispatchedCueIds: this.dispatchedInLoop.size,
+    };
   }
 
   public rotateLoop(): void {

@@ -110,8 +110,6 @@ describe("secondary scene controller", () => {
 
   it("merges the canonical staged prompt without erasing the poem layer", () => {
     const { root, controller } = makeController();
-    controller.apply(fixtureCue("cue-prepare"));
-
     controller.apply(fixtureCue("cue-prompt"));
 
     const promptText = root.querySelector("[data-prompt-content]")?.textContent ?? "";
@@ -141,8 +139,9 @@ describe("secondary scene controller", () => {
     controller.apply(fixtureCue("cue-accept"));
 
     expect(root.querySelector("[data-response-content]")?.textContent).toBe(
-      "尝试生成首轮信息论文本。",
+      "若把诗句视为离散信源，层楼不是终点，而是观察窗口的扩展。",
     );
+    expect(root.dataset.responseComplete).toBe("true");
     expect(root.querySelector("[data-acceptance]")?.getAttribute("data-accepted")).toBe("true");
     expect(root.querySelector("[data-acceptance]")?.textContent).toBe(
       "准备写回第一段生成文本。",
@@ -167,15 +166,15 @@ describe("secondary scene controller", () => {
     expect(item?.textContent).toContain("editor-write-1");
   });
 
-  it("routes a main-targeted canonical editor cue into the secondary Key Overlay", () => {
+  it("routes the main-targeted canonical write-back cue into the secondary Key Overlay", () => {
     const { root, controller } = makeController();
 
-    controller.apply(fixtureCue("cue-move"));
+    controller.apply(fixtureCue("cue-insert"));
 
-    const item = root.querySelector("[data-cue-id='cue-move']");
-    expect(item?.textContent).toContain("gg /");
-    expect(item?.textContent).toContain("move to acceptance range");
-    expect(item?.textContent).toContain("cue-move");
+    const item = root.querySelector("[data-cue-id='cue-insert']");
+    expect(item?.textContent).toContain("i");
+    expect(item?.textContent).toContain("insert generated segment");
+    expect(item?.textContent).toContain("cue-insert");
   });
 
   it("does not fabricate overlay items from standalone key-overlay cues", () => {

@@ -60,6 +60,9 @@ export class SecondarySceneController {
         if (tokenCue !== null) {
           this.showRunningScene();
           this.response.push(tokenCue);
+          if (cue.payload.complete === true) {
+            this.root.dataset.responseComplete = "true";
+          }
         }
         return;
       }
@@ -93,6 +96,7 @@ export class SecondarySceneController {
     this.response.clear();
     this.keyOverlay.clear();
     delete this.p1Layer.dataset.skippedCue;
+    delete this.root.dataset.responseComplete;
     this.ready.hidden = false;
     this.root.dataset.scene = "ready";
   }

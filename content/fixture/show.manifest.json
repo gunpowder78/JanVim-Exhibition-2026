@@ -3,19 +3,9 @@
   "loopId": "fixture-90s",
   "loopDurationMs": 90000,
   "poemSha256": "b699de273f5bbaedb08241495f52ce863d3e8e1851275ce3b6251484d75190a8",
-  "contentRevision": "20260828-0001",
+  "contentRevision": "20260828-0002",
   "preparedBy": "JanVim Exhibition Team",
   "cues": [
-    {
-      "id": "cue-prepare",
-      "atMs": 0,
-      "target": "both",
-      "kind": "prompt",
-      "payload": {
-        "poem": "白日依山尽\n黄河入海流\n欲穷千里目\n更上一层楼",
-        "poemSha256": "b699de273f5bbaedb08241495f52ce863d3e8e1851275ce3b6251484d75190a8"
-    }
-    },
     {
       "id": "cue-prompt",
       "atMs": 5000,
@@ -23,6 +13,8 @@
       "kind": "prompt",
       "payload": {
         "title": "第一轮生成",
+        "poem": "白日依山尽\n黄河入海流\n欲穷千里目\n更上一层楼",
+        "poemSha256": "b699de273f5bbaedb08241495f52ce863d3e8e1851275ce3b6251484d75190a8",
         "text": "启动工程闭环：从诗句派生信息论表达。",
         "durationMs": 7000
       }
@@ -33,35 +25,18 @@
       "target": "secondary",
       "kind": "token-stream",
       "payload": {
-        "text": "尝试生成首轮信息论文本。"
+        "text": "若把诗句视为离散信源，层楼不是终点，而是观察窗口的扩展。",
+        "complete": true
       }
     },
     {
       "id": "cue-accept",
       "atMs": 45000,
-      "target": "both",
+      "target": "secondary",
       "kind": "token-stream",
       "payload": {
         "accepted": true,
         "summary": "准备写回第一段生成文本。"
-      }
-    },
-    {
-      "id": "cue-move",
-      "atMs": 48000,
-      "target": "main",
-      "kind": "editor-action",
-      "payload": {
-        "action": {
-          "type": "select",
-          "rangeId": "opening"
-        },
-        "displayKeys": [
-          "gg",
-          "/"
-        ],
-        "semanticLabel": "move to acceptance range",
-        "critical": true
       }
     },
     {
@@ -84,9 +59,9 @@
       }
     },
     {
-      "id": "cue-idle",
+      "id": "cue-fade",
       "atMs": 78000,
-      "target": "main",
+      "target": "secondary",
       "kind": "fade",
       "payload": {
         "label": "quiet",
