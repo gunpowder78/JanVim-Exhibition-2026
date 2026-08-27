@@ -55,7 +55,7 @@ export function buildJanVimChildEnvironment(
 
   return {
     ...baseEnvironment,
-    JANVIM_EXHIBITION_USER_ROOT: config.privateUserRoot,
+    JANVIM_USER_ROOT: config.privateUserRoot,
     JANVIM_EXHIBITION_PORT: String(config.bridgePort),
     JANVIM_EXHIBITION_TOKEN: config.bridgeToken,
   };

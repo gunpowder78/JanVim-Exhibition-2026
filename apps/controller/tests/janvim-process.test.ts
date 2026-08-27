@@ -33,7 +33,7 @@ describe("JanVim process launcher", () => {
     expect(spawnCount).toBe(0);
   });
 
-  it("preserves inherited user variables and adds only the three show-scoped values", () => {
+  it("preserves inherited user variables and adds the product user root plus bridge values", () => {
     const base = {
       HOME: "D:\\Users\\operator",
       XDG_CONFIG_HOME: "D:\\Users\\operator\\.config",
@@ -48,10 +48,11 @@ describe("JanVim process launcher", () => {
     });
     expect(environment).toEqual({
       ...base,
-      JANVIM_EXHIBITION_USER_ROOT: config.privateUserRoot,
+      JANVIM_USER_ROOT: config.privateUserRoot,
       JANVIM_EXHIBITION_PORT: "32123",
       JANVIM_EXHIBITION_TOKEN: config.bridgeToken,
     });
+    expect(environment).not.toHaveProperty("JANVIM_EXHIBITION_USER_ROOT");
   });
 
   it("spawns the exact verified executable without a shell and returns its PID", async () => {
