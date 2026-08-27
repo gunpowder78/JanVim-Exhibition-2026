@@ -697,7 +697,7 @@ git commit -m "feat: close the first causal show loop"
 - 脚本不调用 `git checkout-index`、不删除来源目录、也不访问以下三个 JanVim 事故保护目录：
   - `D:\VirtualData\TempCache\janvim-root-export-quarantine-20260826-110433-6473a2d7ebbc4524b66c61c07e540504`；
   - `D:\VirtualData\TempCache\janvim-task5-cached-d42e9769283e47dc8b98cf94baee739d`；
-  - `D:\VirtualData\TempCache\janvim-task5-physical-cached-e9735e8d02e34ff4a4ac8836f8e22d`。
+  - `D:\VirtualData\TempCache\janvim-task5-physical-cached-e9735e8d02e34ff4a4ac8836f8e22dcb`。
 
 ### 8.2 只接受有完整来源链的候选
 
