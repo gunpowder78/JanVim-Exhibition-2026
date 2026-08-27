@@ -1,0 +1,12 @@
+{
+  "loopId": "fixture-90s",
+  "segments": [
+    {
+      "id": "segment-1",
+      "status": "accepted",
+      "sourcePoem": "白日依山尽...",
+      "generated": "若把诗句视为离散信源，层楼不是终点，而是观察窗口的扩展；可见序列的熵随候选路径增加而增长。",
+      "acceptedAtMs": 48000
+    }
+  ]
+}
