@@ -1,0 +1,11 @@
+node_modules/
+dist/
+out/
+coverage/
+*.log
+.DS_Store
+Thumbs.db
+
+# Prepared show artifacts are staged locally and identified by lock/manifests.
+runtime/janvim/
+content/media-local/
