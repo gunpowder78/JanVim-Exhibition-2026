@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "dependencies": {
+    "@janvim-exhibition/show-schema": "file:../packages/show-schema"
+  },
   "main": "src/main.ts",
   "scripts": {
     "build": "tsc -b"
