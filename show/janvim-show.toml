@@ -1,0 +1,14 @@
+schema = 1
+mode = "show-only"
+network = "disabled"
+layout_engine = "unconfirmed"
+artifact_lock = "janvim-artifact.lock.json"
+runtime_root = "runtime/janvim"
+private_user_root = "runtime/user-root"
+source_writes = false
+
+[window]
+role = "primary-projector"
+width = 1920
+height = 1080
+scale_factor = 1

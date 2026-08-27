@@ -1,0 +1,27 @@
+{
+  "schema": 1,
+  "mappingStatus": "unconfirmed",
+  "expectedDisplayCount": 2,
+  "primary": {
+    "displayId": "UNCONFIRMED-ENGINEERING-PROJECTOR",
+    "bounds": {
+      "x": 0,
+      "y": 0,
+      "width": 1920,
+      "height": 1080
+    },
+    "scaleFactor": 1,
+    "geometrySha256": "7c142b0b43cdf86b42b1419b2d1dee69bae69ffb0f0d64ceac42cc2405a26397"
+  },
+  "secondary": {
+    "displayId": "UNCONFIRMED-NUT-PROJECTOR",
+    "bounds": {
+      "x": 1920,
+      "y": 0,
+      "width": 1920,
+      "height": 1080
+    },
+    "scaleFactor": 1,
+    "geometrySha256": "672fdbfb13636da13ab603282944433949bc12298dc892540c0de90fe929b74f"
+  }
+}
