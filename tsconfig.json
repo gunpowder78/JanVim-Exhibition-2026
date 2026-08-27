@@ -1,0 +1,18 @@
+{
+  "files": [],
+  "references": [
+    { "path": "packages/show-schema" },
+    { "path": "apps/controller" },
+    { "path": "apps/secondary-screen" }
+  ],
+  "compilerOptions": {
+    "composite": true,
+    "module": "ES2022",
+    "moduleResolution": "bundler",
+    "target": "ES2022",
+    "skipLibCheck": true,
+    "strict": true,
+    "types": ["node"],
+    "forceConsistentCasingInFileNames": true
+  }
+}
