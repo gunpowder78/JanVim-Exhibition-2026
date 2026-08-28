@@ -57,6 +57,11 @@ function validEvidenceRecord(
       configSha256: "d".repeat(64),
       layoutEngine: "dynamic",
     },
+    content: {
+      manifestSha256: "9a39ee522e556860053468854b0858bc1fafd8b7a1ca08ddff57d0371b717b35",
+      poemSha256: "b699de273f5bbaedb08241495f52ce863d3e8e1851275ce3b6251484d75190a8",
+      contentRevision: "20260828-0002",
+    },
     placement: {
       pid: 5150,
       requested: { x: 0, y: 0, width: 1920, height: 1080 },
@@ -196,6 +201,10 @@ describe("G2 evidence writer", () => {
       expect(() =>
         writeG2Evidence(join(root, "missing-placement.json"), withoutPlacement),
       ).toThrow();
+      const { content: _content, ...withoutContentIdentity } = validEvidenceRecord();
+      expect(() =>
+        writeG2Evidence(join(root, "missing-content-identity.json"), withoutContentIdentity),
+      ).toThrow();
       for (const [name, impossible] of [
         ["missing-shutdown", validEvidenceRecord({ shutdown: null })],
         [
@@ -226,6 +235,60 @@ describe("G2 evidence writer", () => {
       ).toThrow();
       const oversizedNote = validEvidenceRecord({ operatorNotes: ["界".repeat(171)] });
       expect(() => writeG2Evidence(join(root, "note.json"), oversizedNote)).toThrow();
+      expect(readdirSync(root)).toEqual([]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects passed evidence that contradicts primary placement or natural shutdown", () => {
+    const root = mkdtempSync(join(tmpdir(), "g2-evidence-cross-field-"));
+    try {
+      const valid = validEvidenceRecord();
+      const impossibleRecords: Array<[string, G2EvidenceRecord]> = [
+        [
+          "wrong-requested-placement",
+          validEvidenceRecord({
+            placement: {
+              ...valid.placement!,
+              requested: { x: 1, y: 0, width: 1920, height: 1080 },
+            },
+          }),
+        ],
+        [
+          "wrong-actual-placement",
+          validEvidenceRecord({
+            placement: {
+              ...valid.placement!,
+              actual: { x: 0, y: 1, width: 1920, height: 1080 },
+            },
+          }),
+        ],
+        [
+          "nonzero-exit",
+          validEvidenceRecord({ shutdown: { ...valid.shutdown!, processExitCode: 1 } }),
+        ],
+        [
+          "wrong-natural-reason",
+          validEvidenceRecord({ shutdown: { ...valid.shutdown!, reason: "other-natural-exit" } }),
+        ],
+        [
+          "stderr-observed",
+          validEvidenceRecord({ shutdown: { ...valid.shutdown!, stderrBytes: 1 } }),
+        ],
+        [
+          "stdout-truncated",
+          validEvidenceRecord({ shutdown: { ...valid.shutdown!, stdoutTruncated: true } }),
+        ],
+        [
+          "stderr-truncated",
+          validEvidenceRecord({ shutdown: { ...valid.shutdown!, stderrTruncated: true } }),
+        ],
+      ];
+
+      for (const [name, record] of impossibleRecords) {
+        expect(() => writeG2Evidence(join(root, `${name}.json`), record)).toThrow();
+      }
       expect(readdirSync(root)).toEqual([]);
     } finally {
       rmSync(root, { recursive: true, force: true });

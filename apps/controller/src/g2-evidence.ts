@@ -62,6 +62,11 @@ export interface G2EvidenceRecord {
     configSha256: string;
     layoutEngine: "dynamic" | "orthogonal";
   };
+  content: {
+    manifestSha256: string;
+    poemSha256: string;
+    contentRevision: string;
+  };
   placement: {
     pid: number;
     requested: Rectangle;
@@ -202,6 +207,13 @@ const artifactEvidenceSchema = z
     layoutEngine: z.enum(["dynamic", "orthogonal"]),
   })
   .strict();
+const contentEvidenceSchema = z
+  .object({
+    manifestSha256: hashSchema,
+    poemSha256: hashSchema,
+    contentRevision: z.string().min(1).max(128),
+  })
+  .strict();
 const placementEvidenceSchema = z
   .object({
     pid: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
@@ -234,6 +246,11 @@ const operatorNoteSchema = z.string().refine(
   (value) => Buffer.byteLength(value, "utf8") <= 512,
   "operator note must be at most 512 UTF-8 bytes",
 );
+const rectanglesEqual = (left: Rectangle, right: Rectangle): boolean =>
+  left.x === right.x &&
+  left.y === right.y &&
+  left.width === right.width &&
+  left.height === right.height;
 const g2EvidenceSchema = z
   .object({
     schema: z.literal(1),
@@ -244,6 +261,7 @@ const g2EvidenceSchema = z
     physicalProjectorsTested: z.literal(false),
     displayMap: displayMapEvidenceSchema,
     artifact: artifactEvidenceSchema,
+    content: contentEvidenceSchema,
     placement: placementEvidenceSchema.nullable(),
     loop: loopEvidenceSchema,
     shutdown: shutdownEvidenceSchema.nullable(),
@@ -272,6 +290,21 @@ const g2EvidenceSchema = z
         path: ["placement"],
         message: "passed evidence requires placement",
       });
+    } else {
+      if (!rectanglesEqual(record.placement.requested, record.displayMap.primary.bounds)) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["placement", "requested"],
+          message: "passed evidence requested placement must match the primary display",
+        });
+      }
+      if (!rectanglesEqual(record.placement.actual, record.displayMap.primary.bounds)) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["placement", "actual"],
+          message: "passed evidence actual placement must match the primary display",
+        });
+      }
     }
     if (record.loop.completedLoops !== 1 || !record.loop.resetRestoredPoem) {
       context.addIssue({
@@ -280,11 +313,19 @@ const g2EvidenceSchema = z
         message: "passed evidence requires one restored loop",
       });
     }
-    if (record.shutdown === null || !record.shutdown.natural) {
+    if (
+      record.shutdown === null ||
+      !record.shutdown.natural ||
+      record.shutdown.reason !== "frontend-shutdown-graceful" ||
+      record.shutdown.processExitCode !== 0 ||
+      record.shutdown.stderrBytes !== 0 ||
+      record.shutdown.stdoutTruncated ||
+      record.shutdown.stderrTruncated
+    ) {
       context.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["shutdown"],
-        message: "passed evidence requires natural shutdown",
+        message: "passed evidence requires the exact natural shutdown invariants",
       });
     }
   });

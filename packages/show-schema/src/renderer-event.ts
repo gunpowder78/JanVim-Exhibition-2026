@@ -69,24 +69,30 @@ const safeInsert = z
   .pipe(nonCommandText);
 
 export const editorActionSchema = z.discriminatedUnion("type", [
-  z.object({
-    type: z.literal("move"),
-    keys: z.enum(["h", "j", "k", "l", "w", "b", "e", "0", "$", "G"]),
-    repeat: z.number().int().min(0).max(256),
-  }),
-  z.object({
-    type: z.literal("insert"),
-    text: safeInsert,
-    charsPerSecond: z.number().min(0).max(1_000),
-  }),
-  z.object({ type: z.literal("select"), rangeId: z.string().min(1) }),
-  z.object({
-    type: z.literal("replace"),
-    rangeId: z.string().min(1),
-    text: safeInsert,
-  }),
-  z.object({ type: z.literal("escape") }),
-  z.object({ type: z.literal("reset") }),
+  z
+    .object({
+      type: z.literal("move"),
+      keys: z.enum(["h", "j", "k", "l", "w", "b", "e", "0", "$", "G"]),
+      repeat: z.number().int().min(0).max(256),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal("insert"),
+      text: safeInsert,
+      charsPerSecond: z.number().min(0).max(1_000),
+    })
+    .strict(),
+  z.object({ type: z.literal("select"), rangeId: z.string().min(1) }).strict(),
+  z
+    .object({
+      type: z.literal("replace"),
+      rangeId: z.string().min(1),
+      text: safeInsert,
+    })
+    .strict(),
+  z.object({ type: z.literal("escape") }).strict(),
+  z.object({ type: z.literal("reset") }).strict(),
 ]);
 
 const editorPayloadSchema = z

@@ -189,6 +189,21 @@ describe("bounded G2 PowerShell launcher", () => {
     }
   });
 
+  it("preflights required launch files before creating a Capture root", () => {
+    const fixture = makeLauncherFixture();
+    try {
+      rmSync(fixture.entrySentinel, { force: false });
+
+      const result = runLauncher(fixture, captureArguments(fixture));
+
+      expect(result.status).not.toBe(0);
+      expect(existsSync(fixture.externalRoot)).toBe(false);
+      expect(existsSync(fixture.invocationLog)).toBe(false);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
   it("rejects invalid paths and same Confirm IDs before Electron invocation", () => {
     const cases = [
       (fixture: LauncherFixture) => [

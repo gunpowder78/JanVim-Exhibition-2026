@@ -4,8 +4,11 @@ Independent dual-projector show controller for the JanVim new-media installation
 
 ## Status
 
-Planning baseline only. No controller, secondary-screen renderer, Neovim show agent, or frozen
-content bundle has been implemented yet.
+The bounded G2 implementation candidate now includes the frozen JanVim artifact, deterministic
+controller/Bridge loop, secondary-screen renderer, show agent, content fixture, and external
+two-display rehearsal workflow. Automated verification and the human two-monitor G2 checkpoint
+must both pass before this candidate is accepted. Physical-projector G3/G4 acceptance remains
+pending; a monitor simulation never counts as projector acceptance.
 
 ## Show topology
 

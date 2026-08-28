@@ -157,16 +157,18 @@ const manifestSchema = z
     }
   });
 
-const prepareActionSchema = z.object({
-  type: z.literal("prepare"),
-  poem: z.string().min(1),
-  expectedSha256: sha256Schema,
-});
+const prepareActionSchema = z
+  .object({
+    type: z.literal("prepare"),
+    poem: z.string().min(1),
+    expectedSha256: sha256Schema,
+  })
+  .strict();
 
 const commandActionSchema = z.discriminatedUnion("type", [
   editorActionSchema,
   prepareActionSchema,
-  z.object({ type: z.literal("status") }),
+  z.object({ type: z.literal("status") }).strict(),
 ]);
 
 const agentCommandPayloadSchema = z
@@ -186,10 +188,12 @@ const agentAckSchema = z
     cueId: z.string().min(1),
     outcome: z.enum(["applied", "duplicate", "rejected", "failed"]),
     mode: z.string().min(1),
-    cursor: z.object({
-      row: z.number().int().nonnegative(),
-      col: z.number().int().nonnegative(),
-    }),
+    cursor: z
+      .object({
+        row: z.number().int().nonnegative(),
+        col: z.number().int().nonnegative(),
+      })
+      .strict(),
     bufferSha256: sha256Schema,
     errorCode: z.string().optional(),
   })

@@ -57,6 +57,7 @@ interface HarnessOptions {
   failAt?: FailureStage;
   reason?: string;
   evidenceWriteFails?: boolean;
+  bridgeCloseNeverSettles?: boolean;
 }
 
 const primary: RuntimeDisplay = {
@@ -133,7 +134,11 @@ function createCompositionHarness(calls: string[], options: HarnessOptions = {})
     dispatch: vi.fn(async (_command: AgentCommand): Promise<AgentAck> => {
       throw new Error("dispatch is not used by the composition fake");
     }),
-    close: vi.fn(async () => undefined),
+    close: vi.fn(() =>
+      options.bridgeCloseNeverSettles === true
+        ? new Promise<void>(() => undefined)
+        : Promise.resolve(),
+    ),
   };
   const loop = {
     state: "booting",
@@ -251,6 +256,9 @@ function createCompositionHarness(calls: string[], options: HarnessOptions = {})
     },
     cleanupCount: () =>
       logEvents.filter((event) => event.event === "g2-runtime-cleanup").length,
+    get logEvents() {
+      return logEvents;
+    },
     readyStatusCountAfterStart: () =>
       statuses
         .slice(statusCountAtStart)
@@ -318,6 +326,25 @@ describe("G2 runtime composition", () => {
     expect(harness.timers.timeoutDelays()).not.toContain(15_000);
     expect(harness.cleanupCount()).toBe(1);
     expect(harness.finalizeEvidence).not.toHaveBeenCalled();
+  });
+
+  it("logs the stable reason when validation fails before evidence is available", async () => {
+    const harness = createCompositionHarness([], {
+      failAt: "validate",
+      reason: "runtime-input-invalid",
+    });
+
+    await harness.composition.boot();
+    await harness.composition.completion;
+
+    expect(harness.logEvents).toContainEqual({
+      event: "g2-runtime-cleanup",
+      ok: false,
+      failureReason: "runtime-input-invalid",
+      completedLoops: 0,
+      maxDriftMs: 0,
+      placementRecorded: false,
+    });
   });
 
   it("fails when the exact child exits before reset", async () => {
@@ -491,5 +518,28 @@ describe("G2 runtime composition", () => {
       reason: "g2-evidence-write-failed",
     });
     expect(harness.finalizeEvidence).toHaveBeenCalledTimes(1);
+  });
+
+  it("bounds a non-settling Bridge close and fails an otherwise passed run", async () => {
+    const harness = createCompositionHarness([], { bridgeCloseNeverSettles: true });
+    await harness.composition.boot();
+    harness.startLocally();
+    harness.completeLoop();
+    harness.setShutdownClassification({
+      natural: true,
+      reason: "frontend-shutdown-graceful",
+    });
+    harness.exitChild(0);
+    await Promise.resolve();
+
+    expect(harness.timers.timeoutDelays()).toContain(5_000);
+    await harness.timers.fireTimeout(5_000);
+
+    await expect(harness.composition.completion).resolves.toEqual({
+      ok: false,
+      reason: "g2-bridge-close-timeout",
+    });
+    expect(harness.secondary.close).toHaveBeenCalledTimes(1);
+    expect(harness.logEvents).toContainEqual({ event: "g2-bridge-close-timeout" });
   });
 });

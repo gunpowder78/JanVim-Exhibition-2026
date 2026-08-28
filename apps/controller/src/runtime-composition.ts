@@ -325,11 +325,35 @@ export class G2RuntimeComposition {
     this.safeDispose(this.disposeChildClose);
     this.disposeChildClose = undefined;
 
+    let bridgeCloseTimedOut = false;
     if (this.bridge !== undefined) {
+      let bridgeCloseTimerId: OneLoopTimerHandle | undefined;
       try {
-        await this.bridge.close();
-      } catch {
-        this.safeLog({ event: "g2-bridge-close-failed" });
+        const bridge = this.bridge;
+        const outcome = await Promise.race([
+          Promise.resolve()
+            .then(() => bridge.close())
+            .then(
+              () => "closed" as const,
+              () => "failed" as const,
+            ),
+          new Promise<"timed-out">((resolve) => {
+            bridgeCloseTimerId = this.dependencies.timers.setTimeout(
+              () => resolve("timed-out"),
+              5_000,
+            );
+          }),
+        ]);
+        if (outcome === "failed") {
+          this.safeLog({ event: "g2-bridge-close-failed" });
+        } else if (outcome === "timed-out") {
+          bridgeCloseTimedOut = true;
+          this.safeLog({ event: "g2-bridge-close-timeout" });
+        }
+      } finally {
+        if (bridgeCloseTimerId !== undefined) {
+          this.dependencies.timers.clearTimeout(bridgeCloseTimerId);
+        }
       }
     }
     try {
@@ -342,6 +366,9 @@ export class G2RuntimeComposition {
       ok: false as const,
       reason: "controller-stopped",
     };
+    if (result.ok && bridgeCloseTimedOut) {
+      result = { ok: false, reason: "g2-bridge-close-timeout" };
+    }
     if (this.validationSucceeded) {
       try {
         await this.dependencies.finalizeEvidence({
@@ -359,6 +386,7 @@ export class G2RuntimeComposition {
     this.safeLog({
       event: "g2-runtime-cleanup",
       ok: result.ok,
+      failureReason: result.ok ? null : result.reason,
       completedLoops: this.completedReset ? 1 : 0,
       maxDriftMs: this.maxDriftMs,
       placementRecorded: this.placementReceipt !== undefined,

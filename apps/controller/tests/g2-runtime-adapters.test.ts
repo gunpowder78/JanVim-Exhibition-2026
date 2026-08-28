@@ -138,6 +138,7 @@ function createAdapterHarness(
     | ((details: { url: string }, callback: (result: { cancel: boolean }) => void) => void)
     | undefined;
   let evidenceRecord: unknown;
+  const sentRendererEvents: Array<{ channel: string; payload: unknown }> = [];
 
   class FakeWebContents extends EventEmitter {
     public readonly session = {
@@ -158,7 +159,9 @@ function createAdapterHarness(
         },
       },
     };
-    public readonly send = vi.fn();
+    public readonly send = vi.fn((channel: string, payload: unknown) => {
+      sentRendererEvents.push({ channel, payload });
+    });
     public readonly setWindowOpenHandler = vi.fn(() => ({ action: "deny" as const }));
 
     public override on(eventName: string | symbol, listener: (...args: never[]) => void): this {
@@ -350,10 +353,16 @@ function createAdapterHarness(
     get evidenceRecord() {
       return evidenceRecord;
     },
+    get sentRendererEvents() {
+      return sentRendererEvents;
+    },
     get confirmedMapSha256() {
       return createHash("sha256")
         .update(files.get(displayMapPath)!)
         .digest("hex");
+    },
+    replaceDisplayMapBytes: (value: Uint8Array) => {
+      files.set(displayMapPath, Buffer.from(value));
     },
   };
 }
@@ -461,6 +470,18 @@ describe("real G2 runtime adapter boundaries", () => {
     }
   });
 
+  it("delivers controller events on the exact channel consumed by the preload", async () => {
+    const harness = createAdapterHarness([]);
+    const secondary = await harness.dependencies.openSecondary(harness.secondaryDisplay);
+    const ready = { schema: 1, type: "controller-status", state: "ready" } as const;
+
+    secondary.send(ready);
+
+    expect(harness.sentRendererEvents).toEqual([
+      { channel: "janvim-exhibition:show-event", payload: ready },
+    ]);
+  });
+
   it("places the exact child and returns its validated receipt for evidence", async () => {
     const harness = createAdapterHarness([]);
     const result = await harness.dependencies.placeJanVim(4242, {
@@ -495,6 +516,7 @@ describe("real G2 runtime adapter boundaries", () => {
 
   it("finalizes evidence from the verified lock, confirmed map, and explicit snapshot", async () => {
     const harness = createAdapterHarness([]);
+    await expect(harness.dependencies.validate()).resolves.toEqual({ ok: true });
     await harness.dependencies.finalizeEvidence(validFinalizationSnapshot());
     expect(harness.evidenceRecord).toMatchObject({
       schema: 1,
@@ -512,8 +534,37 @@ describe("real G2 runtime adapter boundaries", () => {
           "224b3457d89fbc6cf946359683632f29f9262bae08b6f0d2e3043a3a7a6d83b3",
         layoutEngine: "dynamic",
       },
+      content: {
+        manifestSha256: "9a39ee522e556860053468854b0858bc1fafd8b7a1ca08ddff57d0371b717b35",
+        poemSha256: "b699de273f5bbaedb08241495f52ce863d3e8e1851275ce3b6251484d75190a8",
+        contentRevision: "20260828-0002",
+      },
     });
     expect(JSON.stringify(harness.evidenceRecord)).not.toContain(harness.bridgeToken);
     expect(JSON.stringify(harness.evidenceRecord)).not.toContain("C:\\Users\\operator");
+  });
+
+  it("rejects a display-map byte change after runtime validation", async () => {
+    const harness = createAdapterHarness([]);
+    await expect(harness.dependencies.validate()).resolves.toEqual({ ok: true });
+    const validatedMapSha256 = harness.confirmedMapSha256;
+    harness.replaceDisplayMapBytes(Buffer.from(`${JSON.stringify(confirmedMap, null, 2)}\n`));
+    expect(harness.confirmedMapSha256).not.toBe(validatedMapSha256);
+
+    await expect(
+      harness.dependencies.finalizeEvidence(validFinalizationSnapshot()),
+    ).rejects.toThrow(/display-map.*changed/i);
+    expect(harness.evidenceRecord).toBeUndefined();
+  });
+
+  it("refuses display routing when map bytes change after validation", async () => {
+    const harness = createAdapterHarness([]);
+    await expect(harness.dependencies.validate()).resolves.toEqual({ ok: true });
+    harness.replaceDisplayMapBytes(Buffer.from(`${JSON.stringify(confirmedMap, null, 2)}\n`));
+
+    await expect(harness.dependencies.routeDisplays()).resolves.toEqual({
+      state: "ready",
+      reason: "display-map-invalid",
+    });
   });
 });

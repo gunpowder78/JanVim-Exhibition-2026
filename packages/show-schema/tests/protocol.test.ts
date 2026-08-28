@@ -49,6 +49,34 @@ describe("agent protocol schema", () => {
     expect(() => parseAgentCommand(goodCommand, "localhost")).toThrowError(/127\.0\.0\.1/);
   });
 
+  it("rejects unknown fields inside every closed action and ACK cursor", () => {
+    const actions = [
+      { type: "prepare", poem: "白日依山尽", expectedSha256: "b".repeat(64) },
+      { type: "status" },
+      { type: "move", keys: "j", repeat: 1 },
+      { type: "insert", text: "x", charsPerSecond: 20 },
+      { type: "select", rangeId: "verse-1" },
+      { type: "replace", rangeId: "verse-1", text: "x" },
+      { type: "escape" },
+      { type: "reset" },
+    ];
+    for (const action of actions) {
+      expect(() =>
+        parseAgentCommand(
+          { ...goodCommand, action: { ...action, unexpected: true } },
+          "127.0.0.1",
+        ),
+      ).toThrowError(/unrecognized|unknown/i);
+    }
+
+    expect(() =>
+      parseAgentAck({
+        ...goodAck,
+        cursor: { ...goodAck.cursor, unexpected: true },
+      }),
+    ).toThrowError(/unrecognized|unknown/i);
+  });
+
   it("rejects command text that looks like editor shell or ex commands", () => {
     const commandWithDangerousText = {
       ...goodCommand,

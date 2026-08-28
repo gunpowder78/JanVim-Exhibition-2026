@@ -124,6 +124,16 @@ if (-not (Test-G2PathEqual -Left ([IO.Path]::GetDirectoryName($resolvedDisplayMa
     throw 'display-map-must-be-direct-child'
 }
 
+$electronCommand = Join-Path $repositoryRoot 'node_modules\.bin\electron.cmd'
+$controllerPackage = Join-Path $repositoryRoot 'apps\controller'
+$compiledEntry = Join-Path $controllerPackage 'dist\src\electron-main.js'
+$verifyRuntime = Join-Path $repositoryRoot 'scripts\verify-runtime.ps1'
+foreach ($requiredFile in @($electronCommand, $compiledEntry, $verifyRuntime)) {
+    if (-not (Test-Path -LiteralPath $requiredFile -PathType Leaf)) {
+        throw "required-launch-file-missing:$requiredFile"
+    }
+}
+
 if ($Mode -eq 'Capture') {
     if (Test-Path -LiteralPath $resolvedRehearsalRoot) {
         throw 'capture-rehearsal-root-already-exists'
@@ -171,16 +181,6 @@ if ($Mode -in @('ValidateOnly', 'Run')) {
 }
 elseif (-not [string]::IsNullOrEmpty($RunId)) {
     throw 'run-id-unexpected-for-mode'
-}
-
-$electronCommand = Join-Path $repositoryRoot 'node_modules\.bin\electron.cmd'
-$controllerPackage = Join-Path $repositoryRoot 'apps\controller'
-$compiledEntry = Join-Path $controllerPackage 'dist\src\electron-main.js'
-$verifyRuntime = Join-Path $repositoryRoot 'scripts\verify-runtime.ps1'
-foreach ($requiredFile in @($electronCommand, $compiledEntry, $verifyRuntime)) {
-    if (-not (Test-Path -LiteralPath $requiredFile -PathType Leaf)) {
-        throw "required-launch-file-missing:$requiredFile"
-    }
 }
 
 if ($Mode -in @('ValidateOnly', 'Run')) {

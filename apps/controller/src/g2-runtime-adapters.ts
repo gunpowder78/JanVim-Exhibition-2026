@@ -64,6 +64,7 @@ import {
   type OneLoopTimerAdapter,
   type OneLoopTimerHandle,
 } from "./one-loop-driver.js";
+import { SHOW_EVENT_CHANNEL } from "./preload.js";
 import {
   parseConfirmedRehearsalDisplayMap,
   parseRehearsalDisplayCatalog,
@@ -195,6 +196,16 @@ interface NormalizedRuntimeHost {
 
 type RuntimeCommand = Extract<G2Command, { mode: "ValidateOnly" | "Run" }>;
 
+interface ValidatedRuntimeInputs {
+  artifactLockBytes: Buffer;
+  displayMapBytes: Buffer;
+  displayMap: ReturnType<typeof parseConfirmedRehearsalDisplayMap>;
+  showConfigBytes: Buffer;
+  manifestBytes: Buffer;
+  manifest: ShowManifest;
+  poemBytes: Buffer;
+}
+
 const REMOTE_REQUEST_FILTER = {
   urls: ["http://*/*", "https://*/*", "ws://*/*", "wss://*/*"],
 };
@@ -225,6 +236,12 @@ export function createG2RuntimeDependencies(
   let closeExitCode: number | null = null;
   let startedChild: G2SpawnedChild | undefined;
   let detachChildOutput: (() => void) | undefined;
+  let validatedInputs: ValidatedRuntimeInputs | undefined;
+
+  const requireValidatedInputs = (): ValidatedRuntimeInputs => {
+    if (validatedInputs === undefined) throw new Error("runtime-inputs-not-validated");
+    return validatedInputs;
+  };
 
   const settleChildOutput = (): void => {
     if (outputSettled) return;
@@ -262,19 +279,27 @@ export function createG2RuntimeDependencies(
         return { ok: false, reason: "runtime-verification-failed" };
       }
       try {
-        validateStaticRuntimeInputs(host, paths, command.displayMapPath);
+        validatedInputs = validateStaticRuntimeInputs(host, paths, command.displayMapPath);
         return { ok: true };
       } catch {
+        validatedInputs = undefined;
         return { ok: false, reason: "runtime-input-invalid" };
       }
     },
 
     routeDisplays: async (): Promise<DisplayRoute> => {
       try {
-        const map = parseConfirmedRehearsalDisplayMap(
-          JSON.parse(host.readFile(command.displayMapPath).toString("utf8")),
+        const inputs = requireValidatedInputs();
+        readUnchangedFile(
+          host,
+          command.displayMapPath,
+          inputs.displayMapBytes,
+          "display-map",
         );
-        return routeDisplays(normalizeRuntimeDisplays(host.screen.getAllDisplays()), map);
+        return routeDisplays(
+          normalizeRuntimeDisplays(host.screen.getAllDisplays()),
+          inputs.displayMap,
+        );
       } catch {
         return { state: "ready", reason: "display-map-invalid" };
       }
@@ -426,8 +451,9 @@ export function createG2RuntimeDependencies(
       }),
 
     createLoop: (bridge, secondary) => {
-      const manifest = readManifest(host, paths.manifest);
-      const poem = host.readFile(paths.poem).toString("utf8");
+      const inputs = requireValidatedInputs();
+      const manifest = inputs.manifest;
+      const poem = inputs.poemBytes.toString("utf8");
       let resetNumber = 0;
       return new DeterministicShowLoop({
         manifest,
@@ -450,7 +476,7 @@ export function createG2RuntimeDependencies(
     },
 
     createDriver: (loop, callbacks) => {
-      const manifest = readManifest(host, paths.manifest);
+      const manifest = requireValidatedInputs().manifest;
       return new OneLoopDriver({
         runtime: loop,
         timers: host.timers,
@@ -495,16 +521,42 @@ export function createG2RuntimeDependencies(
     },
 
     finalizeEvidence: async (input: G2EvidenceFinalization) => {
-      const lock = readArtifactLock(host, paths.artifactLock);
-      const mapBytes = host.readFile(command.displayMapPath);
-      const map = parseConfirmedRehearsalDisplayMap(
-        JSON.parse(mapBytes.toString("utf8")),
+      const inputs = requireValidatedInputs();
+      readUnchangedFile(
+        host,
+        paths.artifactLock,
+        inputs.artifactLockBytes,
+        "artifact-lock",
       );
-      const configBytes = host.readFile(paths.showConfig);
+      const lock = parseArtifactLockBytes(inputs.artifactLockBytes);
+      const mapBytes = readUnchangedFile(
+        host,
+        command.displayMapPath,
+        inputs.displayMapBytes,
+        "display-map",
+      );
+      const configBytes = readUnchangedFile(
+        host,
+        paths.showConfig,
+        inputs.showConfigBytes,
+        "show-config",
+      );
       if (sha256(configBytes) !== lock.configSha256) {
         throw new Error("show-config-hash-mismatch");
       }
-      const manifest = readManifest(host, paths.manifest);
+      const manifestBytes = readUnchangedFile(
+        host,
+        paths.manifest,
+        inputs.manifestBytes,
+        "show-manifest",
+      );
+      const poemBytes = readUnchangedFile(
+        host,
+        paths.poem,
+        inputs.poemBytes,
+        "poem",
+      );
+      const manifest = inputs.manifest;
       const record: G2EvidenceRecord = {
         schema: 1,
         runId: command.runId,
@@ -515,8 +567,8 @@ export function createG2RuntimeDependencies(
         displayMap: {
           path: command.displayMapPath,
           sha256: sha256(mapBytes),
-          primary: map.primary,
-          secondary: map.secondary,
+          primary: inputs.displayMap.primary,
+          secondary: inputs.displayMap.secondary,
         },
         artifact: {
           tag: lock.tag,
@@ -527,6 +579,11 @@ export function createG2RuntimeDependencies(
           coreSha256: lock.coreSha256,
           configSha256: lock.configSha256,
           layoutEngine: lock.layoutEngine,
+        },
+        content: {
+          manifestSha256: sha256(manifestBytes),
+          poemSha256: sha256(poemBytes),
+          contentRevision: manifest.contentRevision,
         },
         placement:
           input.placement === null
@@ -634,7 +691,7 @@ async function openGuardedSecondary(
 
   return {
     send: (event: RendererEvent) => {
-      if (!exactWindow.isDestroyed()) exactWindow.webContents.send("show:event", event);
+      if (!exactWindow.isDestroyed()) exactWindow.webContents.send(SHOW_EVENT_CHANNEL, event);
     },
     onDestroyed: (listener) => {
       exactWindow.on("closed", listener);
@@ -762,20 +819,41 @@ function validateStaticRuntimeInputs(
   host: NormalizedRuntimeHost,
   paths: ReturnType<typeof runtimePaths>,
   displayMapPath: string,
-): void {
-  const lock = readArtifactLock(host, paths.artifactLock);
-  const config = host.readFile(paths.showConfig);
-  if (sha256(config) !== lock.configSha256) throw new Error("show-config-hash-mismatch");
-  parseConfirmedRehearsalDisplayMap(
-    JSON.parse(host.readFile(displayMapPath).toString("utf8")),
+): ValidatedRuntimeInputs {
+  const artifactLockBytes = host.readFile(paths.artifactLock);
+  const lock = parseArtifactLockBytes(artifactLockBytes);
+  const showConfigBytes = host.readFile(paths.showConfig);
+  if (sha256(showConfigBytes) !== lock.configSha256) {
+    throw new Error("show-config-hash-mismatch");
+  }
+  const displayMapBytes = host.readFile(displayMapPath);
+  const displayMap = parseConfirmedRehearsalDisplayMap(
+    JSON.parse(displayMapBytes.toString("utf8")),
   );
-  const manifest = readManifest(host, paths.manifest);
-  const poem = host.readFile(paths.poem);
-  if (sha256(poem) !== manifest.poemSha256) throw new Error("poem-hash-mismatch");
+  const manifestBytes = host.readFile(paths.manifest);
+  const manifest = parseShowManifest(JSON.parse(manifestBytes.toString("utf8")));
+  const poemBytes = host.readFile(paths.poem);
+  if (sha256(poemBytes) !== manifest.poemSha256) throw new Error("poem-hash-mismatch");
+  return {
+    artifactLockBytes: Buffer.from(artifactLockBytes),
+    displayMapBytes: Buffer.from(displayMapBytes),
+    displayMap,
+    showConfigBytes: Buffer.from(showConfigBytes),
+    manifestBytes: Buffer.from(manifestBytes),
+    manifest,
+    poemBytes: Buffer.from(poemBytes),
+  };
 }
 
-function readManifest(host: NormalizedRuntimeHost, path: string): ShowManifest {
-  return parseShowManifest(JSON.parse(host.readFile(path).toString("utf8")));
+function readUnchangedFile(
+  host: Pick<NormalizedRuntimeHost, "readFile">,
+  path: string,
+  expected: Buffer,
+  label: string,
+): Buffer {
+  const current = host.readFile(path);
+  if (!current.equals(expected)) throw new Error(`${label}-changed-during-run`);
+  return current;
 }
 
 function createRunLogger(host: NormalizedRuntimeHost, path: string): BoundedLog {
@@ -952,5 +1030,9 @@ const artifactLockSchema = z
   .strict();
 
 function readArtifactLock(host: Pick<NormalizedRuntimeHost, "readFile">, path: string) {
-  return artifactLockSchema.parse(JSON.parse(host.readFile(path).toString("utf8")));
+  return parseArtifactLockBytes(host.readFile(path));
+}
+
+function parseArtifactLockBytes(value: Uint8Array) {
+  return artifactLockSchema.parse(JSON.parse(Buffer.from(value).toString("utf8")));
 }
