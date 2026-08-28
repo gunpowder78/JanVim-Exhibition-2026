@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runInNewContext } from "node:vm";
@@ -207,10 +207,20 @@ describe("secondary preload contract", () => {
     ) as { scripts?: Record<string, string> };
     const controllerPackage = JSON.parse(
       readFileSync(join(process.cwd(), "apps", "controller", "package.json"), "utf8"),
-    ) as { main?: string; scripts?: Record<string, string> };
+    ) as { scripts?: Record<string, string> };
 
     expect(rootPackage.scripts?.build).toContain("apps/controller/vite.preload.config.ts");
     expect(controllerPackage.scripts?.build).toContain("vite.preload.config.ts");
-    expect(controllerPackage.main).toBe("dist/src/main.js");
+  });
+
+  it("points the controller package at the sole compiled Electron entry", () => {
+    const repositoryRoot = process.cwd();
+    const packageJson = JSON.parse(
+      readFileSync(join(repositoryRoot, "apps", "controller", "package.json"), "utf8"),
+    ) as { main: string };
+    expect(packageJson.main).toBe("dist/src/electron-main.js");
+    expect(
+      existsSync(join(repositoryRoot, "apps", "controller", "src", "electron-main.ts")),
+    ).toBe(true);
   });
 });
