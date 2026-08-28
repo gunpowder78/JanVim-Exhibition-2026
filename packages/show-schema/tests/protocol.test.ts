@@ -2,6 +2,7 @@ import { Buffer } from "node:buffer";
 
 import { describe, expect, it } from "vitest";
 
+import * as showSchema from "../src/index";
 import {
   parseAgentCommand,
   parseAgentCommandFromBytes,
@@ -102,5 +103,33 @@ describe("agent protocol schema", () => {
     const token = "fixture-token-2026-0001";
     expect(redactToken(token)).toHaveLength(8);
     expect(redactToken(token)).toBe("559b325e");
+  });
+
+  it("accepts only bounded controller status events", () => {
+    const parseRendererEvent = (
+      showSchema as typeof showSchema & {
+        parseRendererEvent?: (value: unknown) => unknown;
+      }
+    ).parseRendererEvent;
+    expect(parseRendererEvent).toBeTypeOf("function");
+
+    expect(
+      parseRendererEvent?.({ schema: 1, type: "controller-status", state: "ready" }),
+    ).toEqual({ schema: 1, type: "controller-status", state: "ready" });
+    expect(() =>
+      parseRendererEvent?.({
+        schema: 1,
+        type: "controller-status",
+        state: "blocked",
+        reason: "x".repeat(65),
+      }),
+    ).toThrow();
+    expect(() =>
+      parseRendererEvent?.({
+        schema: 1,
+        type: "controller-status",
+        state: "unknown",
+      }),
+    ).toThrow();
   });
 });

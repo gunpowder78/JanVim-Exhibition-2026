@@ -71,11 +71,26 @@ export function createReadyPage(
   const readyTitle = document.createElement("h1");
   readyTitle.textContent = "SECONDARY SHOW SURFACE";
   const readyStatus = document.createElement("p");
+  readyStatus.dataset.readyStatus = "";
   readyStatus.textContent = "CONTROLLER STANDBY / WAITING FOR CONTROLLER CHECKS";
-  ready.append(readyTitle, readyStatus);
+  const startButton = document.createElement("button");
+  startButton.type = "button";
+  startButton.dataset.action = "start-show";
+  startButton.textContent = "START 90s REHEARSAL";
+  startButton.disabled = true;
+  ready.append(readyTitle, readyStatus, startButton);
 
   surface.append(header, workspace, keyRegion, p1Layer, ready);
   root.replaceChildren(surface);
 
-  return { ready, promptContent, responseContent, acceptance, keyOverlay, p1Layer };
+  return {
+    ready,
+    readyStatus,
+    startButton,
+    promptContent,
+    responseContent,
+    acceptance,
+    keyOverlay,
+    p1Layer,
+  };
 }

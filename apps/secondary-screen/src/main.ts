@@ -1,11 +1,12 @@
-import type { Cue } from "@janvim-exhibition/show-schema";
+import type { RendererEvent } from "@janvim-exhibition/show-schema";
 
 import { sampleRendererFrameRate } from "./frame-rate-monitor";
 import { SecondarySceneController } from "./scene-controller";
 import "./styles.css";
 
 type SecondaryShowBridge = {
-  onShowEvent: (listener: (cue: Cue) => void) => () => void;
+  onShowEvent: (listener: (event: RendererEvent) => void) => () => void;
+  requestStart: () => void;
 };
 
 declare global {
@@ -22,9 +23,13 @@ if (root !== null) {
     measuredFps: 60,
   });
 
-  window.janvimExhibition?.onShowEvent((cue) => {
-    scene.apply(cue);
-  });
+  const bridge = window.janvimExhibition;
+  if (bridge !== undefined) {
+    bridge.onShowEvent((event) => {
+      scene.applyEvent(event);
+    });
+    scene.bindStartRequest(() => bridge.requestStart());
+  }
 
   void sampleRendererFrameRate({
     requestFrame: (callback) => window.requestAnimationFrame(callback),

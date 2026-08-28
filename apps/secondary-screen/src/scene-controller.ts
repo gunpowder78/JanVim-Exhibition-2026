@@ -1,4 +1,8 @@
-import type { Cue } from "@janvim-exhibition/show-schema";
+import type {
+  ControllerStatusEvent,
+  Cue,
+  RendererEvent,
+} from "@janvim-exhibition/show-schema";
 
 import { KeyOverlay } from "./key-overlay";
 import type {
@@ -19,7 +23,10 @@ export class SecondarySceneController {
   private readonly response: ResponseStream;
   private readonly keyOverlay: KeyOverlay;
   private readonly ready: HTMLElement;
+  private readonly readyStatus: HTMLElement;
+  private readonly startButton: HTMLButtonElement;
   private readonly p1Layer: HTMLElement;
+  private startRequested = false;
 
   public constructor(
     private readonly root: HTMLElement,
@@ -31,7 +38,28 @@ export class SecondarySceneController {
     this.response = new ResponseStream(elements.responseContent, elements.acceptance);
     this.keyOverlay = new KeyOverlay(elements.keyOverlay);
     this.ready = elements.ready;
+    this.readyStatus = elements.readyStatus;
+    this.startButton = elements.startButton;
     this.p1Layer = elements.p1Layer;
+  }
+
+  public applyEvent(event: RendererEvent): void {
+    if (isControllerStatusEvent(event)) {
+      this.applyStatus(event);
+      return;
+    }
+    this.apply(event);
+  }
+
+  public bindStartRequest(request: () => void): () => void {
+    const listener = (): void => {
+      if (this.startButton.disabled || this.startRequested) return;
+      this.startRequested = true;
+      this.startButton.disabled = true;
+      request();
+    };
+    this.startButton.addEventListener("click", listener);
+    return () => this.startButton.removeEventListener("click", listener);
   }
 
   public apply(cue: Cue): void {
@@ -86,6 +114,30 @@ export class SecondarySceneController {
     }
   }
 
+  private applyStatus(event: ControllerStatusEvent): void {
+    this.root.dataset.controllerState = event.state;
+    this.startButton.disabled = true;
+
+    switch (event.state) {
+      case "booting":
+        this.readyStatus.textContent = "CONTROLLER BOOTING / CHECKING RUNTIME";
+        return;
+      case "ready":
+        this.readyStatus.textContent = "CONTROLLER READY / LOCAL START ARMED";
+        this.startButton.disabled = this.startRequested;
+        return;
+      case "running":
+        this.readyStatus.textContent = "SHOW RUNNING / 90s REHEARSAL";
+        return;
+      case "blocked":
+        this.readyStatus.textContent = `BLOCKED / ${event.reason}`;
+        return;
+      case "complete-awaiting-close":
+        this.readyStatus.textContent = "RESET COMPLETE / CLOSE JANVIM WITH ALT+F4";
+        return;
+    }
+  }
+
   private showRunningScene(): void {
     this.ready.hidden = true;
     this.root.dataset.scene = "running";
@@ -100,6 +152,10 @@ export class SecondarySceneController {
     this.ready.hidden = false;
     this.root.dataset.scene = "ready";
   }
+}
+
+function isControllerStatusEvent(event: RendererEvent): event is ControllerStatusEvent {
+  return "type" in event && event.type === "controller-status";
 }
 
 function toPromptCue(cue: VisualCue): PromptCue {

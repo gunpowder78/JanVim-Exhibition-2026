@@ -2,48 +2,22 @@ import { createHash } from "node:crypto";
 import { TextDecoder } from "node:util";
 import { z } from "zod";
 
-export type EditorAction =
-  | { type: "move"; keys: "h" | "j" | "k" | "l" | "w" | "b" | "e" | "0" | "$" | "G"; repeat: number }
-  | { type: "insert"; text: string; charsPerSecond: number }
-  | { type: "select"; rangeId: string }
-  | { type: "replace"; rangeId: string; text: string }
-  | { type: "escape" }
-  | { type: "reset" };
+import {
+  editorActionSchema,
+  manifestCueSchema,
+} from "./renderer-event.js";
+import type { Cue, EditorAction } from "./renderer-event.js";
 
-export type CueTarget = "main" | "secondary" | "both";
-
-export type CueKind =
-  | "prompt"
-  | "token-stream"
-  | "formula"
-  | "matrix"
-  | "image"
-  | "editor-action"
-  | "key-overlay"
-  | "fade";
-
-export type EditorPayload = {
-  action: EditorAction;
-  displayKeys: string[];
-  semanticLabel: string;
-  critical: true;
-};
-
-export type Cue =
-  | {
-      id: string;
-      atMs: number;
-      target: CueTarget;
-      kind: Exclude<CueKind, "editor-action">;
-      payload: Record<string, unknown>;
-    }
-  | {
-      id: string;
-      atMs: number;
-      target: CueTarget;
-      kind: "editor-action";
-      payload: EditorPayload;
-    };
+export { parseRendererEvent } from "./renderer-event.js";
+export type {
+  ControllerStatusEvent,
+  Cue,
+  CueKind,
+  CueTarget,
+  EditorAction,
+  EditorPayload,
+  RendererEvent,
+} from "./renderer-event.js";
 
 export type ShowManifest = {
   schema: 1;
@@ -96,72 +70,7 @@ export type AgentAck = {
 const hashRegex = /^[0-9a-f]{64}$/;
 const tokenRegex = /^[A-Za-z0-9._-]{16,}$/;
 
-const nonCommandText = z
-  .string()
-  .min(0)
-  .refine(
-    (value) => !value.startsWith(":") && !value.startsWith("!"),
-    "forbidden command prefix is not allowed",
-  );
-
-const safeInsert = z
-  .string()
-  .refine((value) => Buffer.byteLength(value, "utf8") <= 512, "insert text must be at most 512 bytes")
-  .pipe(nonCommandText);
-
 const sha256Schema = z.string().regex(hashRegex, "hash must be 64 lowercase hexadecimal");
-
-const editorActionSchema = z.discriminatedUnion("type", [
-  z.object({
-    type: z.literal("move"),
-    keys: z.enum(["h", "j", "k", "l", "w", "b", "e", "0", "$", "G"]),
-    repeat: z.number().int().nonnegative(),
-  }),
-  z.object({
-    type: z.literal("insert"),
-    text: safeInsert,
-    charsPerSecond: z.number().nonnegative(),
-  }),
-  z.object({ type: z.literal("select"), rangeId: z.string().min(1) }),
-  z.object({
-    type: z.literal("replace"),
-    rangeId: z.string().min(1),
-    text: safeInsert,
-  }),
-  z.object({ type: z.literal("escape") }),
-  z.object({ type: z.literal("reset") }),
-]);
-
-const editorPayloadSchema = z.object({
-  action: editorActionSchema,
-  displayKeys: z.array(z.string()).min(1),
-  semanticLabel: z.string().min(1),
-  critical: z.literal(true),
-}).strict();
-
-const cueTargetSchema = z.enum(["main", "secondary", "both"]);
-const cueNonEditorKindSchema = z.enum(["prompt", "token-stream", "formula", "matrix", "image", "key-overlay", "fade"]);
-
-const manifestEditorCueSchema = z.object({
-  id: z.string().min(1),
-  atMs: z.number().int().nonnegative(),
-  target: cueTargetSchema,
-  kind: z.literal("editor-action"),
-  payload: editorPayloadSchema,
-}).strict();
-
-const manifestNonEditorCueSchema = z.object({
-  id: z.string().min(1),
-  atMs: z.number().int().nonnegative(),
-  target: cueTargetSchema,
-  kind: cueNonEditorKindSchema,
-  payload: z.record(z.string(), z.unknown()),
-}).strict();
-
-const manifestCueSchema = z.discriminatedUnion("kind", [
-  manifestEditorCueSchema,
-  manifestNonEditorCueSchema,
-]);
 
 const manifestSchema = z
   .object({

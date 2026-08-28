@@ -226,6 +226,7 @@ body {
   place-content: center;
   gap: 1.1rem;
   background: #071014;
+  cursor: default;
   text-align: center;
 }
 
@@ -244,6 +245,30 @@ body {
   font-family: "Cascadia Mono", "Microsoft YaHei UI", monospace;
   font-size: clamp(18px, 1.4vw, 28px);
   letter-spacing: 0.12em;
+}
+
+.ready-page button {
+  justify-self: center;
+  min-width: min(30rem, 72vw);
+  margin-top: 1.2rem;
+  padding: 0.85em 1.4em;
+  border: 1px solid #6e9da1;
+  background: #102126;
+  color: #e8ece8;
+  cursor: pointer;
+  font-family: "Cascadia Mono", "Microsoft YaHei UI", monospace;
+  font-size: clamp(18px, 1.4vw, 28px);
+  letter-spacing: 0.08em;
+}
+
+.ready-page button:disabled {
+  opacity: 0.38;
+  cursor: not-allowed;
+}
+
+.ready-page button:focus-visible {
+  outline: 3px solid #b7472a;
+  outline-offset: 5px;
 }
 
 .secondary-screen[data-scene="black"] .show-header,

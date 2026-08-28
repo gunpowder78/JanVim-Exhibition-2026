@@ -9,6 +9,7 @@ import type {
   CueKind,
   CueTarget,
   EditorAction,
+  RendererEvent,
   ShowManifest,
 } from "../../../packages/show-schema/src/index.ts";
 import { SecondarySceneController } from "../src/scene-controller.ts";
@@ -85,6 +86,68 @@ describe("secondary scene controller", () => {
 
     expect(readyText).toContain("WAITING FOR CONTROLLER CHECKS");
     expect(readyText).not.toContain("LOCAL CONTENT READY");
+  });
+
+  it("arms one local Start request only after controller-ready status", () => {
+    const { root, controller } = makeController();
+    const statusController = controller as SecondarySceneController & {
+      applyEvent?: (event: RendererEvent) => void;
+      bindStartRequest?: (request: () => void) => () => void;
+    };
+    expect(statusController.applyEvent).toBeTypeOf("function");
+    expect(statusController.bindStartRequest).toBeTypeOf("function");
+
+    let requests = 0;
+    const unbind = statusController.bindStartRequest?.(() => {
+      requests += 1;
+    });
+    const button = root.querySelector<HTMLButtonElement>("[data-action='start-show']");
+    expect(button).toBeInstanceOf(HTMLButtonElement);
+
+    expect(button?.disabled).toBe(true);
+    button?.click();
+    expect(requests).toBe(0);
+
+    statusController.applyEvent?.({
+      schema: 1,
+      type: "controller-status",
+      state: "ready",
+    });
+    expect(button?.disabled).toBe(false);
+    button?.click();
+    button?.click();
+    expect(requests).toBe(1);
+    expect(button?.disabled).toBe(true);
+
+    statusController.applyEvent?.({
+      schema: 1,
+      type: "controller-status",
+      state: "complete-awaiting-close",
+    });
+    expect(button?.disabled).toBe(true);
+    unbind?.();
+  });
+
+  it("renders only the stable blocked reason and never arms Start", () => {
+    const { root, controller } = makeController();
+    const statusController = controller as SecondarySceneController & {
+      applyEvent?: (event: RendererEvent) => void;
+    };
+    expect(statusController.applyEvent).toBeTypeOf("function");
+
+    statusController.applyEvent?.({
+      schema: 1,
+      type: "controller-status",
+      state: "blocked",
+      reason: "agent-not-ready",
+    });
+
+    expect(root.querySelector("[data-ready-status]")?.textContent).toBe(
+      "BLOCKED / agent-not-ready",
+    );
+    expect(root.querySelector<HTMLButtonElement>("[data-action='start-show']")?.disabled).toBe(
+      true,
+    );
   });
 
   it("keeps fixed Prompt and Result region nodes while token text grows", () => {

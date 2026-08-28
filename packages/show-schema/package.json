@@ -5,6 +5,16 @@
   "type": "module",
   "main": "src/index.ts",
   "types": "src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./renderer-event": {
+      "types": "./src/renderer-event.ts",
+      "default": "./src/renderer-event.ts"
+    }
+  },
   "scripts": {
     "build": "tsc -b",
     "test": "vitest run"

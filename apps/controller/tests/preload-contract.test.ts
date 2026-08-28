@@ -6,7 +6,7 @@ import { runInNewContext } from "node:vm";
 import { describe, expect, it } from "vitest";
 import { build } from "vite";
 
-import type { Cue } from "../../../packages/show-schema/src/index";
+import type { Cue, RendererEvent } from "../../../packages/show-schema/src/index";
 import {
   PRELOAD_GLOBAL,
   REQUEST_START_CHANNEL,
@@ -70,6 +70,63 @@ describe("secondary preload contract", () => {
     expect(ipc.listeners.get(SHOW_EVENT_CHANNEL)?.size).toBe(0);
     ipc.emit(SHOW_EVENT_CHANNEL, cue);
     expect(received).toEqual([cue]);
+  });
+
+  it("delivers a valid controller status and drops malformed status payloads", () => {
+    const ipc = new FakeIpc();
+    const api = createPreloadApi(ipc);
+    const received: RendererEvent[] = [];
+    api.onShowEvent((value) => received.push(value));
+
+    const ready = { schema: 1, type: "controller-status", state: "ready" } as const;
+    ipc.emit(SHOW_EVENT_CHANNEL, ready);
+    ipc.emit(SHOW_EVENT_CHANNEL, {
+      schema: 1,
+      type: "controller-status",
+      state: "blocked",
+      reason: "x".repeat(65),
+    });
+    ipc.emit(SHOW_EVENT_CHANNEL, {
+      schema: 1,
+      type: "controller-status",
+      state: "remote-control",
+    });
+
+    expect(received).toEqual([ready]);
+  });
+
+  it("drops renderer editor actions with unbounded repeat or input rate", () => {
+    const ipc = new FakeIpc();
+    const api = createPreloadApi(ipc);
+    const received: RendererEvent[] = [];
+    api.onShowEvent((value) => received.push(value));
+
+    ipc.emit(SHOW_EVENT_CHANNEL, {
+      id: "move-too-many",
+      atMs: 0,
+      target: "both",
+      kind: "editor-action",
+      payload: {
+        action: { type: "move", keys: "j", repeat: 257 },
+        displayKeys: ["j"],
+        semanticLabel: "bounded move",
+        critical: true,
+      },
+    });
+    ipc.emit(SHOW_EVENT_CHANNEL, {
+      id: "insert-too-fast",
+      atMs: 0,
+      target: "both",
+      kind: "editor-action",
+      payload: {
+        action: { type: "insert", text: "x", charsPerSecond: 1_001 },
+        displayKeys: ["i"],
+        semanticLabel: "bounded insert",
+        critical: true,
+      },
+    });
+
+    expect(received).toEqual([]);
   });
 
   it("sends only a fixed local start request with no caller-controlled payload", () => {
