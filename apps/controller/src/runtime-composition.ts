@@ -6,6 +6,7 @@ import type {
 } from "@janvim-exhibition/show-schema";
 
 import type { DisplayRoute, Rectangle, RuntimeDisplay } from "./display-router.js";
+import type { G2ShutdownEvidence } from "./g2-evidence.js";
 import {
   ShowController,
   type DeterministicShowLoop,
@@ -17,6 +18,15 @@ import type {
 import type { WindowPlacementReceipt } from "./window-placer.js";
 
 export type G2RunResult = { ok: true } | { ok: false; reason: string };
+
+export interface G2EvidenceFinalization {
+  result: G2RunResult;
+  placement: WindowPlacementReceipt | null;
+  completedLoops: 0 | 1;
+  maxDriftMs: number;
+  resetRestoredPoem: boolean;
+  shutdown: G2ShutdownEvidence | null;
+}
 
 export interface G2BridgeHandle {
   host: "127.0.0.1";
@@ -70,7 +80,8 @@ export interface G2RuntimeDependencies {
   log(event: Record<string, unknown>): void;
   classifyShutdown(
     exitCode: number | null,
-  ): Promise<{ natural: boolean; reason: string }>;
+  ): Promise<G2ShutdownEvidence>;
+  finalizeEvidence(input: G2EvidenceFinalization): Promise<void>;
 }
 
 export class G2RuntimeComposition {
@@ -96,7 +107,9 @@ export class G2RuntimeComposition {
   private childKillRequested = false;
   private completedReset = false;
   private manualCloseExpired = false;
+  private validationSucceeded = false;
   private maxDriftMs = 0;
+  private shutdownEvidence: G2ShutdownEvidence | null = null;
   public readonly completion: Promise<G2RunResult>;
 
   public constructor(private readonly dependencies: G2RuntimeDependencies) {
@@ -107,7 +120,11 @@ export class G2RuntimeComposition {
       this.resolveCompletion = resolve;
     });
     this.controller = new ShowController({
-      validateManifestsAndHashes: () => this.dependencies.validate(),
+      validateManifestsAndHashes: async () => {
+        const result = await this.dependencies.validate();
+        if (result.ok) this.validationSucceeded = true;
+        return result;
+      },
       routeDisplays: () => this.dependencies.routeDisplays(),
       openSecondaryReady: async (display) => {
         this.secondary = await this.dependencies.openSecondary(display);
@@ -215,6 +232,18 @@ export class G2RuntimeComposition {
     if (this.childClosed) return;
     this.childClosed = true;
     this.clearManualCloseTimer();
+    this.clearChildCleanupTimer();
+
+    try {
+      this.shutdownEvidence = await this.dependencies.classifyShutdown(exitCode);
+    } catch {
+      if (this.terminalResult !== undefined) {
+        await this.finalizeCleanup();
+      } else {
+        await this.fail("janvim-shutdown-classification-failed");
+      }
+      return;
+    }
 
     if (this.terminalResult !== undefined) {
       await this.finalizeCleanup();
@@ -229,17 +258,10 @@ export class G2RuntimeComposition {
       return;
     }
 
-    let classification: { natural: boolean; reason: string };
-    try {
-      classification = await this.dependencies.classifyShutdown(exitCode);
-    } catch {
-      await this.fail("janvim-shutdown-classification-failed");
-      return;
-    }
-    if (classification.natural) {
+    if (this.shutdownEvidence.natural) {
       await this.requestTerminal({ ok: true });
     } else {
-      await this.fail(classification.reason);
+      await this.fail(this.shutdownEvidence.reason);
     }
   }
 
@@ -270,12 +292,24 @@ export class G2RuntimeComposition {
         }
       }
       this.childCleanupTimerId ??= this.dependencies.timers.setTimeout(
-        () => void this.finalizeCleanup(),
+        () => void this.onChildCleanupDeadline(),
         5_000,
       );
       return;
     }
     void this.finalizeCleanup();
+  }
+
+  private async onChildCleanupDeadline(): Promise<void> {
+    if (this.cleanupStarted) return;
+    if (this.shutdownEvidence === null) {
+      try {
+        this.shutdownEvidence = await this.dependencies.classifyShutdown(null);
+      } catch {
+        // Evidence records a null shutdown when no settled child snapshot is available.
+      }
+    }
+    await this.finalizeCleanup();
   }
 
   private async finalizeCleanup(): Promise<void> {
@@ -304,10 +338,24 @@ export class G2RuntimeComposition {
       this.safeLog({ event: "g2-secondary-close-failed" });
     }
 
-    const result = this.terminalResult ?? {
+    let result: G2RunResult = this.terminalResult ?? {
       ok: false as const,
       reason: "controller-stopped",
     };
+    if (this.validationSucceeded) {
+      try {
+        await this.dependencies.finalizeEvidence({
+          result,
+          placement: this.placementReceipt ?? null,
+          completedLoops: this.completedReset ? 1 : 0,
+          maxDriftMs: this.maxDriftMs,
+          resetRestoredPoem: this.completedReset,
+          shutdown: this.shutdownEvidence,
+        });
+      } catch {
+        result = { ok: false, reason: "g2-evidence-write-failed" };
+      }
+    }
     this.safeLog({
       event: "g2-runtime-cleanup",
       ok: result.ok,

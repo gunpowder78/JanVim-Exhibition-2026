@@ -8,6 +8,7 @@ import type {
 } from "@janvim-exhibition/show-schema";
 
 import type { RuntimeDisplay } from "../src/display-router.ts";
+import type { G2ShutdownEvidence } from "../src/g2-evidence.ts";
 import type { DeterministicShowLoop, ShowController } from "../src/main.ts";
 import type { OneLoopDriver, OneLoopTimerHandle } from "../src/one-loop-driver.ts";
 import {
@@ -55,6 +56,7 @@ type FailureStage = "validate" | "route-displays" | "place-janvim" | "prepare-lo
 interface HarnessOptions {
   failAt?: FailureStage;
   reason?: string;
+  evidenceWriteFails?: boolean;
 }
 
 const primary: RuntimeDisplay = {
@@ -88,9 +90,13 @@ function createCompositionHarness(calls: string[], options: HarnessOptions = {})
   let driverCallbacks:
     | { onComplete(): void; onFailure(reason: string): void }
     | undefined;
-  let shutdownClassification = {
+  let shutdownClassification: Omit<G2ShutdownEvidence, "processExitCode"> = {
     natural: false,
     reason: "janvim-shutdown-summary-invalid",
+    stdoutBytes: 4096,
+    stderrBytes: 0,
+    stdoutTruncated: false,
+    stderrTruncated: false,
   };
   let statusCountAtStart = 0;
 
@@ -147,6 +153,11 @@ function createCompositionHarness(calls: string[], options: HarnessOptions = {})
     stop: vi.fn(),
     diagnostics: vi.fn(() => ({ running: false, advancing: false, maxDriftMs: 7 })),
   } as unknown as OneLoopDriver;
+  const finalizeEvidence = vi.fn(async () => {
+    if (options.evidenceWriteFails === true) {
+      throw new Error("evidence write failed");
+    }
+  });
 
   const dependencies: G2RuntimeDependencies = {
     validate: async () => {
@@ -191,7 +202,11 @@ function createCompositionHarness(calls: string[], options: HarnessOptions = {})
     },
     timers,
     log: (event) => logEvents.push(event),
-    classifyShutdown: vi.fn(async () => shutdownClassification),
+    classifyShutdown: vi.fn(async (exitCode) => ({
+      processExitCode: exitCode,
+      ...shutdownClassification,
+    })),
+    finalizeEvidence,
   };
   const composition = new G2RuntimeComposition(dependencies);
 
@@ -203,6 +218,7 @@ function createCompositionHarness(calls: string[], options: HarnessOptions = {})
     bridge,
     secondary,
     driver,
+    finalizeEvidence,
     startLocally: () => {
       if (controller === undefined) throw new Error("Start was not bound");
       statusCountAtStart = statuses.length;
@@ -227,8 +243,11 @@ function createCompositionHarness(calls: string[], options: HarnessOptions = {})
       if (driverCallbacks === undefined) throw new Error("driver callbacks are not bound");
       driverCallbacks.onFailure(reason);
     },
-    setShutdownClassification: (value: { natural: boolean; reason: string }) => {
-      shutdownClassification = value;
+    setShutdownClassification: (value: {
+      natural: boolean;
+      reason: string;
+    }) => {
+      shutdownClassification = { ...shutdownClassification, ...value };
     },
     cleanupCount: () =>
       logEvents.filter((event) => event.event === "g2-runtime-cleanup").length,
@@ -298,6 +317,7 @@ describe("G2 runtime composition", () => {
     });
     expect(harness.timers.timeoutDelays()).not.toContain(15_000);
     expect(harness.cleanupCount()).toBe(1);
+    expect(harness.finalizeEvidence).not.toHaveBeenCalled();
   });
 
   it("fails when the exact child exits before reset", async () => {
@@ -375,6 +395,22 @@ describe("G2 runtime composition", () => {
     });
     harness.exitChild(0);
     await expect(harness.composition.completion).resolves.toEqual({ ok: true });
+    expect(harness.finalizeEvidence).toHaveBeenCalledWith({
+      result: { ok: true },
+      placement: placementReceipt,
+      completedLoops: 1,
+      maxDriftMs: 7,
+      resetRestoredPoem: true,
+      shutdown: {
+        processExitCode: 0,
+        natural: true,
+        reason: "frontend-shutdown-graceful",
+        stdoutBytes: 4096,
+        stderrBytes: 0,
+        stdoutTruncated: false,
+        stderrTruncated: false,
+      },
+    });
     await harness.composition.stop();
     await harness.composition.stop();
     expect(harness.cleanupCount()).toBe(1);
@@ -422,6 +458,7 @@ describe("G2 runtime composition", () => {
     });
     expect(harness.cleanupCount()).toBe(1);
     expect(harness.child.kill).toHaveBeenCalledTimes(1);
+    expect(harness.finalizeEvidence).toHaveBeenCalledTimes(1);
   });
 
   it("turns an early explicit stop into one bounded cleanup", async () => {
@@ -437,5 +474,22 @@ describe("G2 runtime composition", () => {
     });
     await harness.composition.stop();
     expect(harness.cleanupCount()).toBe(1);
+  });
+
+  it("turns evidence write failure into a failed run", async () => {
+    const harness = createCompositionHarness([], { evidenceWriteFails: true });
+    await harness.composition.boot();
+    harness.startLocally();
+    harness.completeLoop();
+    harness.setShutdownClassification({
+      natural: true,
+      reason: "frontend-shutdown-graceful",
+    });
+    harness.exitChild(0);
+    await expect(harness.composition.completion).resolves.toEqual({
+      ok: false,
+      reason: "g2-evidence-write-failed",
+    });
+    expect(harness.finalizeEvidence).toHaveBeenCalledTimes(1);
   });
 });
