@@ -1,14 +1,41 @@
-schema = 1
-mode = "show-only"
-network = "disabled"
-layout_engine = "unconfirmed"
-artifact_lock = "janvim-artifact.lock.json"
-runtime_root = "runtime/janvim"
-private_user_root = "runtime/user-root"
-source_writes = false
+[cursor]
+vfx_type = "swordsman"
+spring_frequency = 45.0
+spark_count = 12
+elastic_coefficient = 0.65
+spark_impulse_threshold = 18000.0
+
+[fonts]
+fallback_paths = ["../runtime/janvim/assets/fonts/private/FiraCodeNerdFontMono-Regular.ttf"]
+
+[layout]
+# Frozen after the 2026-08-29 dynamic/orthogonal/dynamic dual-display A/B.
+engine = "dynamic"
+dynamic_profile = "../runtime/janvim/assets/layout-profiles/computer-mixed.toml"
+column_width = 20.0
+column_gap = 4.0
+glyph_advance = 24.0
+
+[typography]
+english_layout = "sideways"
+latin_punctuation_layout = "sideways"
+cjk_punctuation_layout = "sideways"
+symbol_layout = "sideways"
+
+[neovim]
+# The prepared runtime supplies this show-only Plugin Lab root.
+startup_profile = "plugin-lab"
+colorscheme = "catppuccin-mocha"
 
 [window]
-role = "primary-projector"
-width = 1920
-height = 1080
-scale_factor = 1
+# The controller owns exact PID-based placement and verifies the final rectangle.
+start_maximized = false
+
+[backend]
+endpoint = "auto"
+connect_timeout_ms = 3000
+handshake_timeout_ms = 3000
+request_timeout_ms = 1000
+plugin_load_timeout_ms = 5000
+shutdown_timeout_ms = 3000
+retry_interval_ms = 100

@@ -179,15 +179,12 @@ describe("show-only checked-in defaults", () => {
     expect(config.secondary.geometrySha256).toBe(hashDisplayGeometry(config.secondary));
   });
 
-  it("ships a local safety page and a non-product show config with no absolute source path", () => {
+  it("ships a local safety page and a repository-relative JanVim show config", () => {
     const safety = readFileSync(join(showRoot, "safety.html"), "utf8");
     const showConfig = readFileSync(join(showRoot, "janvim-show.toml"), "utf8");
 
     expect(safety).toContain("WAITING FOR CONTROLLER CHECKS");
     expect(safety).not.toMatch(/https?:\/\//i);
-    expect(showConfig).toContain('mode = "show-only"');
-    expect(showConfig).toContain('network = "disabled"');
-    expect(showConfig).toContain('layout_engine = "unconfirmed"');
     expect(showConfig).not.toMatch(/[A-Za-z]:\\/);
     expect(showConfig).not.toContain("D:/github/JanVim");
   });

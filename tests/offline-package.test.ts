@@ -398,6 +398,20 @@ describe("offline JanVim artifact scripts", () => {
     expect(runScript(fixture.root, "verify-runtime.ps1").status).toBe(0);
   });
 
+  it("prepares the selected dynamic runtime from the checked-in show config", () => {
+    const fixture = makeFixture();
+    cpSync(join(repositoryRoot, "show", "janvim-show.toml"), fixture.showConfig);
+
+    const prepared = prepareFromArchive(fixture, "dynamic");
+    expect(prepared.error).toBeUndefined();
+    expect(prepared.status, output(prepared)).toBe(0);
+    const lock = JSON.parse(
+      readFileSync(join(fixture.root, "janvim-artifact.lock.json"), "utf8"),
+    ) as Record<string, unknown>;
+    expect(lock.layoutEngine).toBe("dynamic");
+    expect(runScript(fixture.root, "verify-runtime.ps1").status).toBe(0);
+  });
+
   it("prepares and verifies the orthogonal physical A/B branch without a dynamic profile", () => {
     const fixture = makeFixture();
     writeShowConfig(fixture.showConfig, "orthogonal");
