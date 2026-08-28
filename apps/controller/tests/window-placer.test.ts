@@ -145,6 +145,33 @@ finally {
 }
 `;
 
+const staleInteropWindowPlacement = String.raw`
+param(
+    [Parameter(Mandatory = $true)]
+    [string]$HelperPath,
+
+    [Parameter(Mandatory = $true)]
+    [int]$FixtureProcessId
+)
+
+Add-Type -TypeDefinition @'
+public static class JanVimExhibitionWindow
+{
+}
+'@
+
+$placement = @{
+    ChildProcessId = $FixtureProcessId
+    X = -30000
+    Y = -30000
+    Width = 640
+    Height = 360
+    TimeoutMs = 2000
+}
+
+& $HelperPath @placement
+`;
+
 function waitForReady(child: ChildProcessWithoutNullStreams): Promise<void> {
   return new Promise((resolve, reject) => {
     let stdout = "";
@@ -363,6 +390,58 @@ describe("JanVim PID window placement contract", () => {
           matchedWindowCount: 1,
           visible: true,
           owned: false,
+          actual: { x: -30000, y: -30000, width: 640, height: 360 },
+        });
+      } finally {
+        await closeFixture(fixture, stopPath);
+        rmSync(fixtureRoot, { recursive: true, force: true });
+      }
+    },
+    25_000,
+  );
+
+  windowsIt(
+    "loads the current window interop after an earlier version was cached in the runspace",
+    async () => {
+      const fixtureRoot = mkdtempSync(join(tmpdir(), "janvim-window-stale-interop-fixture-"));
+      const fixturePath = join(fixtureRoot, "window-fixture.ps1");
+      const invocationPath = join(fixtureRoot, "stale-interop-placement.ps1");
+      const stopPath = join(fixtureRoot, "stop");
+      writeFileSync(fixturePath, windowFixture, "utf8");
+      writeFileSync(invocationPath, staleInteropWindowPlacement, "utf8");
+      const fixture = spawn(
+        "pwsh",
+        ["-NoProfile", "-File", fixturePath, "-StopPath", stopPath],
+        {
+          stdio: "pipe",
+          windowsHide: false,
+        },
+      );
+
+      try {
+        await waitForReady(fixture);
+        const helperPath = join(process.cwd(), "scripts", "place-janvim-window.ps1");
+        const result = spawnSync(
+          "pwsh",
+          [
+            "-NoProfile",
+            "-File",
+            invocationPath,
+            "-HelperPath",
+            helperPath,
+            "-FixtureProcessId",
+            String(fixture.pid),
+          ],
+          { encoding: "utf8", timeout: 15_000, windowsHide: true },
+        );
+
+        expect(
+          result.status,
+          `${result.error?.message ?? ""}\n${result.stdout}\n${result.stderr}`,
+        ).toBe(0);
+        expect(JSON.parse(result.stdout)).toMatchObject({
+          pid: fixture.pid,
+          matchedWindowCount: 1,
           actual: { x: -30000, y: -30000, width: 640, height: 360 },
         });
       } finally {

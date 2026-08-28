@@ -25,11 +25,14 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
+# PowerShell cannot unload Add-Type definitions from a live runspace. Bump this
+# suffix whenever the native interop contract changes so an operator can reload
+# an updated helper without restarting the rehearsal shell.
 Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
 
-public static class JanVimExhibitionWindow
+public static class JanVimExhibitionWindowV2
 {
     public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
 
@@ -92,16 +95,16 @@ $matchCount = 0
 
 while ($clock.ElapsedMilliseconds -lt $TimeoutMs) {
     $matches = [System.Collections.Generic.List[IntPtr]]::new()
-    $callback = [JanVimExhibitionWindow+EnumWindowsProc]{
+    $callback = [JanVimExhibitionWindowV2+EnumWindowsProc]{
         param([IntPtr]$handle, [IntPtr]$state)
 
         $windowPid = [uint32]0
-        [void][JanVimExhibitionWindow]::GetWindowThreadProcessId($handle, [ref]$windowPid)
-        $isVisible = [JanVimExhibitionWindow]::IsWindowVisible($handle)
-        $owner = [JanVimExhibitionWindow]::GetWindow($handle, $ownerCommand)
+        [void][JanVimExhibitionWindowV2]::GetWindowThreadProcessId($handle, [ref]$windowPid)
+        $isVisible = [JanVimExhibitionWindowV2]::IsWindowVisible($handle)
+        $owner = [JanVimExhibitionWindowV2]::GetWindow($handle, $ownerCommand)
         if ($windowPid -eq [uint32]$ChildProcessId -and $isVisible -and $owner -eq [IntPtr]::Zero) {
-            $client = [JanVimExhibitionWindow+RECT]::new()
-            $hasClient = [JanVimExhibitionWindow]::GetClientRect($handle, [ref]$client)
+            $client = [JanVimExhibitionWindowV2+RECT]::new()
+            $hasClient = [JanVimExhibitionWindowV2]::GetClientRect($handle, [ref]$client)
             $clientWidth = $client.Right - $client.Left
             $clientHeight = $client.Bottom - $client.Top
             if ($hasClient -and $clientWidth -gt 0 -and $clientHeight -gt 0) {
@@ -111,7 +114,7 @@ while ($clock.ElapsedMilliseconds -lt $TimeoutMs) {
         return $true
     }
 
-    if (-not [JanVimExhibitionWindow]::EnumWindows($callback, [IntPtr]::Zero)) {
+    if (-not [JanVimExhibitionWindowV2]::EnumWindows($callback, [IntPtr]::Zero)) {
         throw 'EnumWindows failed.'
     }
 
@@ -131,7 +134,7 @@ if ($window -eq [IntPtr]::Zero) {
 }
 
 $flags = $noZOrder -bor $noActivate
-if (-not [JanVimExhibitionWindow]::SetWindowPos(
+if (-not [JanVimExhibitionWindowV2]::SetWindowPos(
     $window,
     [IntPtr]::Zero,
     $X,
@@ -142,10 +145,10 @@ if (-not [JanVimExhibitionWindow]::SetWindowPos(
 )) {
     throw "SetWindowPos failed with Win32 error $([Runtime.InteropServices.Marshal]::GetLastWin32Error())."
 }
-[void][JanVimExhibitionWindow]::ShowWindowAsync($window, $showCommand)
+[void][JanVimExhibitionWindowV2]::ShowWindowAsync($window, $showCommand)
 
-$actual = [JanVimExhibitionWindow+RECT]::new()
-if (-not [JanVimExhibitionWindow]::GetWindowRect($window, [ref]$actual)) {
+$actual = [JanVimExhibitionWindowV2+RECT]::new()
+if (-not [JanVimExhibitionWindowV2]::GetWindowRect($window, [ref]$actual)) {
     throw "GetWindowRect failed with Win32 error $([Runtime.InteropServices.Marshal]::GetLastWin32Error())."
 }
 
@@ -154,8 +157,8 @@ $receipt = [ordered]@{
     pid = $ChildProcessId
     matchedWindowCount = $matchCount
     hwnd = ('0x{0:X16}' -f $window.ToInt64())
-    visible = [JanVimExhibitionWindow]::IsWindowVisible($window)
-    owned = [JanVimExhibitionWindow]::GetWindow($window, $ownerCommand) -ne [IntPtr]::Zero
+    visible = [JanVimExhibitionWindowV2]::IsWindowVisible($window)
+    owned = [JanVimExhibitionWindowV2]::GetWindow($window, $ownerCommand) -ne [IntPtr]::Zero
     requested = [ordered]@{
         x = $X
         y = $Y
