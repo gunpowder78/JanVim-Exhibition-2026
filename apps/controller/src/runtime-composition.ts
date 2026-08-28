@@ -325,7 +325,7 @@ export class G2RuntimeComposition {
     this.safeDispose(this.disposeChildClose);
     this.disposeChildClose = undefined;
 
-    let bridgeCloseTimedOut = false;
+    let bridgeCloseFailureReason: string | undefined;
     if (this.bridge !== undefined) {
       let bridgeCloseTimerId: OneLoopTimerHandle | undefined;
       try {
@@ -345,9 +345,10 @@ export class G2RuntimeComposition {
           }),
         ]);
         if (outcome === "failed") {
+          bridgeCloseFailureReason = "g2-bridge-close-failed";
           this.safeLog({ event: "g2-bridge-close-failed" });
         } else if (outcome === "timed-out") {
-          bridgeCloseTimedOut = true;
+          bridgeCloseFailureReason = "g2-bridge-close-timeout";
           this.safeLog({ event: "g2-bridge-close-timeout" });
         }
       } finally {
@@ -366,8 +367,8 @@ export class G2RuntimeComposition {
       ok: false as const,
       reason: "controller-stopped",
     };
-    if (result.ok && bridgeCloseTimedOut) {
-      result = { ok: false, reason: "g2-bridge-close-timeout" };
+    if (result.ok && bridgeCloseFailureReason !== undefined) {
+      result = { ok: false, reason: bridgeCloseFailureReason };
     }
     if (this.validationSucceeded) {
       try {

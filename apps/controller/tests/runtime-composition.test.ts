@@ -58,6 +58,7 @@ interface HarnessOptions {
   reason?: string;
   evidenceWriteFails?: boolean;
   bridgeCloseNeverSettles?: boolean;
+  bridgeCloseRejects?: boolean;
 }
 
 const primary: RuntimeDisplay = {
@@ -137,7 +138,9 @@ function createCompositionHarness(calls: string[], options: HarnessOptions = {})
     close: vi.fn(() =>
       options.bridgeCloseNeverSettles === true
         ? new Promise<void>(() => undefined)
-        : Promise.resolve(),
+        : options.bridgeCloseRejects === true
+          ? Promise.reject(new Error("bridge close failed"))
+          : Promise.resolve(),
     ),
   };
   const loop = {
@@ -541,5 +544,28 @@ describe("G2 runtime composition", () => {
     });
     expect(harness.secondary.close).toHaveBeenCalledTimes(1);
     expect(harness.logEvents).toContainEqual({ event: "g2-bridge-close-timeout" });
+  });
+
+  it("fails an otherwise passed run when Bridge close rejects", async () => {
+    const harness = createCompositionHarness([], { bridgeCloseRejects: true });
+    await harness.composition.boot();
+    harness.startLocally();
+    harness.completeLoop();
+    harness.setShutdownClassification({
+      natural: true,
+      reason: "frontend-shutdown-graceful",
+    });
+    harness.exitChild(0);
+
+    await expect(harness.composition.completion).resolves.toEqual({
+      ok: false,
+      reason: "g2-bridge-close-failed",
+    });
+    expect(harness.finalizeEvidence).toHaveBeenCalledWith(
+      expect.objectContaining({
+        result: { ok: false, reason: "g2-bridge-close-failed" },
+      }),
+    );
+    expect(harness.logEvents).toContainEqual({ event: "g2-bridge-close-failed" });
   });
 });
