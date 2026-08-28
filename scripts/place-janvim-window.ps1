@@ -75,6 +75,10 @@ public static class JanVimExhibitionWindow
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool GetWindowRect(IntPtr hWnd, out RECT rectangle);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool GetClientRect(IntPtr hWnd, out RECT rectangle);
 }
 '@
 
@@ -96,7 +100,13 @@ while ($clock.ElapsedMilliseconds -lt $TimeoutMs) {
         $isVisible = [JanVimExhibitionWindow]::IsWindowVisible($handle)
         $owner = [JanVimExhibitionWindow]::GetWindow($handle, $ownerCommand)
         if ($windowPid -eq [uint32]$ChildProcessId -and $isVisible -and $owner -eq [IntPtr]::Zero) {
-            $matches.Add($handle)
+            $client = [JanVimExhibitionWindow+RECT]::new()
+            $hasClient = [JanVimExhibitionWindow]::GetClientRect($handle, [ref]$client)
+            $clientWidth = $client.Right - $client.Left
+            $clientHeight = $client.Bottom - $client.Top
+            if ($hasClient -and $clientWidth -gt 0 -and $clientHeight -gt 0) {
+                $matches.Add($handle)
+            }
         }
         return $true
     }
