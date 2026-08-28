@@ -282,7 +282,10 @@ describe("JanVim PID window placement contract", () => {
   });
 
   it("accepts one visible unowned HWND for the exact PID within two pixels", () => {
-    expect(validateWindowPlacementReceipt(receipt(), target)).toEqual({ ok: true });
+    expect(validateWindowPlacementReceipt(receipt(), target)).toEqual({
+      ok: true,
+      receipt: receipt(),
+    });
   });
 
   it("rejects PID mismatch, multiple HWNDs, owned popups, and out-of-bounds receipts", () => {
@@ -331,7 +334,7 @@ describe("JanVim PID window placement contract", () => {
       },
     });
 
-    expect(result).toEqual({ ok: true });
+    expect(result).toEqual({ ok: true, receipt: receipt() });
     expect(invocations).toHaveLength(1);
     expect(invocations[0]).toMatchObject({
       file: "pwsh",

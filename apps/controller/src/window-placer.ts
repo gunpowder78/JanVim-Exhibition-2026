@@ -23,7 +23,9 @@ export interface WindowPlacementInvocation {
   args: string[];
 }
 
-export type WindowPlacementValidation = { ok: true } | { ok: false; reason: string };
+export type WindowPlacementValidation =
+  | { ok: true; receipt: WindowPlacementReceipt }
+  | { ok: false; reason: string };
 
 export interface WindowPlacementHelperResult {
   exitCode: number;
@@ -103,7 +105,7 @@ export function validateWindowPlacementReceipt(
   if (!isRectangle(receipt.actual) || !withinTolerance(receipt.actual, target.bounds, 2)) {
     return { ok: false, reason: "window-rectangle-mismatch" };
   }
-  return { ok: true };
+  return { ok: true, receipt };
 }
 
 export async function placeJanVimWindow(input: {
