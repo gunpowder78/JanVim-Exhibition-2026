@@ -247,10 +247,18 @@ body {
   letter-spacing: 0.12em;
 }
 
-.ready-page button {
-  justify-self: center;
+.operator-controls {
+  position: absolute;
+  right: 2.4vw;
+  bottom: 2.4vh;
+  z-index: 4;
+  display: flex;
+  gap: 0.8rem;
+  cursor: default;
+}
+
+.operator-controls button {
   min-width: min(30rem, 72vw);
-  margin-top: 1.2rem;
   padding: 0.85em 1.4em;
   border: 1px solid #6e9da1;
   background: #102126;
@@ -261,12 +269,12 @@ body {
   letter-spacing: 0.08em;
 }
 
-.ready-page button:disabled {
+.operator-controls button:disabled {
   opacity: 0.38;
   cursor: not-allowed;
 }
 
-.ready-page button:focus-visible {
+.operator-controls button:focus-visible {
   outline: 3px solid #b7472a;
   outline-offset: 5px;
 }

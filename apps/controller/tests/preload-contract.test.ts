@@ -6,15 +6,28 @@ import { runInNewContext } from "node:vm";
 import { describe, expect, it } from "vitest";
 import { build } from "vite";
 
-import type { Cue, RendererEvent } from "../../../packages/show-schema/src/index";
+import type {
+  Cue,
+  RendererEvent,
+  RendererToControllerEvent,
+} from "../../../packages/show-schema/src/index";
+import * as preloadModule from "../src/preload.ts";
 import {
   PRELOAD_GLOBAL,
-  REQUEST_START_CHANNEL,
   SHOW_EVENT_CHANNEL,
   createPreloadApi,
   installPreload,
   type IpcRendererAdapter,
 } from "../src/preload.ts";
+
+type Task9PreloadModule = {
+  RENDERER_EVENT_CHANNEL?: string;
+};
+
+type Task9PreloadApi = {
+  onShowEvent(listener: (event: RendererEvent) => void): () => void;
+  sendRendererEvent(event: RendererToControllerEvent): void;
+};
 
 class FakeIpc implements IpcRendererAdapter {
   public readonly listeners = new Map<string, Set<(event: unknown, payload: unknown) => void>>();
@@ -48,11 +61,13 @@ const cue: Cue = {
 };
 
 describe("secondary preload contract", () => {
-  it("exposes only fixed onShowEvent and requestStart methods", () => {
+  it("exposes exactly the two validated Task 9 bridge methods", () => {
     const api = createPreloadApi(new FakeIpc());
-    expect(Object.keys(api).sort()).toEqual(["onShowEvent", "requestStart"]);
+    expect(Object.keys(api).sort()).toEqual(["onShowEvent", "sendRendererEvent"]);
     expect(SHOW_EVENT_CHANNEL).toBe("janvim-exhibition:show-event");
-    expect(REQUEST_START_CHANNEL).toBe("janvim-exhibition:request-start");
+    expect((preloadModule as Task9PreloadModule).RENDERER_EVENT_CHANNEL).toBe(
+      "janvim-exhibition:renderer-event",
+    );
   });
 
   it("validates each cue before delivery and unregisters the exact wrapped listener", () => {
@@ -66,6 +81,7 @@ describe("secondary preload contract", () => {
     expect(received).toEqual([cue]);
     expect(ipc.listeners.get(SHOW_EVENT_CHANNEL)?.size).toBe(1);
 
+    unsubscribe();
     unsubscribe();
     expect(ipc.listeners.get(SHOW_EVENT_CHANNEL)?.size).toBe(0);
     ipc.emit(SHOW_EVENT_CHANNEL, cue);
@@ -129,18 +145,27 @@ describe("secondary preload contract", () => {
     expect(received).toEqual([]);
   });
 
-  it("sends only a fixed local start request with no caller-controlled payload", () => {
+  it("validates closed renderer events before sending them on the fixed channel", () => {
     const ipc = new FakeIpc();
-    const api = createPreloadApi(ipc);
+    const api = createPreloadApi(ipc) as unknown as Task9PreloadApi;
+    expect(api.sendRendererEvent).toBeTypeOf("function");
 
-    api.requestStart();
+    api.sendRendererEvent({
+      schema: 1,
+      type: "operator-action",
+      action: "start",
+    });
 
     expect(ipc.sends).toEqual([
       {
-        channel: REQUEST_START_CHANNEL,
-        payload: { schema: 1, source: "local-ready-page" },
+        channel: "janvim-exhibition:renderer-event",
+        payload: { schema: 1, type: "operator-action", action: "start" },
       },
     ]);
+    expect(() =>
+      api.sendRendererEvent({ type: "shell", command: "pwsh" } as never),
+    ).toThrow();
+    expect(ipc.sends).toHaveLength(1);
   });
 
   it("installs the narrow API under one fixed global name", () => {
@@ -155,7 +180,10 @@ describe("secondary preload contract", () => {
     expect(PRELOAD_GLOBAL).toBe("janvimExhibition");
     expect(exposed).toHaveLength(1);
     expect(exposed[0]?.name).toBe(PRELOAD_GLOBAL);
-    expect(Object.keys(exposed[0]?.value as object).sort()).toEqual(["onShowEvent", "requestStart"]);
+    expect(Object.keys(exposed[0]?.value as object).sort()).toEqual([
+      "onShowEvent",
+      "sendRendererEvent",
+    ]);
   });
 
   it("builds one sandbox-compatible CommonJS preload with no ESM imports", async () => {

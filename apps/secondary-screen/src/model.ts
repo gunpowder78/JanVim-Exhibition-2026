@@ -39,7 +39,10 @@ export type TokenStreamCue = RendererCueBase & {
 export interface SceneElements {
   ready: HTMLElement;
   readyStatus: HTMLElement;
+  operatorControls: HTMLElement;
   startButton: HTMLButtonElement;
+  restartButton: HTMLButtonElement;
+  stopButton: HTMLButtonElement;
   promptContent: HTMLElement;
   responseContent: HTMLElement;
   acceptance: HTMLElement;

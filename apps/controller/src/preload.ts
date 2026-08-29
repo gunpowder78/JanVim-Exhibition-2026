@@ -1,11 +1,13 @@
 import {
   parseRendererEvent,
+  parseRendererToControllerEvent,
   type RendererEvent,
+  type RendererToControllerEvent,
 } from "@janvim-exhibition/show-schema/renderer-event";
 
 export const PRELOAD_GLOBAL = "janvimExhibition";
 export const SHOW_EVENT_CHANNEL = "janvim-exhibition:show-event";
-export const REQUEST_START_CHANNEL = "janvim-exhibition:request-start";
+export const RENDERER_EVENT_CHANNEL = "janvim-exhibition:renderer-event";
 
 export interface IpcRendererAdapter {
   on(channel: string, listener: (event: unknown, payload: unknown) => void): void;
@@ -19,7 +21,7 @@ export interface ContextBridgeAdapter {
 
 export interface SecondaryPreloadApi {
   onShowEvent(listener: (event: RendererEvent) => void): () => void;
-  requestStart(): void;
+  sendRendererEvent(event: RendererToControllerEvent): void;
 }
 
 export function createPreloadApi(ipc: IpcRendererAdapter): SecondaryPreloadApi {
@@ -40,8 +42,8 @@ export function createPreloadApi(ipc: IpcRendererAdapter): SecondaryPreloadApi {
         ipc.removeListener(SHOW_EVENT_CHANNEL, wrapped);
       };
     },
-    requestStart: () => {
-      ipc.send(REQUEST_START_CHANNEL, { schema: 1, source: "local-ready-page" });
+    sendRendererEvent: (event) => {
+      ipc.send(RENDERER_EVENT_CHANNEL, parseRendererToControllerEvent(event));
     },
   };
 }

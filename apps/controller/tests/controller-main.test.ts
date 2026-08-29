@@ -3,14 +3,32 @@ import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
+import type { RendererToControllerEvent } from "../../../packages/show-schema/src/index.ts";
 import { hashDisplayGeometry, type DisplayMapConfig } from "../src/display-router.ts";
+import * as controllerMain from "../src/main.ts";
 import {
   ShowController,
   bindLocalStartRequest,
   type ControllerDependencies,
   type StartRequest,
 } from "../src/main.ts";
-import { REQUEST_START_CHANNEL } from "../src/preload.ts";
+import * as preloadModule from "../src/preload.ts";
+
+type RendererIpcListener = (
+  event: { senderFrame: { url: string } | null },
+  payload: unknown,
+) => void;
+
+type Task9ControllerMain = {
+  bindLocalRendererEvents?: (
+    ipcMain: {
+      on(channel: string, listener: RendererIpcListener): void;
+      removeListener(channel: string, listener: RendererIpcListener): void;
+    },
+    readyPageUrl: string,
+    onEvent: (event: RendererToControllerEvent) => void,
+  ) => () => void;
+};
 
 function makeController(overrides: Partial<ControllerDependencies> = {}) {
   const calls: string[] = [];
@@ -127,18 +145,16 @@ describe("controller composition root", () => {
   it("accepts Start only from the exact local ready frame and unregisters the exact IPC listener", async () => {
     const { controller, calls } = makeController();
     await controller.boot();
-    let registered:
-      | ((event: { senderFrame: { url: string } | null }, payload: unknown) => void)
-      | undefined;
+    let registered: RendererIpcListener | undefined;
     const removed: unknown[] = [];
     const unbind = bindLocalStartRequest(
       {
         on: (channel, listener) => {
-          expect(channel).toBe(REQUEST_START_CHANNEL);
+          expect(channel).toBe("janvim-exhibition:renderer-event");
           registered = listener;
         },
         removeListener: (channel, listener) => {
-          expect(channel).toBe(REQUEST_START_CHANNEL);
+          expect(channel).toBe("janvim-exhibition:renderer-event");
           removed.push(listener);
         },
       },
@@ -146,7 +162,7 @@ describe("controller composition root", () => {
       "file:///show/safety.html",
     );
 
-    const request: StartRequest = { schema: 1, source: "local-ready-page" };
+    const request = { schema: 1, type: "operator-action", action: "start" } as const;
     registered?.({ senderFrame: { url: "https://example.com/" } }, request);
     registered?.({ senderFrame: { url: "file:///show/safety.html" } }, { ...request, extra: true });
     expect(calls).not.toContain("loop-start");
@@ -155,7 +171,64 @@ describe("controller composition root", () => {
     expect(calls.filter((call) => call === "loop-start")).toHaveLength(1);
 
     unbind();
+    unbind();
     expect(removed).toEqual([registered]);
+  });
+
+  it("delivers strict renderer events only from the exact local file frame", () => {
+    const bindLocalRendererEvents = (controllerMain as Task9ControllerMain)
+      .bindLocalRendererEvents;
+    expect(bindLocalRendererEvents).toBeTypeOf("function");
+    expect(
+      (preloadModule as { RENDERER_EVENT_CHANNEL?: string }).RENDERER_EVENT_CHANNEL,
+    ).toBe("janvim-exhibition:renderer-event");
+
+    let registered:
+      | ((event: { senderFrame: { url: string } | null }, payload: unknown) => void)
+      | undefined;
+    const removed: unknown[] = [];
+    const received: RendererToControllerEvent[] = [];
+    const ipc = {
+      on: (_channel: string, listener: RendererIpcListener) => {
+        registered = listener;
+      },
+      removeListener: (_channel: string, listener: RendererIpcListener) => {
+        removed.push(listener);
+      },
+    };
+    const readyPageUrl = "file:///show/safety.html";
+    const unbind = bindLocalRendererEvents?.(ipc, readyPageUrl, (event) => {
+      received.push(event);
+    });
+    const presentation = {
+      schema: 1,
+      type: "presentation-ack",
+      generationId: 2,
+      loopId: "loop-2",
+      cueId: "cue-reset",
+    } as const;
+
+    registered?.({ senderFrame: { url: "https://example.com/" } }, presentation);
+    registered?.({ senderFrame: null }, presentation);
+    registered?.(
+      { senderFrame: { url: readyPageUrl } },
+      { ...presentation, generationId: 0 },
+    );
+    registered?.(
+      { senderFrame: { url: readyPageUrl } },
+      { ...presentation, shell: "pwsh" },
+    );
+    expect(received).toEqual([]);
+
+    registered?.({ senderFrame: { url: readyPageUrl } }, presentation);
+    expect(received).toEqual([presentation]);
+
+    unbind?.();
+    unbind?.();
+    expect(removed).toEqual([registered]);
+    expect(() =>
+      bindLocalRendererEvents?.(ipc, "https://example.com/", () => undefined),
+    ).toThrowError(/local file/i);
   });
 
   it("emits Node-compatible ESM imports for the built Electron main", () => {

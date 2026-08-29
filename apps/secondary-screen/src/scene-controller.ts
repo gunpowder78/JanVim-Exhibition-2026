@@ -1,7 +1,11 @@
 import type {
   ControllerStatusEvent,
   Cue,
+  OperatorAction,
   RendererEvent,
+  RendererToControllerEvent,
+  RunCueEvent,
+  RunStatusEvent,
 } from "@janvim-exhibition/show-schema";
 
 import { KeyOverlay } from "./key-overlay";
@@ -18,6 +22,12 @@ import { ResponseStream } from "./response-stream";
 
 export type { SecondarySceneOptions } from "./model";
 
+export interface SecondaryRendererRuntime {
+  sendRendererEvent(event: RendererToControllerEvent): void;
+  requestFrame(callback: () => void): number;
+  cancelFrame(id: number): void;
+}
+
 export class SecondarySceneController {
   private readonly prompt: PromptComposer;
   private readonly response: ResponseStream;
@@ -25,8 +35,16 @@ export class SecondarySceneController {
   private readonly ready: HTMLElement;
   private readonly readyStatus: HTMLElement;
   private readonly startButton: HTMLButtonElement;
+  private readonly restartButton: HTMLButtonElement;
+  private readonly stopButton: HTMLButtonElement;
   private readonly p1Layer: HTMLElement;
-  private startRequested = false;
+  private readonly pendingOperatorActions = new Set<OperatorAction>();
+  private runtime?: SecondaryRendererRuntime;
+  private releaseRuntimeListeners?: () => void;
+  private firstPresentationFrame?: number;
+  private secondPresentationFrame?: number;
+  private presentationEpoch = 0;
+  private statusKey = "";
 
   public constructor(
     private readonly root: HTMLElement,
@@ -40,6 +58,8 @@ export class SecondarySceneController {
     this.ready = elements.ready;
     this.readyStatus = elements.readyStatus;
     this.startButton = elements.startButton;
+    this.restartButton = elements.restartButton;
+    this.stopButton = elements.stopButton;
     this.p1Layer = elements.p1Layer;
   }
 
@@ -49,20 +69,55 @@ export class SecondarySceneController {
       return;
     }
     if ("type" in event) {
+      if (event.type === "run-status") {
+        this.applyRunStatus(event);
+        return;
+      }
+      if (event.type === "run-cue") {
+        this.apply(event.cue);
+        if (event.requiresPresentationAck) this.schedulePresentationAck(event);
+      }
       return;
     }
     this.apply(event);
   }
 
-  public bindStartRequest(request: () => void): () => void {
-    const listener = (): void => {
-      if (this.startButton.disabled || this.startRequested) return;
-      this.startRequested = true;
-      this.startButton.disabled = true;
-      request();
+  public bindRendererEvents(runtime: SecondaryRendererRuntime): () => void {
+    if (this.runtime !== undefined) {
+      throw new Error("Secondary renderer runtime is already bound");
+    }
+    this.runtime = runtime;
+
+    const start = (): void => this.emitOperatorAction("start", this.startButton);
+    const restart = (): void =>
+      this.emitOperatorAction("restart-loop", this.restartButton);
+    const stop = (): void => this.emitOperatorAction("stop-show", this.stopButton);
+    this.startButton.addEventListener("click", start);
+    this.restartButton.addEventListener("click", restart);
+    this.stopButton.addEventListener("click", stop);
+    this.releaseRuntimeListeners = () => {
+      this.startButton.removeEventListener("click", start);
+      this.restartButton.removeEventListener("click", restart);
+      this.stopButton.removeEventListener("click", stop);
     };
-    this.startButton.addEventListener("click", listener);
-    return () => this.startButton.removeEventListener("click", listener);
+
+    let bound = true;
+    return () => {
+      if (!bound) return;
+      bound = false;
+      this.dispose();
+    };
+  }
+
+  public dispose(): void {
+    this.cancelPresentationAck();
+    this.releaseRuntimeListeners?.();
+    this.releaseRuntimeListeners = undefined;
+    this.runtime = undefined;
+    this.pendingOperatorActions.clear();
+    this.startButton.disabled = true;
+    this.restartButton.disabled = true;
+    this.stopButton.disabled = true;
   }
 
   public apply(cue: Cue): void {
@@ -119,25 +174,170 @@ export class SecondarySceneController {
 
   private applyStatus(event: ControllerStatusEvent): void {
     this.root.dataset.controllerState = event.state;
-    this.startButton.disabled = true;
 
     switch (event.state) {
       case "booting":
         this.readyStatus.textContent = "CONTROLLER BOOTING / CHECKING RUNTIME";
+        this.setOperatorState(`g2:${event.state}`, { start: false });
         return;
       case "ready":
         this.readyStatus.textContent = "CONTROLLER READY / LOCAL START ARMED";
-        this.startButton.disabled = this.startRequested;
+        this.ready.hidden = false;
+        this.root.dataset.scene = "ready";
+        this.setOperatorState(`g2:${event.state}`, { start: true });
         return;
       case "running":
         this.readyStatus.textContent = "SHOW RUNNING / 90s REHEARSAL";
+        this.setOperatorState(`g2:${event.state}`, {});
         return;
       case "blocked":
         this.readyStatus.textContent = `BLOCKED / ${event.reason}`;
+        this.ready.hidden = false;
+        this.root.dataset.scene = "ready";
+        this.setOperatorState(`g2:${event.state}:${event.reason}`, {});
         return;
       case "complete-awaiting-close":
         this.readyStatus.textContent = "RESET COMPLETE / CLOSE JANVIM WITH ALT+F4";
+        this.ready.hidden = false;
+        this.root.dataset.scene = "ready";
+        this.setOperatorState(`g2:${event.state}`, {});
         return;
+    }
+  }
+
+  private applyRunStatus(event: RunStatusEvent): void {
+    this.root.dataset.controllerState = event.state;
+    const key = `run:${event.generationId}:${event.state}:${event.reason ?? ""}`;
+
+    switch (event.state) {
+      case "booting":
+        this.ready.hidden = false;
+        this.root.dataset.scene = "ready";
+        this.readyStatus.textContent = "SHOW BOOTING / CHECKING FROZEN INPUTS";
+        this.setOperatorState(key, { start: false });
+        return;
+      case "ready":
+        this.ready.hidden = false;
+        this.root.dataset.scene = "ready";
+        this.readyStatus.textContent = "SHOW READY / LOCAL START ARMED";
+        this.setOperatorState(key, { start: true });
+        return;
+      case "running":
+        this.ready.hidden = true;
+        this.root.dataset.scene = "running";
+        this.readyStatus.textContent = "SHOW RUNNING / STOP QUEUES AT RESET";
+        this.setOperatorState(key, { stop: true });
+        return;
+      case "safe-cruise":
+        this.readyStatus.textContent = "SAFE CRUISE / HOLDING LAST PRIMARY FRAME";
+        this.setOperatorState(key, { stop: true });
+        return;
+      case "black-recovering":
+        this.ready.hidden = false;
+        this.root.dataset.scene = "black";
+        this.readyStatus.textContent = "BLACK RECOVERY / REBUILDING LOCAL SURFACE";
+        this.setOperatorState(key, { stop: true });
+        return;
+      case "safe-ready":
+        this.ready.hidden = false;
+        this.root.dataset.scene = "ready";
+        this.readyStatus.textContent = `SAFE READY / ${event.reason}`;
+        this.setOperatorState(key, { restart: true, stop: true });
+        return;
+      case "shutting-down":
+        this.ready.hidden = false;
+        this.root.dataset.scene = "black";
+        this.readyStatus.textContent = "SHOW SHUTTING DOWN / CONTROLS DISARMED";
+        this.setOperatorState(key, {});
+        return;
+      case "stopped":
+        this.ready.hidden = false;
+        this.root.dataset.scene = "ready";
+        this.readyStatus.textContent = "SHOW STOPPED / SAFE TO LEAVE";
+        this.setOperatorState(key, {});
+        return;
+    }
+  }
+
+  private setOperatorState(
+    statusKey: string,
+    visible: { start?: boolean; restart?: boolean; stop?: boolean },
+  ): void {
+    if (this.statusKey !== statusKey) {
+      this.statusKey = statusKey;
+      this.pendingOperatorActions.clear();
+    }
+    this.setButtonState(this.startButton, "start", visible.start === true);
+    this.setButtonState(
+      this.restartButton,
+      "restart-loop",
+      visible.restart === true,
+    );
+    this.setButtonState(this.stopButton, "stop-show", visible.stop === true);
+  }
+
+  private setButtonState(
+    button: HTMLButtonElement,
+    action: OperatorAction,
+    visible: boolean,
+  ): void {
+    button.hidden = !visible;
+    button.disabled = !visible || this.pendingOperatorActions.has(action);
+  }
+
+  private emitOperatorAction(
+    action: OperatorAction,
+    button: HTMLButtonElement,
+  ): void {
+    if (
+      this.runtime === undefined ||
+      button.hidden ||
+      button.disabled ||
+      this.pendingOperatorActions.has(action)
+    ) {
+      return;
+    }
+    this.pendingOperatorActions.add(action);
+    button.disabled = true;
+    this.runtime.sendRendererEvent({
+      schema: 1,
+      type: "operator-action",
+      action,
+    });
+  }
+
+  private schedulePresentationAck(event: RunCueEvent): void {
+    const runtime = this.runtime;
+    if (runtime === undefined) return;
+    this.cancelPresentationAck();
+    const epoch = this.presentationEpoch;
+
+    this.firstPresentationFrame = runtime.requestFrame(() => {
+      if (epoch !== this.presentationEpoch || this.runtime !== runtime) return;
+      this.firstPresentationFrame = undefined;
+      this.secondPresentationFrame = runtime.requestFrame(() => {
+        if (epoch !== this.presentationEpoch || this.runtime !== runtime) return;
+        this.secondPresentationFrame = undefined;
+        runtime.sendRendererEvent({
+          schema: 1,
+          type: "presentation-ack",
+          generationId: event.generationId,
+          loopId: event.loopId,
+          cueId: event.cue.id,
+        });
+      });
+    });
+  }
+
+  private cancelPresentationAck(): void {
+    this.presentationEpoch += 1;
+    if (this.firstPresentationFrame !== undefined) {
+      this.runtime?.cancelFrame(this.firstPresentationFrame);
+      this.firstPresentationFrame = undefined;
+    }
+    if (this.secondPresentationFrame !== undefined) {
+      this.runtime?.cancelFrame(this.secondPresentationFrame);
+      this.secondPresentationFrame = undefined;
     }
   }
 
@@ -147,6 +347,7 @@ export class SecondarySceneController {
   }
 
   private reset(): void {
+    this.cancelPresentationAck();
     this.prompt.clear();
     this.response.clear();
     this.keyOverlay.clear();

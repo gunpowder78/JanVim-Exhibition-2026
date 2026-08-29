@@ -4,13 +4,15 @@ import type {
   AgentAck,
   AgentCommand,
   Cue,
+  RendererToControllerEvent,
   ShowManifest,
 } from "@janvim-exhibition/show-schema";
+import { parseRendererToControllerEvent } from "@janvim-exhibition/show-schema";
 import { z } from "zod";
 
 import { CueDispatcher } from "./cue-dispatcher.js";
 import type { DisplayRoute, Rectangle, RuntimeDisplay } from "./display-router.js";
-import { REQUEST_START_CHANNEL } from "./preload.js";
+import { RENDERER_EVENT_CHANNEL } from "./preload.js";
 import { Scheduler } from "./scheduler.js";
 
 export interface StartRequest {
@@ -141,21 +143,36 @@ export function bindLocalStartRequest(
   controller: ShowController,
   readyPageUrl: string,
 ): () => void {
+  return bindLocalRendererEvents(ipcMain, readyPageUrl, (event) => {
+    if (event.type !== "operator-action" || event.action !== "start") return;
+    controller.requestStart({ schema: 1, source: "local-ready-page" });
+  });
+}
+
+export function bindLocalRendererEvents(
+  ipcMain: IpcMainAdapter,
+  readyPageUrl: string,
+  onEvent: (event: RendererToControllerEvent) => void,
+): () => void {
   if (!isLocalFileUrl(readyPageUrl)) {
     throw new Error("Ready page URL must be a local file URL");
   }
 
   const listener = (event: LocalStartIpcEvent, payload: unknown): void => {
     if (event.senderFrame?.url !== readyPageUrl) return;
-    controller.requestStart(payload);
+    try {
+      onEvent(parseRendererToControllerEvent(payload));
+    } catch {
+      // Invalid or unknown renderer events fail closed in Electron main.
+    }
   };
-  ipcMain.on(REQUEST_START_CHANNEL, listener);
+  ipcMain.on(RENDERER_EVENT_CHANNEL, listener);
 
   let bound = true;
   return () => {
     if (!bound) return;
     bound = false;
-    ipcMain.removeListener(REQUEST_START_CHANNEL, listener);
+    ipcMain.removeListener(RENDERER_EVENT_CHANNEL, listener);
   };
 }
 

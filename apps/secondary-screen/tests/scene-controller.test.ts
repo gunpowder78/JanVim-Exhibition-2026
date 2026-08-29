@@ -10,6 +10,8 @@ import type {
   CueTarget,
   EditorAction,
   RendererEvent,
+  RendererToControllerEvent,
+  RunCueEvent,
   ShowManifest,
 } from "../../../packages/show-schema/src/index.ts";
 import { SecondarySceneController } from "../src/scene-controller.ts";
@@ -79,6 +81,67 @@ const makeController = (
   return { root, controller };
 };
 
+class FakeAnimationFrames {
+  private readonly callbacks = new Map<number, () => void>();
+  private readonly order: number[] = [];
+  private nextId = 1;
+
+  public readonly requestFrame = (callback: () => void): number => {
+    const id = this.nextId;
+    this.nextId += 1;
+    this.callbacks.set(id, callback);
+    this.order.push(id);
+    return id;
+  };
+
+  public readonly cancelFrame = (id: number): void => {
+    this.callbacks.delete(id);
+  };
+
+  public runNext(): void {
+    while (this.order.length > 0) {
+      const id = this.order.shift()!;
+      const callback = this.callbacks.get(id);
+      this.callbacks.delete(id);
+      if (callback === undefined) continue;
+      callback();
+      return;
+    }
+    throw new Error("no pending animation frame");
+  }
+
+  public runAll(): void {
+    while (this.callbacks.size > 0) this.runNext();
+  }
+
+  public pending(): number {
+    return this.callbacks.size;
+  }
+}
+
+type Task9SceneController = SecondarySceneController & {
+  bindRendererEvents?: (runtime: {
+    sendRendererEvent(event: RendererToControllerEvent): void;
+    requestFrame(callback: () => void): number;
+    cancelFrame(id: number): void;
+  }) => () => void;
+  dispose?: () => void;
+};
+
+function bindTask9Runtime(
+  controller: SecondarySceneController,
+  frames: FakeAnimationFrames,
+  sent: RendererToControllerEvent[],
+): () => void {
+  const task9 = controller as Task9SceneController;
+  expect(task9.bindRendererEvents).toBeTypeOf("function");
+  return task9.bindRendererEvents!({
+    sendRendererEvent: (event) => sent.push(event),
+    requestFrame: frames.requestFrame,
+    cancelFrame: frames.cancelFrame,
+  });
+}
+
 describe("secondary scene controller", () => {
   it("keeps the ready page honest until controller checks complete", () => {
     const { root } = makeController();
@@ -88,44 +151,200 @@ describe("secondary scene controller", () => {
     expect(readyText).not.toContain("LOCAL CONTENT READY");
   });
 
-  it("arms one local Start request only after controller-ready status", () => {
+  it("emits each closed operator action once in its allowed run state", () => {
     const { root, controller } = makeController();
-    const statusController = controller as SecondarySceneController & {
-      applyEvent?: (event: RendererEvent) => void;
-      bindStartRequest?: (request: () => void) => () => void;
-    };
-    expect(statusController.applyEvent).toBeTypeOf("function");
-    expect(statusController.bindStartRequest).toBeTypeOf("function");
+    const frames = new FakeAnimationFrames();
+    const sent: RendererToControllerEvent[] = [];
+    const unbind = bindTask9Runtime(controller, frames, sent);
+    const start = root.querySelector<HTMLButtonElement>("[data-action='start-show']");
+    const restart = root.querySelector<HTMLButtonElement>("[data-action='restart-loop']");
+    const stop = root.querySelector<HTMLButtonElement>("[data-action='stop-show']");
 
-    let requests = 0;
-    const unbind = statusController.bindStartRequest?.(() => {
-      requests += 1;
+    expect(start).toBeInstanceOf(HTMLButtonElement);
+    expect(restart).toBeInstanceOf(HTMLButtonElement);
+    expect(stop).toBeInstanceOf(HTMLButtonElement);
+    expect(start?.disabled).toBe(true);
+    expect(restart?.hidden).toBe(true);
+    expect(stop?.hidden).toBe(true);
+    start?.click();
+    expect(sent).toEqual([]);
+
+    controller.applyEvent({
+      schema: 1,
+      type: "run-status",
+      generationId: 1,
+      state: "ready",
     });
-    const button = root.querySelector<HTMLButtonElement>("[data-action='start-show']");
-    expect(button).toBeInstanceOf(HTMLButtonElement);
+    expect(start?.hidden).toBe(false);
+    expect(start?.disabled).toBe(false);
+    start?.click();
+    start?.click();
+    expect(sent).toEqual([
+      { schema: 1, type: "operator-action", action: "start" },
+    ]);
 
-    expect(button?.disabled).toBe(true);
-    button?.click();
-    expect(requests).toBe(0);
+    controller.applyEvent({
+      schema: 1,
+      type: "run-status",
+      generationId: 1,
+      state: "running",
+    });
+    expect(restart?.hidden).toBe(true);
+    expect(stop?.hidden).toBe(false);
+    expect(stop?.disabled).toBe(false);
+    stop?.click();
+    stop?.click();
 
-    statusController.applyEvent?.({
+    controller.applyEvent({
+      schema: 1,
+      type: "run-status",
+      generationId: 2,
+      state: "safe-ready",
+      reason: "janvim-restart-limit",
+    });
+    expect(start?.hidden).toBe(true);
+    expect(restart?.hidden).toBe(false);
+    expect(stop?.hidden).toBe(false);
+    expect(restart?.disabled).toBe(false);
+    expect(stop?.disabled).toBe(false);
+    restart?.click();
+    restart?.click();
+
+    expect(sent).toEqual([
+      { schema: 1, type: "operator-action", action: "start" },
+      { schema: 1, type: "operator-action", action: "stop-show" },
+      { schema: 1, type: "operator-action", action: "restart-loop" },
+    ]);
+
+    unbind();
+    unbind();
+  });
+
+  it("acknowledges a contextual cue only after two animation frames", () => {
+    const { root, controller } = makeController();
+    const frames = new FakeAnimationFrames();
+    const sent: RendererToControllerEvent[] = [];
+    bindTask9Runtime(controller, frames, sent);
+    const event: RunCueEvent = {
+      schema: 1,
+      type: "run-cue",
+      generationId: 3,
+      loopId: "loop-3",
+      requiresPresentationAck: true,
+      cue: promptCue(),
+    };
+
+    controller.applyEvent(event);
+    expect(root.querySelector("[data-prompt-content]")?.textContent).toContain(
+      "孤舟读取夜色",
+    );
+    expect(sent).toEqual([]);
+    expect(frames.pending()).toBe(1);
+
+    frames.runNext();
+    expect(sent).toEqual([]);
+    expect(frames.pending()).toBe(1);
+
+    frames.runNext();
+    expect(sent).toEqual([
+      {
+        schema: 1,
+        type: "presentation-ack",
+        generationId: 3,
+        loopId: "loop-3",
+        cueId: "prompt-1",
+      },
+    ]);
+    expect(frames.pending()).toBe(0);
+  });
+
+  it("keeps the G2 ready page on the same closed Start action", () => {
+    const { root, controller } = makeController();
+    const frames = new FakeAnimationFrames();
+    const sent: RendererToControllerEvent[] = [];
+    bindTask9Runtime(controller, frames, sent);
+
+    controller.applyEvent({
       schema: 1,
       type: "controller-status",
       state: "ready",
     });
-    expect(button?.disabled).toBe(false);
-    button?.click();
-    button?.click();
-    expect(requests).toBe(1);
-    expect(button?.disabled).toBe(true);
+    const start = root.querySelector<HTMLButtonElement>("[data-action='start-show']");
+    expect(start?.disabled).toBe(false);
+    start?.click();
+    start?.click();
 
-    statusController.applyEvent?.({
+    expect(sent).toEqual([
+      { schema: 1, type: "operator-action", action: "start" },
+    ]);
+  });
+
+  it("never acknowledges raw G2 cues or contextual cues that do not require it", () => {
+    const { controller } = makeController();
+    const frames = new FakeAnimationFrames();
+    const sent: RendererToControllerEvent[] = [];
+    bindTask9Runtime(controller, frames, sent);
+
+    controller.applyEvent(promptCue());
+    controller.applyEvent({
       schema: 1,
-      type: "controller-status",
-      state: "complete-awaiting-close",
+      type: "run-cue",
+      generationId: 1,
+      loopId: "loop-1",
+      requiresPresentationAck: false,
+      cue: tokenCue("no-ack", "不要求 ACK。"),
     });
-    expect(button?.disabled).toBe(true);
-    unbind?.();
+
+    expect(frames.pending()).toBe(0);
+    expect(sent).toEqual([]);
+  });
+
+  it("cancels both presentation-frame phases on reset or dispose", () => {
+    const resetFixture = makeController();
+    const resetFrames = new FakeAnimationFrames();
+    const resetSent: RendererToControllerEvent[] = [];
+    bindTask9Runtime(resetFixture.controller, resetFrames, resetSent);
+    resetFixture.controller.applyEvent({
+      schema: 1,
+      type: "run-cue",
+      generationId: 1,
+      loopId: "loop-1",
+      requiresPresentationAck: true,
+      cue: promptCue(),
+    });
+    resetFrames.runNext();
+    expect(resetFrames.pending()).toBe(1);
+
+    resetFixture.controller.apply(editorCue("reset", { type: "reset" }, ["Reset"], "reset"));
+    expect(resetFrames.pending()).toBe(0);
+    resetFrames.runAll();
+    expect(resetSent).toEqual([]);
+
+    const disposeFixture = makeController();
+    const disposeFrames = new FakeAnimationFrames();
+    const disposeSent: RendererToControllerEvent[] = [];
+    const unbind = bindTask9Runtime(
+      disposeFixture.controller,
+      disposeFrames,
+      disposeSent,
+    );
+    disposeFixture.controller.applyEvent({
+      schema: 1,
+      type: "run-cue",
+      generationId: 2,
+      loopId: "loop-2",
+      requiresPresentationAck: true,
+      cue: promptCue(),
+    });
+    expect(disposeFrames.pending()).toBe(1);
+
+    const disposable = disposeFixture.controller as Task9SceneController;
+    expect(disposable.dispose).toBeTypeOf("function");
+    disposable.dispose?.();
+    expect(disposeFrames.pending()).toBe(0);
+    disposeFrames.runAll();
+    expect(disposeSent).toEqual([]);
+    unbind();
   });
 
   it("renders only the stable blocked reason and never arms Start", () => {

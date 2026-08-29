@@ -1,4 +1,7 @@
-import type { RendererEvent } from "@janvim-exhibition/show-schema";
+import type {
+  RendererEvent,
+  RendererToControllerEvent,
+} from "@janvim-exhibition/show-schema";
 
 import { sampleRendererFrameRate } from "./frame-rate-monitor";
 import { SecondarySceneController } from "./scene-controller";
@@ -6,7 +9,7 @@ import "./styles.css";
 
 type SecondaryShowBridge = {
   onShowEvent: (listener: (event: RendererEvent) => void) => () => void;
-  requestStart: () => void;
+  sendRendererEvent: (event: RendererToControllerEvent) => void;
 };
 
 declare global {
@@ -25,10 +28,22 @@ if (root !== null) {
 
   const bridge = window.janvimExhibition;
   if (bridge !== undefined) {
-    bridge.onShowEvent((event) => {
+    const unsubscribe = bridge.onShowEvent((event) => {
       scene.applyEvent(event);
     });
-    scene.bindStartRequest(() => bridge.requestStart());
+    const disposeScene = scene.bindRendererEvents({
+      sendRendererEvent: (event) => bridge.sendRendererEvent(event),
+      requestFrame: (callback) => window.requestAnimationFrame(callback),
+      cancelFrame: (id) => window.cancelAnimationFrame(id),
+    });
+    window.addEventListener(
+      "beforeunload",
+      () => {
+        unsubscribe();
+        disposeScene();
+      },
+      { once: true },
+    );
   }
 
   void sampleRendererFrameRate({

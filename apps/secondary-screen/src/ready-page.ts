@@ -73,20 +73,40 @@ export function createReadyPage(
   const readyStatus = document.createElement("p");
   readyStatus.dataset.readyStatus = "";
   readyStatus.textContent = "CONTROLLER STANDBY / WAITING FOR CONTROLLER CHECKS";
+
+  const operatorControls = document.createElement("nav");
+  operatorControls.className = "operator-controls";
+  operatorControls.setAttribute("aria-label", "Local show controls");
   const startButton = document.createElement("button");
   startButton.type = "button";
   startButton.dataset.action = "start-show";
   startButton.textContent = "START 90s REHEARSAL";
   startButton.disabled = true;
-  ready.append(readyTitle, readyStatus, startButton);
+  const restartButton = document.createElement("button");
+  restartButton.type = "button";
+  restartButton.dataset.action = "restart-loop";
+  restartButton.textContent = "RESTART LOOP";
+  restartButton.disabled = true;
+  restartButton.hidden = true;
+  const stopButton = document.createElement("button");
+  stopButton.type = "button";
+  stopButton.dataset.action = "stop-show";
+  stopButton.textContent = "STOP SHOW";
+  stopButton.disabled = true;
+  stopButton.hidden = true;
+  operatorControls.append(startButton, restartButton, stopButton);
+  ready.append(readyTitle, readyStatus);
 
-  surface.append(header, workspace, keyRegion, p1Layer, ready);
+  surface.append(header, workspace, keyRegion, p1Layer, ready, operatorControls);
   root.replaceChildren(surface);
 
   return {
     ready,
     readyStatus,
+    operatorControls,
     startButton,
+    restartButton,
+    stopButton,
     promptContent,
     responseContent,
     acceptance,
