@@ -1,6 +1,6 @@
 # Task 9 recovery, offline operation, and three-loop soak design
 
-- Status: approved in chat; written specification pending owner review
+- Status: approved by owner on 2026-08-29
 - Date: 2026-08-29
 - Parent plan: `docs/plans/2026-08-28-four-day-dual-projector-delivery.md`, Task 9
 - Binding artwork design: `docs/specs/2026-08-28-dual-projector-generative-performance-design.md`
