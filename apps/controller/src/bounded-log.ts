@@ -27,6 +27,15 @@ export interface BoundedLogOptions {
   maxTotalBytes?: number;
 }
 
+export type RunLogStream = "controller" | "recovery" | "janvim-stdout" | "janvim-stderr";
+
+const RUN_LOG_STREAMS: readonly RunLogStream[] = [
+  "controller",
+  "recovery",
+  "janvim-stdout",
+  "janvim-stderr",
+];
+
 export class BoundedLog {
   private readonly storage: LogStorage;
   private readonly basePath: string;
@@ -110,6 +119,163 @@ export class BoundedLog {
   }
 }
 
+export class RunLogBudget {
+  private readonly storage: LogStorage;
+  private readonly basePath: string;
+  private readonly secrets: string[];
+  private readonly maxFileBytes: number;
+  private readonly maxTotalBytes: number;
+  private readonly rotationSlots: number;
+  private readonly activeSlots: Record<RunLogStream, number> = {
+    controller: 0,
+    recovery: 0,
+    "janvim-stdout": 0,
+    "janvim-stderr": 0,
+  };
+  private totalBytes = 0;
+  private fileCount = 0;
+  private incomplete = false;
+  private initialized = false;
+  private evictionStreamIndex = 0;
+  private evictionSlot = 0;
+
+  public constructor(options: BoundedLogOptions) {
+    this.maxFileBytes = positiveInteger(options.maxFileBytes ?? DEFAULT_LOG_FILE_BYTES, "file");
+    this.maxTotalBytes = positiveInteger(options.maxTotalBytes ?? DEFAULT_LOG_TOTAL_BYTES, "total");
+    if (this.maxTotalBytes < this.maxFileBytes) {
+      throw new Error("Log total limit must be at least one file");
+    }
+    if (options.basePath.length === 0) throw new Error("Log base path is required");
+    if (options.secrets.length > 32) throw new Error("Log secret list is bounded to 32 values");
+
+    this.storage = options.storage;
+    this.basePath = options.basePath;
+    this.secrets = options.secrets
+      .filter((secret) => secret.length > 0)
+      .flatMap((secret) => {
+        const jsonEscaped = JSON.stringify(secret).slice(1, -1);
+        return jsonEscaped === secret ? [secret] : [secret, jsonEscaped];
+      })
+      .sort((left, right) => right.length - left.length);
+    this.rotationSlots = Math.max(1, Math.ceil(this.maxTotalBytes / this.maxFileBytes));
+  }
+
+  public write(stream: RunLogStream, value: Uint8Array | string): boolean {
+    try {
+      if (!isRunLogStream(stream)) return this.fail();
+      this.initializeLedger();
+
+      let text = typeof value === "string" ? value : Buffer.from(value).toString("utf8");
+      for (const secret of this.secrets) text = text.split(secret).join("[REDACTED]");
+
+      const textBytes = Buffer.byteLength(text, "utf8");
+      if (textBytes > this.maxFileBytes) return this.fail();
+
+      let slot = this.activeSlots[stream];
+      let path = this.streamPath(stream, slot);
+      if (this.storage.size(path) + textBytes > this.maxFileBytes) {
+        slot = (slot + 1) % this.rotationSlots;
+        this.activeSlots[stream] = slot;
+        path = this.streamPath(stream, slot);
+        this.removeTracked(path);
+      }
+
+      if (!this.evictUntilFits(textBytes)) return this.fail();
+
+      const existed = this.storage.exists(path);
+      this.storage.append(path, text);
+      this.totalBytes += textBytes;
+      if (!existed) this.fileCount += 1;
+      return true;
+    } catch {
+      return this.fail();
+    }
+  }
+
+  public writeJson(stream: RunLogStream, value: Record<string, unknown>): boolean {
+    try {
+      return this.write(stream, `${JSON.stringify(value)}\n`);
+    } catch {
+      return this.fail();
+    }
+  }
+
+  public snapshot(): { totalBytes: number; fileCount: number; incomplete: boolean } {
+    return {
+      totalBytes: this.totalBytes,
+      fileCount: this.fileCount,
+      incomplete: this.incomplete,
+    };
+  }
+
+  private initializeLedger(): void {
+    if (this.initialized) return;
+
+    let totalBytes = 0;
+    let fileCount = 0;
+    for (const stream of RUN_LOG_STREAMS) {
+      for (let slot = 0; slot < this.rotationSlots; slot += 1) {
+        const path = this.streamPath(stream, slot);
+        if (!this.storage.exists(path)) continue;
+        totalBytes += this.storage.size(path);
+        fileCount += 1;
+      }
+    }
+    this.totalBytes = totalBytes;
+    this.fileCount = fileCount;
+    this.initialized = true;
+  }
+
+  private evictUntilFits(bytes: number): boolean {
+    const startStreamIndex = this.evictionStreamIndex;
+    const startSlot = this.evictionSlot;
+    let first = true;
+
+    while (this.totalBytes + bytes > this.maxTotalBytes) {
+      if (
+        !first &&
+        this.evictionStreamIndex === startStreamIndex &&
+        this.evictionSlot === startSlot
+      ) {
+        return false;
+      }
+      first = false;
+
+      const stream = RUN_LOG_STREAMS[this.evictionStreamIndex]!;
+      const path = this.streamPath(stream, this.evictionSlot);
+      this.advanceEvictionCursor();
+      this.removeTracked(path);
+    }
+    return true;
+  }
+
+  private advanceEvictionCursor(): void {
+    this.evictionStreamIndex += 1;
+    if (this.evictionStreamIndex < RUN_LOG_STREAMS.length) return;
+
+    this.evictionStreamIndex = 0;
+    this.evictionSlot = (this.evictionSlot + 1) % this.rotationSlots;
+  }
+
+  private removeTracked(path: string): void {
+    if (!this.storage.exists(path)) return;
+    const bytes = this.storage.size(path);
+    this.storage.remove(path);
+    this.totalBytes -= bytes;
+    this.fileCount -= 1;
+  }
+
+  private streamPath(stream: RunLogStream, slot: number): string {
+    const rotation = slot === 0 ? "" : `.${slot}`;
+    return `${this.basePath}.${stream}${rotation}`;
+  }
+
+  private fail(): false {
+    this.incomplete = true;
+    return false;
+  }
+}
+
 export class FileLogStorage implements LogStorage {
   public append(path: string, text: string): void {
     mkdirSync(dirname(path), { recursive: true });
@@ -138,4 +304,13 @@ function positiveInteger(value: number, label: string): number {
     throw new Error(`Log ${label} limit must be a positive integer`);
   }
   return value;
+}
+
+function isRunLogStream(value: string): value is RunLogStream {
+  return (
+    value === "controller" ||
+    value === "recovery" ||
+    value === "janvim-stdout" ||
+    value === "janvim-stderr"
+  );
 }

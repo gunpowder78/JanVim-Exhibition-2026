@@ -1,11 +1,14 @@
 import { describe, expect, it } from "vitest";
 
+import * as boundedLogModule from "../src/bounded-log.ts";
 import * as supervisorModule from "../src/supervisor.ts";
 import {
   BoundedLog,
   DEFAULT_LOG_FILE_BYTES,
   DEFAULT_LOG_TOTAL_BYTES,
+  type BoundedLogOptions,
   type LogStorage,
+  type RunLogStream,
 } from "../src/bounded-log.ts";
 
 type RestartDecision =
@@ -28,6 +31,16 @@ type SupervisorPolicyModule = {
   GenerationGate?: new (initialGenerationId?: number) => GenerationGateInstance;
 };
 
+type RunLogBudgetInstance = {
+  write(stream: RunLogStream, value: Uint8Array | string): boolean;
+  writeJson(stream: RunLogStream, value: Record<string, unknown>): boolean;
+  snapshot(): { totalBytes: number; fileCount: number; incomplete: boolean };
+};
+
+type RunLogBudgetModule = {
+  RunLogBudget?: new (options: BoundedLogOptions) => RunLogBudgetInstance;
+};
+
 function newRestartBudget(): RestartBudgetInstance {
   const RestartBudget = (supervisorModule as SupervisorPolicyModule).RestartBudget;
   expect(RestartBudget).toBeTypeOf("function");
@@ -40,10 +53,18 @@ function newGenerationGate(initialGenerationId?: number): GenerationGateInstance
   return new GenerationGate!(initialGenerationId);
 }
 
+function newRunLogBudget(options: BoundedLogOptions): RunLogBudgetInstance {
+  const RunLogBudget = (boundedLogModule as RunLogBudgetModule).RunLogBudget;
+  expect(RunLogBudget).toBeTypeOf("function");
+  return new RunLogBudget!(options);
+}
+
 class MemoryLogStorage implements LogStorage {
   public readonly files = new Map<string, string>();
+  public readonly pathsSeen = new Set<string>();
 
   public append(path: string, text: string): void {
+    this.pathsSeen.add(path);
     this.files.set(path, (this.files.get(path) ?? "") + text);
   }
 
@@ -58,12 +79,25 @@ class MemoryLogStorage implements LogStorage {
   public rename(from: string, to: string): void {
     const value = this.files.get(from);
     if (value === undefined) return;
+    this.pathsSeen.add(to);
     this.files.set(to, value);
     this.files.delete(from);
   }
 
   public remove(path: string): void {
     this.files.delete(path);
+  }
+}
+
+class FailOnceLogStorage extends MemoryLogStorage {
+  private failNextAppend = true;
+
+  public override append(path: string, text: string): void {
+    if (this.failNextAppend) {
+      this.failNextAppend = false;
+      throw new Error("injected append failure");
+    }
+    super.append(path, text);
   }
 }
 
@@ -169,5 +203,129 @@ describe("bounded structured log", () => {
     });
 
     expect(() => log.write({ message: "x".repeat(100) })).toThrow(/entry exceeds/i);
+  });
+});
+
+describe("shared run log budget", () => {
+  it("shares one bounded quota across fixed stream rotation names for 1000 restarted-child writes", () => {
+    const storage = new MemoryLogStorage();
+    const streams = [
+      "controller",
+      "recovery",
+      "janvim-stdout",
+      "janvim-stderr",
+    ] as const satisfies readonly RunLogStream[];
+    const bridgeToken = `bridge-token-${"x".repeat(120)}`;
+    const privatePath = "D:\\private\\show-secret";
+    const budget = newRunLogBudget({
+      storage,
+      basePath: "run.log",
+      secrets: [bridgeToken, privatePath],
+      maxFileBytes: 100,
+      maxTotalBytes: 300,
+    });
+    let pathsAfterWarmup: string[] | undefined;
+
+    for (let index = 0; index < 1_000; index += 1) {
+      const stream = streams[index % streams.length]!;
+      const restart = Math.floor(index / streams.length);
+      const record = {
+        restart,
+        generation: restart + 1,
+        token: bridgeToken,
+        path: privatePath,
+      };
+      const written =
+        index % 3 === 0
+          ? budget.writeJson(stream, record)
+          : index % 3 === 1
+            ? budget.write(
+                stream,
+                `restart=${restart};generation=${restart + 1};token=${bridgeToken};path=${privatePath}\n`,
+              )
+            : budget.write(
+                stream,
+                Buffer.from(
+                  `restart=${restart};generation=${restart + 1};token=${bridgeToken};path=${privatePath}\n`,
+                  "utf8",
+                ),
+              );
+
+      expect(written).toBe(true);
+      const totalBytes = [...storage.files.keys()].reduce(
+        (total, path) => total + storage.size(path),
+        0,
+      );
+      for (const path of storage.files.keys()) {
+        expect(storage.size(path)).toBeLessThanOrEqual(100);
+      }
+      expect(totalBytes).toBeLessThanOrEqual(300);
+      expect(budget.snapshot()).toEqual({
+        totalBytes,
+        fileCount: storage.files.size,
+        incomplete: false,
+      });
+
+      if (index === 99) pathsAfterWarmup = [...storage.pathsSeen].sort();
+    }
+
+    const combined = [...storage.files.values()].join("");
+    expect(combined).not.toContain(bridgeToken);
+    expect(combined).not.toContain(privatePath);
+    expect(combined).toContain("[REDACTED]");
+    expect(storage.pathsSeen.size).toBeLessThanOrEqual(streams.length * 3);
+    expect([...storage.pathsSeen].sort()).toEqual(pathsAfterWarmup);
+    for (const path of storage.pathsSeen) {
+      expect(path).toMatch(
+        /^run\.log\.(controller|recovery|janvim-stdout|janvim-stderr)(?:\.[12])?$/,
+      );
+      expect(path).not.toMatch(/generation|restart/i);
+    }
+  });
+
+  it("returns false and marks logging incomplete for an oversized record", () => {
+    const storage = new MemoryLogStorage();
+    const budget = newRunLogBudget({
+      storage,
+      basePath: "run.log",
+      secrets: [],
+      maxFileBytes: 32,
+      maxTotalBytes: 64,
+    });
+
+    expect(budget.writeJson("controller", { message: "x".repeat(100) })).toBe(false);
+    expect(storage.files.size).toBe(0);
+    expect(budget.snapshot()).toEqual({ totalBytes: 0, fileCount: 0, incomplete: true });
+  });
+
+  it("redacts JSON-escaped supplied secrets before byte accounting and writing", () => {
+    const storage = new MemoryLogStorage();
+    const secretPath = "D:\\private\\show-secret";
+    const budget = newRunLogBudget({
+      storage,
+      basePath: "run.log",
+      secrets: [secretPath],
+      maxFileBytes: 100,
+      maxTotalBytes: 300,
+    });
+
+    expect(budget.writeJson("controller", { path: secretPath })).toBe(true);
+    expect([...storage.files.values()].join("")).toBe('{"path":"[REDACTED]"}\n');
+  });
+
+  it("contains storage errors without throwing and keeps the incomplete marker sticky", () => {
+    const storage = new FailOnceLogStorage();
+    const budget = newRunLogBudget({
+      storage,
+      basePath: "run.log",
+      secrets: [],
+      maxFileBytes: 100,
+      maxTotalBytes: 300,
+    });
+
+    expect(budget.write("recovery", "first\n")).toBe(false);
+    expect(budget.snapshot()).toEqual({ totalBytes: 0, fileCount: 0, incomplete: true });
+    expect(budget.write("recovery", "second\n")).toBe(true);
+    expect(budget.snapshot()).toEqual({ totalBytes: 7, fileCount: 1, incomplete: true });
   });
 });
