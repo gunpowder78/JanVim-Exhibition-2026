@@ -231,6 +231,7 @@ function validShowRecord(): ShowRunEvidenceRecord {
   return {
     ...record,
     mode: "Show",
+    offlineVerified: false,
     aggregate: { ...record.aggregate, acceptanceOutcome: "diagnostic" },
     shutdown: { ...record.shutdown, requestedBy: "operator-stop" },
   };
@@ -613,7 +614,9 @@ describe("strict show-run evidence schema", () => {
     const falseDespiteAllOffline = cloneRecord();
     falseDespiteAllOffline.offlineVerified = false;
     falseDespiteAllOffline.aggregate.acceptanceOutcome = "diagnostic";
-    expect(() => parseShowRunEvidence(falseDespiteAllOffline)).toThrow();
+    expect(
+      parseShowRunEvidence(falseDespiteAllOffline).offlineVerified,
+    ).toBe(false);
 
     const wrongSampleCounts = cloneRecord();
     wrongSampleCounts.aggregate.offlineSampleCount = 4;

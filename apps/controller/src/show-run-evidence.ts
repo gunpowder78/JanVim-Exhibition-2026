@@ -713,6 +713,7 @@ const showRunEvidenceSchema = z
     }
 
     const expectedOfflineVerified =
+      record.aggregate.acceptanceOutcome !== "diagnostic" &&
       record.offlineSnapshots.length > 0 &&
       record.aggregate.offlineSampleCount > 0 &&
       record.aggregate.onlineSampleCount === 0 &&
