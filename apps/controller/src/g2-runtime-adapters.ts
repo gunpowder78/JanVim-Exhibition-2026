@@ -29,7 +29,7 @@ import {
 import { BoundedLog, FileLogStorage, type LogStorage } from "./bounded-log.js";
 import { BridgeServer } from "./bridge-server.js";
 import {
-  openSecondaryReadyWindow,
+  createSecondaryWindowPlan,
   routeDisplays,
   type DisplayRoute,
   type Rectangle,
@@ -69,6 +69,15 @@ import {
   parseConfirmedRehearsalDisplayMap,
   parseRehearsalDisplayCatalog,
 } from "./rehearsal-display-map.js";
+import {
+  assertFrozenSnapshotUnchanged,
+  createBoundedChildStreamSink,
+  installLocalOnlyWebGuards,
+  readFrozenRuntimeSnapshot,
+  resolveBelowRoot,
+  type ChildStreamSink,
+  type FrozenRuntimeSnapshot,
+} from "./runtime-adapter-common.js";
 import {
   G2RuntimeComposition,
   type G2BridgeHandle,
@@ -198,17 +207,18 @@ type RuntimeCommand = Extract<G2Command, { mode: "ValidateOnly" | "Run" }>;
 
 interface ValidatedRuntimeInputs {
   artifactLockBytes: Buffer;
+  artifactLockSnapshot: FrozenRuntimeSnapshot;
   displayMapBytes: Buffer;
+  displayMapSnapshot: FrozenRuntimeSnapshot;
   displayMap: ReturnType<typeof parseConfirmedRehearsalDisplayMap>;
   showConfigBytes: Buffer;
+  showConfigSnapshot: FrozenRuntimeSnapshot;
   manifestBytes: Buffer;
+  manifestSnapshot: FrozenRuntimeSnapshot;
   manifest: ShowManifest;
   poemBytes: Buffer;
+  poemSnapshot: FrozenRuntimeSnapshot;
 }
-
-const REMOTE_REQUEST_FILTER = {
-  urls: ["http://*/*", "https://*/*", "ws://*/*", "wss://*/*"],
-};
 const PRIVATE_ENVIRONMENT_DENYLIST = new Set([
   "MYVIMRC",
   "VIMINIT",
@@ -229,6 +239,8 @@ export function createG2RuntimeDependencies(
   let logger: BoundedLog | undefined;
   let stdoutCapture: BoundedChildOutput | undefined;
   let stderrCapture: BoundedChildOutput | undefined;
+  let stdoutStreamSink: ChildStreamSink | undefined;
+  let stderrStreamSink: ChildStreamSink | undefined;
   let stdoutOutput: G2ExclusiveOutput | undefined;
   let stderrOutput: G2ExclusiveOutput | undefined;
   let outputSettled = false;
@@ -290,12 +302,7 @@ export function createG2RuntimeDependencies(
     routeDisplays: async (): Promise<DisplayRoute> => {
       try {
         const inputs = requireValidatedInputs();
-        readUnchangedFile(
-          host,
-          command.displayMapPath,
-          inputs.displayMapBytes,
-          "display-map",
-        );
+        assertFrozenSnapshotUnchanged(inputs.displayMapSnapshot);
         return routeDisplays(
           normalizeRuntimeDisplays(host.screen.getAllDisplays()),
           inputs.displayMap,
@@ -364,6 +371,20 @@ export function createG2RuntimeDependencies(
         CHILD_TAIL_BYTES,
         (chunk) => stderrOutput?.write(chunk),
       );
+      stdoutStreamSink = createBoundedChildStreamSink({
+        stream: "janvim-stdout",
+        write: (_stream, chunk) => {
+          stdoutCapture?.append(chunk);
+          return true;
+        },
+      });
+      stderrStreamSink = createBoundedChildStreamSink({
+        stream: "janvim-stderr",
+        write: (_stream, chunk) => {
+          stderrCapture?.append(chunk);
+          return true;
+        },
+      });
 
       const privateBaseEnvironment = { ...host.baseEnvironment };
       for (const key of Object.keys(privateBaseEnvironment)) {
@@ -398,8 +419,12 @@ export function createG2RuntimeDependencies(
         return { ok: false, reason: "child-output-unavailable" };
       }
       startedChild = child;
-      const onStdout = (chunk: Buffer): void => stdoutCapture?.append(chunk);
-      const onStderr = (chunk: Buffer): void => stderrCapture?.append(chunk);
+      const onStdout = (chunk: Buffer): void => {
+        stdoutStreamSink?.append(chunk);
+      };
+      const onStderr = (chunk: Buffer): void => {
+        stderrStreamSink?.append(chunk);
+      };
       child.stdout.on("data", onStdout);
       child.stderr.on("data", onStderr);
       detachChildOutput = () => {
@@ -522,40 +547,19 @@ export function createG2RuntimeDependencies(
 
     finalizeEvidence: async (input: G2EvidenceFinalization) => {
       const inputs = requireValidatedInputs();
-      readUnchangedFile(
-        host,
-        paths.artifactLock,
-        inputs.artifactLockBytes,
-        "artifact-lock",
-      );
+      assertFrozenSnapshotUnchanged(inputs.artifactLockSnapshot);
       const lock = parseArtifactLockBytes(inputs.artifactLockBytes);
-      const mapBytes = readUnchangedFile(
-        host,
-        command.displayMapPath,
-        inputs.displayMapBytes,
-        "display-map",
-      );
-      const configBytes = readUnchangedFile(
-        host,
-        paths.showConfig,
-        inputs.showConfigBytes,
-        "show-config",
-      );
+      assertFrozenSnapshotUnchanged(inputs.displayMapSnapshot);
+      const mapBytes = inputs.displayMapBytes;
+      assertFrozenSnapshotUnchanged(inputs.showConfigSnapshot);
+      const configBytes = inputs.showConfigBytes;
       if (sha256(configBytes) !== lock.configSha256) {
         throw new Error("show-config-hash-mismatch");
       }
-      const manifestBytes = readUnchangedFile(
-        host,
-        paths.manifest,
-        inputs.manifestBytes,
-        "show-manifest",
-      );
-      const poemBytes = readUnchangedFile(
-        host,
-        paths.poem,
-        inputs.poemBytes,
-        "poem",
-      );
+      assertFrozenSnapshotUnchanged(inputs.manifestSnapshot);
+      const manifestBytes = inputs.manifestBytes;
+      assertFrozenSnapshotUnchanged(inputs.poemSnapshot);
+      const poemBytes = inputs.poemBytes;
       const manifest = inputs.manifest;
       const record: G2EvidenceRecord = {
         schema: 1,
@@ -642,64 +646,40 @@ async function openGuardedSecondary(
   preloadPath: string,
 ): Promise<G2SecondaryHandle> {
   const entryUrl = pathToFileURL(entryPath).href;
-  let window: G2BrowserWindowAdapter | undefined;
-  let remoteFilterDisposed = false;
-  const disposeRemoteFilter = (): void => {
-    if (remoteFilterDisposed || window === undefined) return;
-    remoteFilterDisposed = true;
-    window.webContents.session.webRequest.onBeforeRequest(null);
-  };
-
-  let opened: Awaited<ReturnType<typeof openSecondaryReadyWindow>>;
+  const plan = createSecondaryWindowPlan(display.bounds, preloadPath, entryUrl);
+  const window = new host.BrowserWindow(
+    plan.browserWindowOptions as unknown as Record<string, unknown>,
+  );
+  const disposeGuards = installLocalOnlyWebGuards({
+    webContents: window.webContents,
+    entryUrl,
+  });
   try {
-    opened = await openSecondaryReadyWindow({
-      bounds: display.bounds,
-      preloadPath,
-      entryUrl,
-      createWindow: (options) => {
-        window = new host.BrowserWindow(options as unknown as Record<string, unknown>);
-        window.webContents.session.webRequest.onBeforeRequest(
-          { urls: [...REMOTE_REQUEST_FILTER.urls] },
-          (_details, callback) => callback({ cancel: true }),
-        );
-        return {
-          webContents: window.webContents,
-          loadURL: async (targetUrl) => {
-            try {
-              await host.runWithDeadline(15_000, () => window!.loadURL(targetUrl));
-            } catch (error) {
-              if (!window!.isDestroyed()) window!.destroy();
-              throw error;
-            }
-          },
-        } as SecondaryBrowserWindowAdapter;
-      },
-    });
+    await host.runWithDeadline(15_000, () => window.loadURL(entryUrl));
   } catch (error) {
-    disposeRemoteFilter();
+    if (!window.isDestroyed()) window.destroy();
+    disposeGuards();
     throw error;
   }
-  const exactWindow = window!;
   let resourcesDisposed = false;
   const disposeResources = (): void => {
     if (resourcesDisposed) return;
     resourcesDisposed = true;
-    opened.disposeNavigationGuard();
-    disposeRemoteFilter();
+    disposeGuards();
   };
-  exactWindow.once("closed", disposeResources);
+  window.once("closed", disposeResources);
 
   return {
     send: (event: RendererEvent) => {
-      if (!exactWindow.isDestroyed()) exactWindow.webContents.send(SHOW_EVENT_CHANNEL, event);
+      if (!window.isDestroyed()) window.webContents.send(SHOW_EVENT_CHANNEL, event);
     },
     onDestroyed: (listener) => {
-      exactWindow.on("closed", listener);
-      return () => exactWindow.removeListener("closed", listener);
+      window.on("closed", listener);
+      return () => window.removeListener("closed", listener);
     },
     close: () => {
       disposeResources();
-      if (!exactWindow.isDestroyed()) exactWindow.close();
+      if (!window.isDestroyed()) window.close();
     },
   };
 }
@@ -747,48 +727,36 @@ function normalizeHost(source: G2RuntimeAdapterHost): NormalizedRuntimeHost {
 
 function runtimePaths(repositoryRoot: string, rehearsalRoot: string) {
   return {
-    artifactLock: win32.join(repositoryRoot, "janvim-artifact.lock.json"),
-    verifyRuntimeScript: win32.join(repositoryRoot, "scripts", "verify-runtime.ps1"),
-    windowPlacementScript: win32.join(
+    artifactLock: resolveBelowRoot(repositoryRoot, "janvim-artifact.lock.json"),
+    verifyRuntimeScript: resolveBelowRoot(repositoryRoot, "scripts\\verify-runtime.ps1"),
+    windowPlacementScript: resolveBelowRoot(
       repositoryRoot,
-      "scripts",
-      "place-janvim-window.ps1",
+      "scripts\\place-janvim-window.ps1",
     ),
-    janvimRoot: win32.join(repositoryRoot, "runtime", "janvim"),
-    janvimExecutable: win32.join(
+    janvimRoot: resolveBelowRoot(repositoryRoot, "runtime\\janvim"),
+    janvimExecutable: resolveBelowRoot(
       repositoryRoot,
-      "runtime",
-      "janvim",
-      "janvim-core.exe",
+      "runtime\\janvim\\janvim-core.exe",
     ),
-    privateUserRoot: win32.join(repositoryRoot, "runtime", "user-root"),
-    showConfig: win32.join(repositoryRoot, "show", "janvim-show.toml"),
-    poem: win32.join(repositoryRoot, "content", "fixture", "poem.txt"),
-    manifest: win32.join(
+    privateUserRoot: resolveBelowRoot(repositoryRoot, "runtime\\user-root"),
+    showConfig: resolveBelowRoot(repositoryRoot, "show\\janvim-show.toml"),
+    poem: resolveBelowRoot(repositoryRoot, "content\\fixture\\poem.txt"),
+    manifest: resolveBelowRoot(
       repositoryRoot,
-      "content",
-      "fixture",
-      "show.manifest.json",
+      "content\\fixture\\show.manifest.json",
     ),
-    secondaryEntry: win32.join(
+    secondaryEntry: resolveBelowRoot(
       repositoryRoot,
-      "apps",
-      "secondary-screen",
-      "dist",
-      "index.html",
+      "apps\\secondary-screen\\dist\\index.html",
     ),
-    preloadBundle: win32.join(
+    preloadBundle: resolveBelowRoot(
       repositoryRoot,
-      "apps",
-      "controller",
-      "dist",
-      "preload",
-      "preload.cjs",
+      "apps\\controller\\dist\\preload\\preload.cjs",
     ),
-    stdoutLog: win32.join(rehearsalRoot, "janvim.stdout.log"),
-    stderrLog: win32.join(rehearsalRoot, "janvim.stderr.log"),
-    controllerLog: win32.join(rehearsalRoot, "controller.ndjson"),
-    evidence: win32.join(rehearsalRoot, "g2-run.json"),
+    stdoutLog: resolveBelowRoot(rehearsalRoot, "janvim.stdout.log"),
+    stderrLog: resolveBelowRoot(rehearsalRoot, "janvim.stderr.log"),
+    controllerLog: resolveBelowRoot(rehearsalRoot, "controller.ndjson"),
+    evidence: resolveBelowRoot(rehearsalRoot, "g2-run.json"),
   };
 }
 
@@ -820,40 +788,54 @@ function validateStaticRuntimeInputs(
   paths: ReturnType<typeof runtimePaths>,
   displayMapPath: string,
 ): ValidatedRuntimeInputs {
-  const artifactLockBytes = host.readFile(paths.artifactLock);
+  const artifactLock = readFrozenG2File(host, paths.artifactLock, "artifact-lock");
+  const artifactLockBytes = artifactLock.bytes;
   const lock = parseArtifactLockBytes(artifactLockBytes);
-  const showConfigBytes = host.readFile(paths.showConfig);
+  const showConfig = readFrozenG2File(host, paths.showConfig, "show-config");
+  const showConfigBytes = showConfig.bytes;
   if (sha256(showConfigBytes) !== lock.configSha256) {
     throw new Error("show-config-hash-mismatch");
   }
-  const displayMapBytes = host.readFile(displayMapPath);
+  const displayMapFile = readFrozenG2File(host, displayMapPath, "display-map");
+  const displayMapBytes = displayMapFile.bytes;
   const displayMap = parseConfirmedRehearsalDisplayMap(
     JSON.parse(displayMapBytes.toString("utf8")),
   );
-  const manifestBytes = host.readFile(paths.manifest);
+  const manifestFile = readFrozenG2File(host, paths.manifest, "show-manifest");
+  const manifestBytes = manifestFile.bytes;
   const manifest = parseShowManifest(JSON.parse(manifestBytes.toString("utf8")));
-  const poemBytes = host.readFile(paths.poem);
+  const poemFile = readFrozenG2File(host, paths.poem, "poem");
+  const poemBytes = poemFile.bytes;
   if (sha256(poemBytes) !== manifest.poemSha256) throw new Error("poem-hash-mismatch");
   return {
     artifactLockBytes: Buffer.from(artifactLockBytes),
+    artifactLockSnapshot: artifactLock.snapshot,
     displayMapBytes: Buffer.from(displayMapBytes),
+    displayMapSnapshot: displayMapFile.snapshot,
     displayMap,
     showConfigBytes: Buffer.from(showConfigBytes),
+    showConfigSnapshot: showConfig.snapshot,
     manifestBytes: Buffer.from(manifestBytes),
+    manifestSnapshot: manifestFile.snapshot,
     manifest,
     poemBytes: Buffer.from(poemBytes),
+    poemSnapshot: poemFile.snapshot,
   };
 }
 
-function readUnchangedFile(
+function readFrozenG2File(
   host: Pick<NormalizedRuntimeHost, "readFile">,
   path: string,
-  expected: Buffer,
   label: string,
-): Buffer {
-  const current = host.readFile(path);
-  if (!current.equals(expected)) throw new Error(`${label}-changed-during-run`);
-  return current;
+): { bytes: Buffer; snapshot: FrozenRuntimeSnapshot } {
+  const snapshot = readFrozenRuntimeSnapshot({
+    readFile: (targetPath) => host.readFile(targetPath),
+    files: [{ label, path }],
+  });
+  return {
+    bytes: Buffer.from(snapshot.files[0]!.bytes),
+    snapshot,
+  };
 }
 
 function createRunLogger(host: NormalizedRuntimeHost, path: string): BoundedLog {

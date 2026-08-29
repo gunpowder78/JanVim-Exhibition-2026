@@ -120,8 +120,19 @@ function createAdapterHarness(
   const outputFiles = new Map<string, Buffer>();
   const child = new FakeChild();
   const bridgeToken = "ab".repeat(24);
+  const readPaths: string[] = [];
   let spawnCall:
-    | { file: string; args: readonly string[]; env: NodeJS.ProcessEnv }
+    | {
+        file: string;
+        args: readonly string[];
+        options: {
+          cwd: string;
+          env: NodeJS.ProcessEnv;
+          shell: false;
+          windowsHide: false;
+          stdio: "pipe";
+        };
+      }
     | undefined;
   let verifyInvocation:
     | { timeoutMs: number; maxStdoutBytes: number; maxStderrBytes: number }
@@ -136,6 +147,12 @@ function createAdapterHarness(
   let requestFilter: { urls: string[] } = { urls: [] };
   let beforeRequest:
     | ((details: { url: string }, callback: (result: { cancel: boolean }) => void) => void)
+    | undefined;
+  let navigationListener:
+    | ((event: { preventDefault(): void }, targetUrl: string) => void)
+    | undefined;
+  let windowOpenHandler:
+    | ((details: { url: string }) => { action: "deny" })
     | undefined;
   let evidenceRecord: unknown;
   const sentRendererEvents: Array<{ channel: string; payload: unknown }> = [];
@@ -162,10 +179,17 @@ function createAdapterHarness(
     public readonly send = vi.fn((channel: string, payload: unknown) => {
       sentRendererEvents.push({ channel, payload });
     });
-    public readonly setWindowOpenHandler = vi.fn(() => ({ action: "deny" as const }));
+    public readonly setWindowOpenHandler = vi.fn(
+      (handler: (details: { url: string }) => { action: "deny" }) => {
+        windowOpenHandler = handler;
+      },
+    );
 
     public override on(eventName: string | symbol, listener: (...args: never[]) => void): this {
-      if (eventName === "will-navigate") navigationGuardInstalled = true;
+      if (eventName === "will-navigate") {
+        navigationGuardInstalled = true;
+        navigationListener = listener as unknown as typeof navigationListener;
+      }
       return super.on(eventName, listener);
     }
   }
@@ -216,7 +240,9 @@ function createAdapterHarness(
     },
     baseEnvironment,
     readFile: (path: string) => {
-      const value = files.get(win32.resolve(path));
+      const resolvedPath = win32.resolve(path);
+      readPaths.push(resolvedPath);
+      const value = files.get(resolvedPath);
       if (value === undefined) throw new Error(`missing fake file: ${path}`);
       return Buffer.from(value);
     },
@@ -266,8 +292,18 @@ function createAdapterHarness(
         stderr: "",
       };
     },
-    spawn: (file: string, args: readonly string[], spawnOptions: { env: NodeJS.ProcessEnv }) => {
-      spawnCall = { file, args, env: spawnOptions.env };
+    spawn: (
+      file: string,
+      args: readonly string[],
+      spawnOptions: {
+        cwd: string;
+        env: NodeJS.ProcessEnv;
+        shell: false;
+        windowsHide: false;
+        stdio: "pipe";
+      },
+    ) => {
+      spawnCall = { file, args, options: spawnOptions };
       return child;
     },
     verifyArtifact: async () => ({ ok: true as const }),
@@ -315,6 +351,9 @@ function createAdapterHarness(
     baseEnvironment,
     secondaryDisplay,
     bridgeToken,
+    get readPaths() {
+      return readPaths;
+    },
     get spawnCall() {
       return spawnCall!;
     },
@@ -345,6 +384,21 @@ function createAdapterHarness(
         result = value;
       });
       return result;
+    },
+    dispatchNavigation: (url: string) => {
+      const preventDefault = vi.fn();
+      navigationListener?.({ preventDefault }, url);
+      return preventDefault.mock.calls.length;
+    },
+    dispatchWindowOpen: (url: string) => windowOpenHandler?.({ url }),
+    writeChildStdout: (value: string) => {
+      child.stdout.write(Buffer.from(value, "utf8"));
+    },
+    writeChildStderr: (value: string) => {
+      child.stderr.write(Buffer.from(value, "utf8"));
+    },
+    closeChild: (exitCode: number | null) => {
+      child.emit("close", exitCode);
     },
     log: (event: Record<string, unknown>) => dependencies.log(event),
     get logText() {
@@ -406,6 +460,22 @@ describe("real G2 runtime adapter boundaries", () => {
     expect(calls).toEqual(["verify-runtime"]);
   });
 
+  it("keeps the established verifier and frozen-input read order", async () => {
+    const calls: string[] = [];
+    const harness = createAdapterHarness(calls);
+
+    await expect(harness.dependencies.validate()).resolves.toEqual({ ok: true });
+
+    expect(calls).toEqual(["verify-runtime"]);
+    expect(harness.readPaths).toEqual([
+      "D:\\show\\janvim-artifact.lock.json",
+      "D:\\show\\show\\janvim-show.toml",
+      "D:\\rehearsal\\display-map.json",
+      "D:\\show\\content\\fixture\\show.manifest.json",
+      "D:\\show\\content\\fixture\\poem.txt",
+    ]);
+  });
+
   it("spawns the locked executable with only show config, fixture poem, and private environment", async () => {
     const harness = createAdapterHarness([]);
     harness.baseEnvironment.MYVIMRC = "C:\\Users\\operator\\_vimrc";
@@ -418,17 +488,27 @@ describe("real G2 runtime adapter boundaries", () => {
     const bridge = await harness.dependencies.startBridge();
     const result = await harness.dependencies.startJanVim(bridge);
     expect(result).toMatchObject({ ok: true, child: { pid: 4242 } });
-    expect(harness.spawnCall).toMatchObject({
+    expect(harness.spawnCall).toEqual({
       file: "D:\\show\\runtime\\janvim\\janvim-core.exe",
       args: [
         "--config",
         "D:\\show\\show\\janvim-show.toml",
         "D:\\show\\content\\fixture\\poem.txt",
       ],
+      options: {
+        cwd: "D:\\show\\runtime\\janvim",
+        env: {
+          PATH: "C:\\Windows\\System32",
+          USERPROFILE: "C:\\Users\\operator",
+          JANVIM_USER_ROOT: "D:\\show\\runtime\\user-root",
+          JANVIM_EXHIBITION_PORT: "32123",
+          JANVIM_EXHIBITION_TOKEN: harness.bridgeToken,
+        },
+        shell: false,
+        windowsHide: false,
+        stdio: "pipe",
+      },
     });
-    expect(harness.spawnCall.env.JANVIM_USER_ROOT).toBe(
-      "D:\\show\\runtime\\user-root",
-    );
     for (const name of [
       "MYVIMRC",
       "VIMINIT",
@@ -438,7 +518,7 @@ describe("real G2 runtime adapter boundaries", () => {
       "XDG_DATA_HOME",
       "XDG_STATE_HOME",
     ]) {
-      expect(harness.spawnCall.env).not.toHaveProperty(name);
+      expect(harness.spawnCall.options.env).not.toHaveProperty(name);
     }
   });
 
@@ -451,7 +531,9 @@ describe("real G2 runtime adapter boundaries", () => {
       maxStderrBytes: 8_192,
     });
     await harness.dependencies.openSecondary(harness.secondaryDisplay);
-    expect(harness.loadedUrl).toMatch(/^file:\/\/\//);
+    expect(harness.loadedUrl).toBe(
+      "file:///D:/show/apps/secondary-screen/dist/index.html",
+    );
     expect(harness.secondaryLoadDeadlineMs).toBe(15_000);
     expect(harness.navigationGuardInstalled).toBe(true);
     expect(harness.requestFilter.urls).toEqual([
@@ -467,7 +549,40 @@ describe("real G2 runtime adapter boundaries", () => {
       "wss://example.invalid/a",
     ]) {
       expect(harness.dispatchBeforeRequest(url)).toEqual({ cancel: true });
+      expect(harness.dispatchNavigation(url)).toBe(1);
+      expect(harness.dispatchWindowOpen(url)).toEqual({ action: "deny" });
     }
+    expect(
+      harness.dispatchNavigation("file:///D:/show/apps/secondary-screen/dist/index.html"),
+    ).toBe(0);
+  });
+
+  it("classifies the bounded child streams from the observed process output", async () => {
+    const harness = createAdapterHarness([]);
+    const bridge = await harness.dependencies.startBridge();
+    await expect(harness.dependencies.startJanVim(bridge)).resolves.toMatchObject({
+      ok: true,
+    });
+    const summary = [
+      "surface-ready windows=1",
+      "window_exit_reason=CloseRequested",
+      "neovim_exit_class=frontend_shutdown_graceful",
+      "neovim_raw_status=code:0",
+      "",
+    ].join(" ");
+
+    harness.writeChildStdout(summary);
+    harness.closeChild(0);
+
+    await expect(harness.dependencies.classifyShutdown(0)).resolves.toEqual({
+      processExitCode: 0,
+      natural: true,
+      reason: "frontend-shutdown-graceful",
+      stdoutBytes: Buffer.byteLength(summary, "utf8"),
+      stderrBytes: 0,
+      stdoutTruncated: false,
+      stderrTruncated: false,
+    });
   });
 
   it("delivers controller events on the exact channel consumed by the preload", async () => {
@@ -517,7 +632,15 @@ describe("real G2 runtime adapter boundaries", () => {
   it("finalizes evidence from the verified lock, confirmed map, and explicit snapshot", async () => {
     const harness = createAdapterHarness([]);
     await expect(harness.dependencies.validate()).resolves.toEqual({ ok: true });
+    harness.readPaths.length = 0;
     await harness.dependencies.finalizeEvidence(validFinalizationSnapshot());
+    expect(harness.readPaths).toEqual([
+      "D:\\show\\janvim-artifact.lock.json",
+      "D:\\rehearsal\\display-map.json",
+      "D:\\show\\show\\janvim-show.toml",
+      "D:\\show\\content\\fixture\\show.manifest.json",
+      "D:\\show\\content\\fixture\\poem.txt",
+    ]);
     expect(harness.evidenceRecord).toMatchObject({
       schema: 1,
       acceptanceScope: "two-real-monitors-projector-simulation",
@@ -540,6 +663,72 @@ describe("real G2 runtime adapter boundaries", () => {
         contentRevision: "20260828-0002",
       },
     });
+    const record = harness.evidenceRecord as Record<string, unknown> & {
+      artifact: Record<string, unknown>;
+      content: Record<string, unknown>;
+      displayMap: Record<string, unknown>;
+      loop: Record<string, unknown>;
+      placement: Record<string, unknown>;
+      shutdown: Record<string, unknown>;
+    };
+    expect(Object.keys(record).sort()).toEqual([
+      "acceptanceScope",
+      "artifact",
+      "content",
+      "displayMap",
+      "failureReason",
+      "loop",
+      "operatorNotes",
+      "outcome",
+      "physicalProjectorsTested",
+      "placement",
+      "runId",
+      "schema",
+      "shutdown",
+    ]);
+    expect(Object.keys(record.displayMap).sort()).toEqual([
+      "path",
+      "primary",
+      "secondary",
+      "sha256",
+    ]);
+    expect(Object.keys(record.artifact).sort()).toEqual([
+      "archiveBytes",
+      "archiveSha256",
+      "commit",
+      "configSha256",
+      "coreBytes",
+      "coreSha256",
+      "layoutEngine",
+      "tag",
+    ]);
+    expect(Object.keys(record.content).sort()).toEqual([
+      "contentRevision",
+      "manifestSha256",
+      "poemSha256",
+    ]);
+    expect(Object.keys(record.placement).sort()).toEqual([
+      "actual",
+      "matchedWindowCount",
+      "pid",
+      "requested",
+    ]);
+    expect(Object.keys(record.loop).sort()).toEqual([
+      "completedLoops",
+      "durationMs",
+      "maxDriftMs",
+      "requestedLoops",
+      "resetRestoredPoem",
+    ]);
+    expect(Object.keys(record.shutdown).sort()).toEqual([
+      "natural",
+      "processExitCode",
+      "reason",
+      "stderrBytes",
+      "stderrTruncated",
+      "stdoutBytes",
+      "stdoutTruncated",
+    ]);
     expect(JSON.stringify(harness.evidenceRecord)).not.toContain(harness.bridgeToken);
     expect(JSON.stringify(harness.evidenceRecord)).not.toContain("C:\\Users\\operator");
   });
