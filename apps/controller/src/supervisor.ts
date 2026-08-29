@@ -1,89 +1,82 @@
-export type CriticalProcess = "janvim" | "secondary";
-export type SupervisorState = "ready" | "running" | "recovering" | "safe-ready" | "stopped";
-
-export interface SupervisorTimerAdapter {
-  set(callback: () => void, delayMs: number): number;
-  clear(id: number): void;
-}
-
-export interface SupervisorDependencies {
-  clock: { nowMonotonic: () => number };
-  timer: SupervisorTimerAdapter;
-  restartProcess: (process: CriticalProcess) => void;
-  generateLoopId: () => string;
-  beginFreshLoop: (loopId: string) => void;
-  enterSafeReady: (reason: string) => void;
-}
-
 const RESTART_WINDOW_MS = 10 * 60 * 1_000;
 const RESTART_DELAYS_MS = [1_000, 2_000, 4_000] as const;
 
-export class CriticalProcessSupervisor {
-  private readonly history = new Map<CriticalProcess, number[]>();
-  private readonly pending = new Map<CriticalProcess, number>();
-  public state: SupervisorState = "ready";
+export type RestartDecision =
+  | {
+      allowed: true;
+      attempt: 1 | 2 | 3;
+      delayMs: (typeof RESTART_DELAYS_MS)[number];
+    }
+  | { allowed: false; reason: "restart-limit" };
 
-  public constructor(private readonly dependencies: SupervisorDependencies) {}
+export class RestartBudget {
+  private history: number[] = [];
+  private lastNowMs: number | undefined;
 
-  public markRunning(): void {
-    if (this.state === "ready") this.state = "running";
-  }
+  public reserve(nowMs: number): RestartDecision {
+    this.observeMonotonicTime(nowMs);
+    this.prune(nowMs);
 
-  public reportCrash(process: CriticalProcess): void {
-    if (this.state === "stopped" || this.state === "safe-ready" || this.pending.has(process)) {
-      return;
+    const attemptIndex = this.history.length;
+    const delayMs = RESTART_DELAYS_MS[attemptIndex];
+    if (delayMs === undefined) {
+      return { allowed: false, reason: "restart-limit" };
     }
 
-    const now = this.dependencies.clock.nowMonotonic();
-    const recent = (this.history.get(process) ?? []).filter(
-      (timestamp) => now - timestamp < RESTART_WINDOW_MS,
+    this.history.push(nowMs);
+    return { allowed: true, attempt: (attemptIndex + 1) as 1 | 2 | 3, delayMs };
+  }
+
+  public diagnostics(nowMs: number): { attemptsInWindow: number } {
+    this.observeMonotonicTime(nowMs);
+    this.prune(nowMs);
+    return { attemptsInWindow: this.history.length };
+  }
+
+  private observeMonotonicTime(nowMs: number): void {
+    if (!Number.isFinite(nowMs) || nowMs < 0) {
+      throw new Error("monotonic time must be a finite non-negative number");
+    }
+    if (this.lastNowMs !== undefined && nowMs < this.lastNowMs) {
+      throw new Error("monotonic time must not decrease");
+    }
+    this.lastNowMs = nowMs;
+  }
+
+  private prune(nowMs: number): void {
+    this.history = this.history.filter(
+      (timestamp) => nowMs - timestamp < RESTART_WINDOW_MS,
     );
-    this.history.set(process, recent);
+  }
+}
 
-    if (recent.length >= RESTART_DELAYS_MS.length) {
-      this.enterSafeReady(`${process}-restart-limit`);
-      return;
+export class GenerationGate {
+  private generationId: number;
+
+  public constructor(initialGenerationId = 1) {
+    if (!GenerationGate.isValid(initialGenerationId)) {
+      throw new Error("generation ID must be a positive safe integer");
     }
-
-    const delayMs = RESTART_DELAYS_MS[recent.length]!;
-    recent.push(now);
-    this.state = "recovering";
-    const timerId = this.dependencies.timer.set(() => {
-      this.pending.delete(process);
-      if (this.state === "stopped" || this.state === "safe-ready") return;
-
-      try {
-        const freshLoopId = this.dependencies.generateLoopId();
-        this.dependencies.beginFreshLoop(freshLoopId);
-        this.dependencies.restartProcess(process);
-        this.state = "ready";
-      } catch {
-        this.enterSafeReady(`${process}-restart-failed`);
-      }
-    }, delayMs);
-    this.pending.set(process, timerId);
+    this.generationId = initialGenerationId;
   }
 
-  public stop(): void {
-    if (this.state === "stopped") return;
-    this.clearPending();
-    this.state = "stopped";
+  public current(): number {
+    return this.generationId;
   }
 
-  public diagnostics(): { pendingRestarts: number; trackedCrashTimestamps: number } {
-    let trackedCrashTimestamps = 0;
-    for (const timestamps of this.history.values()) trackedCrashTimestamps += timestamps.length;
-    return { pendingRestarts: this.pending.size, trackedCrashTimestamps };
+  public invalidate(): number {
+    if (this.generationId === Number.MAX_SAFE_INTEGER) {
+      throw new Error("generation ID cannot exceed the maximum safe integer");
+    }
+    this.generationId += 1;
+    return this.generationId;
   }
 
-  private enterSafeReady(reason: string): void {
-    this.clearPending();
-    this.state = "safe-ready";
-    this.dependencies.enterSafeReady(reason);
+  public isCurrent(generationId: number): boolean {
+    return GenerationGate.isValid(generationId) && generationId === this.generationId;
   }
 
-  private clearPending(): void {
-    for (const timerId of this.pending.values()) this.dependencies.timer.clear(timerId);
-    this.pending.clear();
+  private static isValid(generationId: number): boolean {
+    return Number.isSafeInteger(generationId) && generationId > 0;
   }
 }

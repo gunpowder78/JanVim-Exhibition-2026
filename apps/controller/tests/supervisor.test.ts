@@ -1,10 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import {
-  CriticalProcessSupervisor,
-  type CriticalProcess,
-  type SupervisorTimerAdapter,
-} from "../src/supervisor.ts";
+import * as supervisorModule from "../src/supervisor.ts";
 import {
   BoundedLog,
   DEFAULT_LOG_FILE_BYTES,
@@ -12,57 +8,36 @@ import {
   type LogStorage,
 } from "../src/bounded-log.ts";
 
-class FakeTimer implements SupervisorTimerAdapter {
-  public readonly scheduled: Array<{ id: number; delayMs: number; callback: () => void }> = [];
-  public readonly cleared: number[] = [];
-  private nextId = 1;
+type RestartDecision =
+  | { allowed: true; attempt: 1 | 2 | 3; delayMs: 1_000 | 2_000 | 4_000 }
+  | { allowed: false; reason: "restart-limit" };
 
-  public set(callback: () => void, delayMs: number): number {
-    const id = this.nextId;
-    this.nextId += 1;
-    this.scheduled.push({ id, delayMs, callback });
-    return id;
-  }
+type RestartBudgetInstance = {
+  reserve(nowMs: number): RestartDecision;
+  diagnostics(nowMs: number): { attemptsInWindow: number };
+};
 
-  public clear(id: number): void {
-    this.cleared.push(id);
-  }
+type GenerationGateInstance = {
+  current(): number;
+  invalidate(): number;
+  isCurrent(generationId: number): boolean;
+};
 
-  public runNext(): void {
-    const next = this.scheduled.shift();
-    if (next === undefined) throw new Error("no scheduled restart");
-    next.callback();
-  }
+type SupervisorPolicyModule = {
+  RestartBudget?: new () => RestartBudgetInstance;
+  GenerationGate?: new (initialGenerationId?: number) => GenerationGateInstance;
+};
+
+function newRestartBudget(): RestartBudgetInstance {
+  const RestartBudget = (supervisorModule as SupervisorPolicyModule).RestartBudget;
+  expect(RestartBudget).toBeTypeOf("function");
+  return new RestartBudget!();
 }
 
-function makeSupervisor() {
-  let now = 0;
-  let loopNumber = 0;
-  const timer = new FakeTimer();
-  const restarts: CriticalProcess[] = [];
-  const freshLoops: string[] = [];
-  const safeReasons: string[] = [];
-  const supervisor = new CriticalProcessSupervisor({
-    clock: { nowMonotonic: () => now },
-    timer,
-    restartProcess: (process) => restarts.push(process),
-    generateLoopId: () => {
-      loopNumber += 1;
-      return `fresh-loop-${loopNumber}`;
-    },
-    beginFreshLoop: (loopId) => freshLoops.push(loopId),
-    enterSafeReady: (reason) => safeReasons.push(reason),
-  });
-  return {
-    supervisor,
-    timer,
-    restarts,
-    freshLoops,
-    safeReasons,
-    setNow: (value: number) => {
-      now = value;
-    },
-  };
+function newGenerationGate(initialGenerationId?: number): GenerationGateInstance {
+  const GenerationGate = (supervisorModule as SupervisorPolicyModule).GenerationGate;
+  expect(GenerationGate).toBeTypeOf("function");
+  return new GenerationGate!(initialGenerationId);
 }
 
 class MemoryLogStorage implements LogStorage {
@@ -92,46 +67,66 @@ class MemoryLogStorage implements LogStorage {
   }
 }
 
-describe("critical process supervisor", () => {
-  it("uses bounded 1/2/4 second restart backoff and stops on the fourth crash in ten minutes", () => {
-    const fixture = makeSupervisor();
-    const expectedDelays = [1_000, 2_000, 4_000];
+describe("pure restart policy", () => {
+  it("reserves only the bounded 1/2/4 second attempts", () => {
+    const budget = newRestartBudget();
 
-    for (const expectedDelay of expectedDelays) {
-      fixture.supervisor.reportCrash("janvim");
-      expect(fixture.timer.scheduled.at(-1)?.delayMs).toBe(expectedDelay);
-      fixture.timer.runNext();
+    expect(budget.reserve(0)).toEqual({ allowed: true, attempt: 1, delayMs: 1_000 });
+    expect(budget.reserve(1)).toEqual({ allowed: true, attempt: 2, delayMs: 2_000 });
+    expect(budget.reserve(2)).toEqual({ allowed: true, attempt: 3, delayMs: 4_000 });
+    expect(budget.diagnostics(2)).toEqual({ attemptsInWindow: 3 });
+    expect(budget.reserve(3)).toEqual({ allowed: false, reason: "restart-limit" });
+    expect(budget.diagnostics(3)).toEqual({ attemptsInWindow: 3 });
+  });
+
+  it("expires attempts at the rolling ten-minute boundary", () => {
+    const budget = newRestartBudget();
+    budget.reserve(0);
+    budget.reserve(1);
+    budget.reserve(2);
+
+    expect(budget.diagnostics(600_000)).toEqual({ attemptsInWindow: 2 });
+    expect(budget.diagnostics(600_003)).toEqual({ attemptsInWindow: 0 });
+    expect(budget.reserve(600_003)).toEqual({
+      allowed: true,
+      attempt: 1,
+      delayMs: 1_000,
+    });
+  });
+
+  it("rejects invalid or decreasing monotonic timestamps without consuming an attempt", () => {
+    for (const invalid of [-1, Number.NaN, Infinity, -Infinity]) {
+      expect(() => newRestartBudget().reserve(invalid)).toThrow(/monotonic/i);
     }
 
-    expect(fixture.restarts).toEqual(["janvim", "janvim", "janvim"]);
-    fixture.supervisor.reportCrash("janvim");
-    expect(fixture.supervisor.state).toBe("safe-ready");
-    expect(fixture.safeReasons).toEqual(["janvim-restart-limit"]);
-    expect(fixture.timer.scheduled).toHaveLength(0);
+    const budget = newRestartBudget();
+    expect(budget.reserve(10)).toEqual({ allowed: true, attempt: 1, delayMs: 1_000 });
+    expect(() => budget.reserve(9)).toThrow(/monotonic/i);
+    expect(() => budget.diagnostics(9)).toThrow(/monotonic/i);
+    expect(budget.diagnostics(10)).toEqual({ attemptsInWindow: 1 });
+  });
+});
+
+describe("generation gate", () => {
+  it("invalidates the old generation before accepting the new one", () => {
+    const gate = newGenerationGate();
+    expect(gate.current()).toBe(1);
+
+    const old = gate.current();
+    expect(gate.invalidate()).toBe(2);
+    expect(gate.isCurrent(old)).toBe(false);
+    expect(gate.isCurrent(2)).toBe(true);
+    expect(gate.isCurrent(0)).toBe(false);
   });
 
-  it("discards the partial loop and starts a fresh loop before every restart", () => {
-    const fixture = makeSupervisor();
-    fixture.supervisor.reportCrash("secondary");
-    fixture.timer.runNext();
+  it("rejects invalid initial generations and refuses to wrap a safe integer", () => {
+    for (const invalid of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, Infinity]) {
+      expect(() => newGenerationGate(invalid)).toThrow(/generation/i);
+    }
 
-    expect(fixture.freshLoops).toEqual(["fresh-loop-1"]);
-    expect(fixture.restarts).toEqual(["secondary"]);
-    expect(fixture.supervisor.state).toBe("ready");
-  });
-
-  it("resets the restart budget after ten minutes and clears pending timers on stop", () => {
-    const fixture = makeSupervisor();
-    fixture.supervisor.reportCrash("janvim");
-    fixture.timer.runNext();
-    fixture.setNow(600_001);
-    fixture.supervisor.reportCrash("janvim");
-    expect(fixture.timer.scheduled.at(-1)?.delayMs).toBe(1_000);
-
-    const pendingId = fixture.timer.scheduled.at(-1)?.id;
-    fixture.supervisor.stop();
-    expect(fixture.timer.cleared).toContain(pendingId);
-    expect(fixture.supervisor.diagnostics().pendingRestarts).toBe(0);
+    const gate = newGenerationGate(Number.MAX_SAFE_INTEGER);
+    expect(() => gate.invalidate()).toThrow(/generation/i);
+    expect(gate.current()).toBe(Number.MAX_SAFE_INTEGER);
   });
 });
 
