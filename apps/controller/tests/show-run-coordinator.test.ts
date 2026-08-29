@@ -33,6 +33,22 @@ const ORIGINAL_POEM_SHA256 = "a".repeat(64);
 const WRONG_POEM_SHA256 = "b".repeat(64);
 const LOOP_DURATION_MS = 90_000;
 
+type InjectedShutdownFailure =
+  | "driver-stop"
+  | "agent-shutdown"
+  | "close-window"
+  | "wait-natural"
+  | "terminate-exact"
+  | "wait-forced"
+  | "close-bridge"
+  | "session-dispose"
+  | "session-diagnostics"
+  | "surface-close"
+  | "network-snapshot"
+  | "flush-logs"
+  | "finalize-evidence"
+  | "terminal-marker";
+
 type Deferred = {
   promise: Promise<void>;
   resolve(): void;
@@ -44,6 +60,32 @@ function deferred(): Deferred {
     resolve = settle;
   });
   return { promise, resolve };
+}
+
+async function waitForAbortable(
+  operation: Promise<void>,
+  signal: AbortSignal | undefined,
+): Promise<void> {
+  if (signal === undefined) {
+    await operation;
+    return;
+  }
+  if (signal.aborted) throw new Error("operation aborted");
+  await new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const finish = (action: () => void): void => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", abort);
+      action();
+    };
+    const abort = (): void => finish(() => reject(new Error("operation aborted")));
+    signal.addEventListener("abort", abort, { once: true });
+    void operation.then(
+      () => finish(resolve),
+      (error: unknown) => finish(() => reject(error)),
+    );
+  });
 }
 
 async function settle(): Promise<void> {
@@ -61,6 +103,8 @@ class FakeTimers implements OneLoopTimerAdapter {
   private readonly timeouts = new Map<number, ScheduledCallback>();
   private nextId = 1;
   public now = 0;
+  public readonly timeoutDelays: number[] = [];
+  public rejectTimeoutClear = false;
 
   public setInterval(callback: () => void, delayMs: number): number {
     const entry = { id: this.nextId++, delayMs, callback };
@@ -75,10 +119,12 @@ class FakeTimers implements OneLoopTimerAdapter {
   public setTimeout(callback: () => void, delayMs: number): number {
     const entry = { id: this.nextId++, delayMs, callback };
     this.timeouts.set(entry.id, entry);
+    this.timeoutDelays.push(delayMs);
     return entry.id;
   }
 
   public clearTimeout(id: OneLoopTimerHandle): void {
+    if (this.rejectTimeoutClear) throw new Error("injected timer clear failure");
     if (typeof id === "number") this.timeouts.delete(id);
   }
 
@@ -87,6 +133,15 @@ class FakeTimers implements OneLoopTimerAdapter {
       (candidate) => candidate.delayMs === delayMs,
     );
     if (entry === undefined) throw new Error(`no interval scheduled at ${delayMs} ms`);
+    await entry.callback();
+  }
+
+  public async fireTimeout(delayMs: number): Promise<void> {
+    const entry = [...this.timeouts.values()].find(
+      (candidate) => candidate.delayMs === delayMs,
+    );
+    if (entry === undefined) throw new Error(`no timeout scheduled at ${delayMs} ms`);
+    this.timeouts.delete(entry.id);
     await entry.callback();
   }
 
@@ -106,10 +161,15 @@ class FakeSurface implements ShowSecondarySurface {
   public readonly sent: Array<RunCueEvent | RunStatusEvent> = [];
   public closeCalls = 0;
   public rejectStatusSends = false;
+  public rejectClose = false;
   private readonly eventListeners = new Set<
     (event: RendererToControllerEvent) => void
   >();
   private readonly destroyedListeners = new Set<() => void>();
+  private readonly capturedEventListeners: Array<
+    (event: RendererToControllerEvent) => void
+  > = [];
+  private readonly capturedDestroyedListeners: Array<() => void> = [];
 
   public constructor(private readonly trace: string[]) {}
 
@@ -123,12 +183,20 @@ class FakeSurface implements ShowSecondarySurface {
 
   public onEvent(listener: (event: RendererToControllerEvent) => void): () => void {
     this.eventListeners.add(listener);
-    return () => this.eventListeners.delete(listener);
+    this.capturedEventListeners.push(listener);
+    return () => {
+      this.trace.push("dispose-surface-event-listener");
+      this.eventListeners.delete(listener);
+    };
   }
 
   public onDestroyed(listener: () => void): () => void {
     this.destroyedListeners.add(listener);
-    return () => this.destroyedListeners.delete(listener);
+    this.capturedDestroyedListeners.push(listener);
+    return () => {
+      this.trace.push("dispose-surface-destroyed-listener");
+      this.destroyedListeners.delete(listener);
+    };
   }
 
   public emit(event: RendererToControllerEvent): void {
@@ -139,9 +207,22 @@ class FakeSurface implements ShowSecondarySurface {
     for (const listener of [...this.destroyedListeners]) listener();
   }
 
+  public capturedEventListener(index = 0): (event: RendererToControllerEvent) => void {
+    const listener = this.capturedEventListeners[index];
+    if (listener === undefined) throw new Error("captured renderer listener is missing");
+    return listener;
+  }
+
+  public capturedDestroyedListener(index = 0): () => void {
+    const listener = this.capturedDestroyedListeners[index];
+    if (listener === undefined) throw new Error("captured destroy listener is missing");
+    return listener;
+  }
+
   public close(): void {
     this.closeCalls += 1;
     this.trace.push("surface-close");
+    if (this.rejectClose) throw new Error("injected surface close failure");
   }
 
   public diagnostics(): { listeners: number } {
@@ -163,6 +244,10 @@ class FakeSession implements ShowRunSession {
   public forcedExit = true;
   public prepareHash = ORIGINAL_POEM_SHA256;
   public resetHash = ORIGINAL_POEM_SHA256;
+  public runtimeStartFailure: "return-false" | "throw" | undefined;
+  public readonly abortedPhases: string[] = [];
+  public leaseRemoved = false;
+  private disposed = false;
   private generationId: number;
   private readonly faultListeners = new Set<
     (fault: "agent-disconnected" | "critical-ack-failed" | "janvim-exited") => void
@@ -170,11 +255,18 @@ class FakeSession implements ShowRunSession {
   private readonly primaryListeners = new Set<
     (event: PrimaryCueCompletionEvent) => void
   >();
+  private readonly capturedFaultListeners: Array<
+    (fault: "agent-disconnected" | "critical-ack-failed" | "janvim-exited") => void
+  > = [];
+  private readonly capturedPrimaryListeners: Array<
+    (event: PrimaryCueCompletionEvent) => void
+  > = [];
 
   public constructor(
     generationId: number,
     private readonly trace: string[],
     private readonly block: (phase: string) => Promise<void>,
+    private readonly failPhase: (phase: InjectedShutdownFailure) => boolean,
   ) {
     this.generationId = generationId;
     this.sessionId = `session-${generationId}`;
@@ -182,11 +274,19 @@ class FakeSession implements ShowRunSession {
       state: "ready",
       completedLoops: 0,
       start: vi.fn(() => {
+        if (this.runtimeStartFailure === "throw") {
+          throw new Error("injected runtime start failure");
+        }
+        if (this.runtimeStartFailure === "return-false") return false;
         this.runtime.state = "running";
         return true;
       }),
       advance: vi.fn(async () => 0),
       stop: vi.fn(() => {
+        this.trace.push("runtime-stop");
+        if (this.failPhase("driver-stop")) {
+          throw new Error("injected driver stop failure");
+        }
         this.runtime.state = "stopped";
       }),
     };
@@ -201,30 +301,65 @@ class FakeSession implements ShowRunSession {
     this.trace.push(`rebind-generation:${generationId}`);
   }
 
-  public async startBridge(): Promise<void> {
+  public async startBridge(signal?: AbortSignal): Promise<void> {
     this.trace.push(`start-bridge:${this.generationId}`);
-    await this.block("start-bridge");
+    await this.waitForPhase("start-bridge", signal);
   }
 
-  public async launchJanVim(): Promise<void> {
+  public async launchJanVim(signal?: AbortSignal): Promise<void> {
     this.trace.push(`launch-janvim:${this.generationId}`);
-    await this.block("launch-janvim");
+    await this.waitForPhase("launch-janvim", signal);
   }
 
-  public async placeJanVim(): Promise<void> {
+  public async placeJanVim(signal?: AbortSignal): Promise<void> {
     this.trace.push(`place-janvim:${this.generationId}`);
-    await this.block("place-janvim");
+    await this.waitForPhase("place-janvim", signal);
   }
 
-  public async awaitAgent(): Promise<void> {
+  public async awaitAgent(signal?: AbortSignal): Promise<void> {
     this.trace.push(`await-agent:${this.generationId}`);
-    await this.block("await-agent");
+    await this.waitForPhase("await-agent", signal);
   }
 
-  public async prepareOriginalPoem(): Promise<{ bufferSha256: string }> {
+  public async prepareOriginalPoem(
+    signal?: AbortSignal,
+  ): Promise<{ bufferSha256: string }> {
     this.trace.push(`prepare-original:${this.generationId}`);
-    await this.block("prepare-original");
+    await this.waitForPhase("prepare-original", signal);
     return { bufferSha256: this.prepareHash };
+  }
+
+  private async waitForPhase(
+    phase: string,
+    signal: AbortSignal | undefined,
+  ): Promise<void> {
+    const operation = this.block(phase);
+    if (signal === undefined) {
+      await operation;
+      return;
+    }
+    if (signal.aborted) {
+      this.abortedPhases.push(phase);
+      throw new Error(`aborted phase: ${phase}`);
+    }
+    await new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const finish = (action: () => void): void => {
+        if (settled) return;
+        settled = true;
+        signal.removeEventListener("abort", abort);
+        action();
+      };
+      const abort = (): void => {
+        this.abortedPhases.push(phase);
+        finish(() => reject(new Error(`aborted phase: ${phase}`)));
+      };
+      signal.addEventListener("abort", abort, { once: true });
+      void operation.then(
+        () => finish(resolve),
+        (error: unknown) => finish(() => reject(error)),
+      );
+    });
   }
 
   public createLoop(
@@ -244,14 +379,22 @@ class FakeSession implements ShowRunSession {
     ) => void,
   ): () => void {
     this.faultListeners.add(listener);
-    return () => this.faultListeners.delete(listener);
+    this.capturedFaultListeners.push(listener);
+    return () => {
+      this.trace.push("dispose-session-fault-listener");
+      this.faultListeners.delete(listener);
+    };
   }
 
   public onPrimaryCompletion(
     listener: (event: PrimaryCueCompletionEvent) => void,
   ): () => void {
     this.primaryListeners.add(listener);
-    return () => this.primaryListeners.delete(listener);
+    this.capturedPrimaryListeners.push(listener);
+    return () => {
+      this.trace.push("dispose-session-primary-listener");
+      this.primaryListeners.delete(listener);
+    };
   }
 
   public emitPrimary(event: PrimaryCueCompletionEvent): void {
@@ -264,26 +407,54 @@ class FakeSession implements ShowRunSession {
     for (const listener of [...this.faultListeners]) listener(fault);
   }
 
+  public capturedFaultListener(index = 0): (
+    fault: "agent-disconnected" | "critical-ack-failed" | "janvim-exited",
+  ) => void {
+    const listener = this.capturedFaultListeners[index];
+    if (listener === undefined) throw new Error("captured fault listener is missing");
+    return listener;
+  }
+
+  public capturedPrimaryListener(
+    index = 0,
+  ): (event: PrimaryCueCompletionEvent) => void {
+    const listener = this.capturedPrimaryListeners[index];
+    if (listener === undefined) throw new Error("captured primary listener is missing");
+    return listener;
+  }
+
   public diagnostics(): {
       connections: number;
     pendingCommands: number;
     editorCommandPending: boolean;
+    leaseRemoved: boolean;
   } {
+    if (this.disposed && this.failPhase("session-diagnostics")) {
+      throw new Error("injected session diagnostics failure");
+    }
     return {
       connections: this.connections,
       pendingCommands: Number(this.editorCommandPending),
       editorCommandPending: this.editorCommandPending,
+      leaseRemoved: this.leaseRemoved,
     };
   }
 
-  public async resetToOriginal(loopId: string): Promise<{ bufferSha256: string }> {
+  public async resetToOriginal(
+    loopId: string,
+    signal?: AbortSignal,
+  ): Promise<{ bufferSha256: string }> {
     this.trace.push(`reset-original:${loopId}`);
+    if (signal?.aborted === true) throw new Error("aborted reset-original");
     return { bufferSha256: this.resetHash };
   }
 
   public async sendAgentShutdown(timeoutMs: 2_000, retryLimit: 1): Promise<void> {
     this.trace.push(`agent-shutdown:${timeoutMs}:${retryLimit}`);
     await this.block("agent-shutdown");
+    if (this.failPhase("agent-shutdown")) {
+      throw new Error("injected agent shutdown failure");
+    }
   }
 
   public async closePlacedWindow(
@@ -291,30 +462,51 @@ class FakeSession implements ShowRunSession {
     maxOutputBytes: 4_096,
   ): Promise<void> {
     this.trace.push(`close-window:${timeoutMs}:${maxOutputBytes}`);
+    if (this.failPhase("close-window")) {
+      throw new Error("injected window close failure");
+    }
   }
 
   public async waitForJanVimExit(
     timeoutMs: 5_000,
   ): Promise<"natural" | "still-running"> {
     this.trace.push(`wait-natural:${timeoutMs}`);
+    if (this.failPhase("wait-natural")) {
+      throw new Error("injected natural wait failure");
+    }
+    if (this.naturalExit === "natural") this.leaseRemoved = true;
     return this.naturalExit;
   }
 
   public terminateExactJanVim(): void {
     this.trace.push("terminate-exact");
+    if (this.failPhase("terminate-exact")) {
+      throw new Error("injected exact terminate failure");
+    }
   }
 
   public async waitForForcedExit(timeoutMs: 5_000): Promise<boolean> {
     this.trace.push(`wait-forced:${timeoutMs}`);
+    if (this.failPhase("wait-forced")) {
+      throw new Error("injected forced wait failure");
+    }
+    if (this.forcedExit) this.leaseRemoved = true;
     return this.forcedExit;
   }
 
   public async closeBridge(timeoutMs: 5_000): Promise<void> {
     this.trace.push(`close-bridge:${timeoutMs}`);
+    if (this.failPhase("close-bridge")) {
+      throw new Error("injected bridge close failure");
+    }
   }
 
   public dispose(): void {
     this.trace.push("session-dispose");
+    this.disposed = true;
+    if (this.failPhase("session-dispose")) {
+      throw new Error("injected session dispose failure");
+    }
     this.faultListeners.clear();
     this.primaryListeners.clear();
   }
@@ -329,13 +521,24 @@ interface HarnessOptions {
   recoveryOpenFailure?: boolean;
   recoveryOpenGate?: Deferred;
   recoverySessionGate?: Deferred;
+  recoverySessionPhase?:
+    | "start-bridge"
+    | "launch-janvim"
+    | "place-janvim"
+    | "await-agent"
+    | "prepare-original";
   sessionConnections?: number[];
+  runtimeStartFailures?: Array<"return-false" | "throw" | undefined>;
+  shutdownFailures?: Set<InjectedShutdownFailure>;
+  forcedExit?: boolean;
+  timerClearFailure?: boolean;
 }
 
 function createHarness(options: HarnessOptions = {}) {
   const trace: string[] = [];
   const logs: Array<Record<string, unknown>> = [];
   const timers = new FakeTimers();
+  timers.rejectTimeoutClear = options.timerClearFailure ?? false;
   const blocker = options.blockedPhase === undefined ? undefined : deferred();
   const surfaces: FakeSurface[] = [];
   const sessions: FakeSession[] = [];
@@ -361,31 +564,49 @@ function createHarness(options: HarnessOptions = {}) {
       trace.push("validate");
       await block("validate");
     },
-    openSecondary: async (generationId) => {
+    openSecondary: async (generationId, signal) => {
       trace.push(`open-secondary:${generationId}`);
       const recoveryOpen = surfaces.length > 0;
-      if (recoveryOpen) await options.recoveryOpenGate?.promise;
+      if (recoveryOpen && options.recoveryOpenGate !== undefined) {
+        await waitForAbortable(options.recoveryOpenGate.promise, signal);
+      }
       if (recoveryOpen && options.recoveryOpenFailure === true) {
         throw new Error("injected secondary recovery failure");
       }
       const surface = new FakeSurface(trace);
+      surface.rejectClose = options.shutdownFailures?.has("surface-close") ?? false;
       surfaces.push(surface);
-      await block("open-secondary");
+      try {
+        await waitForAbortable(block("open-secondary"), signal);
+      } catch (error) {
+        surface.close();
+        throw error;
+      }
       return surface;
     },
     createSession: (generationId) => {
       const sessionIndex = sessions.length;
-      const session = new FakeSession(generationId, trace, async (phase) => {
-        await block(phase);
-        if (sessionIndex > 0 && phase === "start-bridge") {
-          await options.recoverySessionGate?.promise;
-        }
-      });
+      const session = new FakeSession(
+        generationId,
+        trace,
+        async (phase) => {
+          await block(phase);
+          if (
+            sessionIndex > 0 &&
+            phase === (options.recoverySessionPhase ?? "start-bridge")
+          ) {
+            await options.recoverySessionGate?.promise;
+          }
+        },
+        (phase) => options.shutdownFailures?.has(phase) ?? false,
+      );
       session.prepareHash =
         options.prepareHashes?.[sessionIndex] ??
         options.prepareHash ??
         ORIGINAL_POEM_SHA256;
       session.connections = options.sessionConnections?.[sessionIndex] ?? 1;
+      session.runtimeStartFailure = options.runtimeStartFailures?.[sessionIndex];
+      session.forcedExit = options.forcedExit ?? true;
       sessions.push(session);
       return session;
     },
@@ -418,6 +639,12 @@ function createHarness(options: HarnessOptions = {}) {
       if (networkSamples > 1) {
         await options.boundaryNetworkDeferrals?.[networkSamples - 2]?.promise;
       }
+      if (
+        networkSamples > 1 &&
+        options.shutdownFailures?.has("network-snapshot") === true
+      ) {
+        throw new Error("injected network snapshot failure");
+      }
       return {
         sampledAtMs: timers.now,
         activeExternalDefaultRoutes: 0,
@@ -427,13 +654,22 @@ function createHarness(options: HarnessOptions = {}) {
     },
     finalizeEvidence: async (result, diagnostics) => {
       trace.push(`finalize:${result.reason}`);
+      if (options.shutdownFailures?.has("finalize-evidence") === true) {
+        throw new Error("injected evidence failure");
+      }
       evidence.push({ result, diagnostics });
     },
     writeTerminalMarker: async (result) => {
       trace.push(`terminal:${result.reason}`);
+      if (options.shutdownFailures?.has("terminal-marker") === true) {
+        throw new Error("injected terminal marker failure");
+      }
     },
     flushLogs: async () => {
       trace.push("flush-logs");
+      if (options.shutdownFailures?.has("flush-logs") === true) {
+        throw new Error("injected flush failure");
+      }
     },
     nextLoopId: (generationId, loopNumber) => {
       const loopId = `g${generationId}-loop-${loopNumber}`;
@@ -441,7 +677,16 @@ function createHarness(options: HarnessOptions = {}) {
       return loopId;
     },
     nowMs: () => timers.now,
-    log: (event) => logs.push(event),
+    log: (event) => {
+      logs.push(event);
+      if (event.type === "generation-invalidate") trace.push("generation-invalidate");
+      if (event.type === "recovery-delay") {
+        trace.push(`recovery-delay:${String(event.delayMs)}`);
+      }
+      if (event.type === "shutdown-phase") {
+        trace.push(`shutdown-phase:${String(event.phase)}`);
+      }
+    },
   };
 
   const coordinator = new ShowRunCoordinator(dependencies);
@@ -477,6 +722,16 @@ function resetCue(): Cue {
       semanticLabel: "return to baseline",
       critical: true,
     },
+  };
+}
+
+function noncriticalCue(id: string): Cue {
+  return {
+    id,
+    atMs: 1,
+    target: "secondary",
+    kind: "prompt",
+    payload: { text: id },
   };
 }
 
@@ -1036,6 +1291,8 @@ describe("show run coordinator", () => {
     const retainedSessionId = secondaryRecovered.sessions[0]!.sessionId;
     secondaryRecovered.surfaces[0]!.destroy();
     await settle();
+    await secondaryRecovered.timers.fireTimeout(1_000);
+    await settle();
     expect(secondaryRecovered.coordinator.diagnostics().state).toBe("running");
     expect(secondaryRecovered.sessions).toHaveLength(1);
     expect(secondaryRecovered.sessions[0]!.sessionId).toBe(retainedSessionId);
@@ -1048,6 +1305,8 @@ describe("show run coordinator", () => {
     });
     await startRunning(secondaryFailed);
     secondaryFailed.surfaces[0]!.destroy();
+    await settle();
+    await secondaryFailed.timers.fireTimeout(1_000);
     await settle();
     expect(secondaryFailed.coordinator.diagnostics().state).toBe("safe-ready");
     secondaryFailed.coordinator.handleRendererEvent(stopEvent());
@@ -1070,6 +1329,8 @@ describe("show run coordinator", () => {
     await startRunning(sessionRecovered);
     sessionRecovered.sessions[0]!.emitFault("agent-disconnected");
     await settle();
+    await sessionRecovered.timers.fireTimeout(1_000);
+    await settle();
     expect(sessionRecovered.coordinator.diagnostics().state).toBe("running");
     expect(sessionRecovered.sessions).toHaveLength(2);
     await sessionRecovered.coordinator.requestEmergencyStop("sigint");
@@ -1081,6 +1342,8 @@ describe("show run coordinator", () => {
     });
     await startRunning(sessionFailed);
     sessionFailed.sessions[0]!.emitFault("critical-ack-failed");
+    await settle();
+    await sessionFailed.timers.fireTimeout(1_000);
     await settle();
     expect(sessionFailed.coordinator.diagnostics().state).toBe("safe-ready");
     sessionFailed.coordinator.handleRendererEvent(stopEvent());
@@ -1189,7 +1452,7 @@ describe("show run coordinator", () => {
     )).toHaveLength(1);
   });
 
-  it("lets an in-flight bounded startup step retire before shutdown touches its session", async () => {
+  it("aborts an in-flight startup step before shutdown touches its session", async () => {
     const harness = createHarness({ mode: "Show", blockedPhase: "start-bridge" });
     const boot = harness.coordinator.boot();
     await settle();
@@ -1200,19 +1463,833 @@ describe("show run coordinator", () => {
     ]);
 
     const shutdown = harness.coordinator.requestEmergencyStop("sigint");
-    await settle();
-    expect(harness.coordinator.diagnostics().state).toBe("shutting-down");
-    expect(harness.trace).not.toContain("agent-shutdown:2000:1");
-
-    harness.blocker?.resolve();
     await expect(boot).resolves.toEqual({
       ready: false,
       reason: "controller-stopping",
     });
     await expect(shutdown).resolves.toBeUndefined();
+    expect(harness.sessions[0]!.abortedPhases).toEqual(["start-bridge"]);
     expect(harness.trace.indexOf("start-bridge:1")).toBeLessThan(
       harness.trace.indexOf("agent-shutdown:2000:1"),
     );
     expect(harness.coordinator.diagnostics().state).toBe("stopped");
+
+    const stopped = harness.coordinator.diagnostics();
+    harness.blocker?.resolve();
+    await settle();
+    expect(harness.coordinator.diagnostics()).toEqual(stopped);
+  });
+
+  it("invalidates the generation before stopping or disposing every recoverable fault", async () => {
+    const faults = [
+      "secondary-destroyed",
+      "agent-disconnected",
+      "critical-ack-failed",
+      "janvim-exited",
+    ] as const;
+
+    for (const fault of faults) {
+      const harness = createHarness({ mode: "Show" });
+      await startRunning(harness);
+      harness.trace.length = 0;
+
+      if (fault === "secondary-destroyed") {
+        harness.surfaces[0]!.destroy();
+      } else {
+        harness.sessions[0]!.emitFault(fault);
+      }
+
+      const lifecycle = harness.trace.filter(
+        (entry) =>
+          entry === "generation-invalidate" ||
+          entry === "runtime-stop" ||
+          entry.startsWith("dispose-surface") ||
+          entry.startsWith("dispose-session") ||
+          entry.startsWith("agent-shutdown") ||
+          entry.startsWith("close-window") ||
+          entry.startsWith("wait-natural") ||
+          entry.startsWith("close-bridge"),
+      );
+      expect(lifecycle[0], fault).toBe("generation-invalidate");
+      expect(lifecycle.indexOf("runtime-stop"), fault).toBeGreaterThan(0);
+      for (const entry of lifecycle.filter((item) => item.startsWith("dispose-"))) {
+        expect(lifecycle.indexOf(entry), `${fault}:${entry}`).toBeGreaterThan(
+          lifecycle.indexOf("runtime-stop"),
+        );
+      }
+
+      await harness.coordinator.requestEmergencyStop("sigint");
+    }
+  });
+
+  it("bounds every late callback from an invalidated generation without state mutation", async () => {
+    const harness = createHarness({ mode: "Show" });
+    await startRunning(harness);
+    const surface = harness.surfaces[0]!;
+    const session = harness.sessions[0]!;
+    const oldRendererEvent = surface.capturedEventListener();
+    const oldDestroyed = surface.capturedDestroyedListener();
+    const oldPrimary = session.capturedPrimaryListener();
+    const oldFault = session.capturedFaultListener();
+    const oldDriverFailure = harness.driverOptions[0]!.onFailure;
+    const oldLoopId = harness.coordinator.diagnostics().currentLoopId!;
+    harness.logs.length = 0;
+
+    session.emitFault("agent-disconnected");
+    const before = harness.coordinator.diagnostics();
+    expect(before).toMatchObject({ state: "black-recovering", generationId: 2 });
+
+    oldRendererEvent({
+      schema: 1,
+      type: "presentation-ack",
+      generationId: 1,
+      loopId: oldLoopId,
+      cueId: "cue-reset",
+    });
+    oldDestroyed();
+    oldPrimary({
+      generationId: 1,
+      loopId: oldLoopId,
+      cueId: "cue-reset",
+      bufferSha256: ORIGINAL_POEM_SHA256,
+    });
+    oldFault("janvim-exited");
+    oldDriverFailure("late-retry-timer");
+
+    expect(harness.coordinator.diagnostics()).toEqual(before);
+    expect(
+      harness.logs.filter(
+        (event) => event.type === "ignored-event" && event.reason === "stale-generation",
+      ),
+    ).toHaveLength(1);
+
+    await harness.coordinator.requestEmergencyStop("sigint");
+  });
+
+  it("recovers only the secondary after one bounded delay without replaying the old cue", async () => {
+    const harness = createHarness({ mode: "Show" });
+    await startRunning(harness);
+    const session = harness.sessions[0]!;
+    const retainedSessionId = session.sessionId;
+    const oldLoopId = harness.coordinator.diagnostics().currentLoopId!;
+    session.loopSurface?.send({
+      schema: 1,
+      type: "run-cue",
+      generationId: 1,
+      loopId: oldLoopId,
+      requiresPresentationAck: false,
+      cue: noncriticalCue("old-cue"),
+    });
+    harness.trace.length = 0;
+
+    harness.surfaces[0]!.destroy();
+    await settle();
+    expect(harness.coordinator.diagnostics()).toMatchObject({
+      state: "black-recovering",
+      generationId: 2,
+      currentLoopId: null,
+    });
+    expect(harness.surfaces).toHaveLength(1);
+    expect(harness.timers.active(1_000)).toBe(1);
+    expect(harness.trace.slice(0, 3)).toEqual([
+      "generation-invalidate",
+      "runtime-stop",
+      "dispose-surface-event-listener",
+    ]);
+    expect(harness.trace.indexOf("surface-close")).toBeLessThan(
+      harness.trace.indexOf("recovery-delay:1000"),
+    );
+
+    await harness.timers.fireTimeout(1_000);
+    await settle();
+    expect(harness.coordinator.diagnostics()).toMatchObject({
+      state: "running",
+      generationId: 2,
+      currentLoopId: "g2-loop-1",
+    });
+    expect(harness.coordinator.diagnostics().recoveries).toEqual([
+      expect.objectContaining({
+        generationId: 2,
+        domain: "secondary",
+        attempt: 1,
+        delayMs: 1_000,
+        outcome: "recovered",
+        reason: "secondary-recovered",
+      }),
+    ]);
+    expect(harness.sessions).toHaveLength(1);
+    expect(harness.sessions[0]!.sessionId).toBe(retainedSessionId);
+    expect(harness.trace.indexOf("open-secondary:2")).toBeLessThan(
+      harness.trace.indexOf("rebind-generation:2"),
+    );
+    expect(harness.trace.indexOf("rebind-generation:2")).toBeLessThan(
+      harness.trace.indexOf("reset-original:recovery-reset-g2"),
+    );
+    expect(
+      harness.surfaces[1]!.sent.some(
+        (event) => event.type === "run-cue" && event.cue.id === "old-cue",
+      ),
+    ).toBe(false);
+
+    await harness.coordinator.requestEmergencyStop("sigint");
+  });
+
+  it("escalates a bad secondary reset hash to full session replacement", async () => {
+    const harness = createHarness({ mode: "Show" });
+    await startRunning(harness);
+    const oldSession = harness.sessions[0]!;
+    oldSession.resetHash = WRONG_POEM_SHA256;
+
+    harness.surfaces[0]!.destroy();
+    await settle();
+    await harness.timers.fireTimeout(1_000);
+    await settle();
+
+    expect(harness.coordinator.diagnostics().state).toBe("black-recovering");
+    expect(harness.sessions).toHaveLength(1);
+    expect(harness.timers.active(1_000)).toBe(1);
+    expect(harness.trace).toContain("agent-shutdown:2000:1");
+    expect(harness.trace).toContain("close-window:2000:4096");
+
+    await harness.timers.fireTimeout(1_000);
+    await settle();
+    expect(harness.sessions).toHaveLength(2);
+    expect(harness.sessions[1]!.sessionId).not.toBe(oldSession.sessionId);
+    expect(harness.coordinator.diagnostics()).toMatchObject({
+      state: "running",
+      generationId: 2,
+      currentLoopId: "g2-loop-1",
+    });
+    expect(harness.coordinator.diagnostics().recoveries).toEqual([
+      expect.objectContaining({
+        generationId: 2,
+        domain: "secondary",
+        attempt: 1,
+        delayMs: 1_000,
+        outcome: "failed",
+        reason: "reset-hash-mismatch",
+      }),
+      expect.objectContaining({
+        generationId: 2,
+        domain: "janvim",
+        attempt: 1,
+        delayMs: 1_000,
+        outcome: "recovered",
+        reason: "session-recovered",
+      }),
+    ]);
+
+    await harness.coordinator.requestEmergencyStop("sigint");
+  });
+
+  it("fully replaces the session for every causal JanVim fault", async () => {
+    const faults = [
+      "agent-disconnected",
+      "critical-ack-failed",
+      "janvim-exited",
+      "secondary-with-editor-pending",
+    ] as const;
+
+    for (const fault of faults) {
+      const harness = createHarness({ mode: "Show" });
+      await startRunning(harness);
+      const oldSession = harness.sessions[0]!;
+      harness.trace.length = 0;
+
+      if (fault === "secondary-with-editor-pending") {
+        oldSession.editorCommandPending = true;
+        harness.surfaces[0]!.destroy();
+      } else {
+        oldSession.emitFault(fault);
+      }
+      await settle();
+
+      expect(harness.coordinator.diagnostics()).toMatchObject({
+        state: "black-recovering",
+        generationId: 2,
+        currentLoopId: null,
+      });
+      expect(harness.timers.active(1_000)).toBe(1);
+      expect(harness.trace).toEqual(
+        expect.arrayContaining([
+          "generation-invalidate",
+          "runtime-stop",
+          "agent-shutdown:2000:1",
+          "close-window:2000:4096",
+          "wait-natural:5000",
+          "close-bridge:5000",
+          "session-dispose",
+          "recovery-delay:1000",
+        ]),
+      );
+      expect(harness.sessions).toHaveLength(1);
+
+      await harness.timers.fireTimeout(1_000);
+      await settle();
+      expect(harness.sessions).toHaveLength(2);
+      expect(harness.sessions[1]!.sessionId).not.toBe(oldSession.sessionId);
+      expect(harness.coordinator.diagnostics()).toMatchObject({
+        state: "running",
+        generationId: 2,
+        currentLoopId: "g2-loop-1",
+      });
+      expect(harness.trace.indexOf("start-bridge:2")).toBeLessThan(
+        harness.trace.indexOf("prepare-original:2"),
+      );
+      if (fault === "secondary-with-editor-pending") {
+        expect(harness.surfaces).toHaveLength(2);
+      }
+
+      await harness.coordinator.requestEmergencyStop("sigint");
+    }
+  });
+
+  it("turns every recovery driver start failure into one terminal shutdown", async () => {
+    for (const failure of ["return-false", "throw"] as const) {
+      const harness = createHarness({
+        mode: "Show",
+        runtimeStartFailures: [undefined, failure],
+      });
+      await startRunning(harness);
+
+      harness.sessions[0]!.emitFault("janvim-exited");
+      await settle();
+      await harness.timers.fireTimeout(1_000);
+      await settle();
+
+      await expect(harness.coordinator.completion).resolves.toEqual({
+        ok: false,
+        reason: "loop-start-failed",
+      });
+      expect(harness.coordinator.diagnostics()).toMatchObject({
+        state: "stopped",
+        aggregate: { recoveryEventCount: 1 },
+        shutdown: { requestedReason: "loop-start-failed" },
+      });
+      expect(harness.coordinator.diagnostics().recoveries).toEqual([
+        expect.objectContaining({
+          domain: "janvim",
+          outcome: "failed",
+          reason: "session-restart-failed",
+        }),
+      ]);
+      expect(harness.evidence).toHaveLength(1);
+    }
+  });
+
+  it("uses independent 1/2/4-second rolling recovery budgets", async () => {
+    const harness = createHarness({ mode: "Show" });
+    await startRunning(harness);
+
+    for (const delayMs of [1_000, 2_000, 4_000] as const) {
+      harness.sessions.at(-1)!.emitFault("janvim-exited");
+      await settle();
+      expect(harness.timers.active(delayMs)).toBe(1);
+      await harness.timers.fireTimeout(delayMs);
+      await settle();
+      expect(harness.coordinator.diagnostics().state).toBe("running");
+    }
+
+    harness.surfaces.at(-1)!.destroy();
+    await settle();
+    expect(harness.timers.active(1_000)).toBe(1);
+    await harness.timers.fireTimeout(1_000);
+    await settle();
+    expect(harness.coordinator.diagnostics().state).toBe("running");
+
+    harness.sessions.at(-1)!.emitFault("janvim-exited");
+    await settle();
+    expect(harness.coordinator.diagnostics()).toMatchObject({
+      state: "safe-ready",
+      reason: "janvim-restart-limit",
+      aggregate: {
+        automaticRecoveryRetryCount: 2,
+        recoveryEventCount: 4,
+      },
+    });
+    expect(harness.coordinator.diagnostics().recoveries).toEqual([
+      expect.objectContaining({ domain: "janvim", attempt: 1, delayMs: 1_000 }),
+      expect.objectContaining({ domain: "janvim", attempt: 2, delayMs: 2_000 }),
+      expect.objectContaining({ domain: "janvim", attempt: 3, delayMs: 4_000 }),
+      expect.objectContaining({ domain: "secondary", attempt: 1, delayMs: 1_000 }),
+    ]);
+    expect(harness.coordinator.diagnostics().recoveries).toHaveLength(4);
+    expect(harness.timers.active(1_000)).toBe(0);
+    expect(harness.timers.active(2_000)).toBe(0);
+    expect(harness.timers.active(4_000)).toBe(0);
+
+    harness.coordinator.handleRendererEvent(stopEvent());
+    await harness.coordinator.completion;
+
+    const rolling = createHarness({ mode: "Show" });
+    await startRunning(rolling);
+    for (const [index, delayMs] of [1_000, 2_000, 4_000].entries()) {
+      rolling.timers.now = index;
+      rolling.sessions.at(-1)!.emitFault("agent-disconnected");
+      await settle();
+      await rolling.timers.fireTimeout(delayMs);
+      await settle();
+    }
+    rolling.timers.now = 600_003;
+    rolling.sessions.at(-1)!.emitFault("agent-disconnected");
+    await settle();
+    expect(rolling.coordinator.diagnostics().state).toBe("black-recovering");
+    expect(rolling.timers.active(1_000)).toBe(1);
+    await rolling.timers.fireTimeout(1_000);
+    await settle();
+    expect(rolling.coordinator.diagnostics().state).toBe("running");
+    await rolling.coordinator.requestEmergencyStop("sigint");
+  });
+
+  it("retains only the latest 32 recovery events without losing aggregate totals", async () => {
+    const harness = createHarness({ mode: "Show" });
+    await startRunning(harness);
+
+    for (let index = 0; index < 33; index += 1) {
+      harness.timers.now = index * 600_001;
+      harness.sessions.at(-1)!.emitFault("janvim-exited");
+      await settle();
+      await harness.timers.fireTimeout(1_000);
+      await settle();
+    }
+
+    const diagnostics = harness.coordinator.diagnostics();
+    expect(diagnostics.aggregate).toMatchObject({
+      automaticRecoveryRetryCount: 0,
+      recoveryEventCount: 33,
+    });
+    expect(diagnostics.recoveries).toHaveLength(32);
+    expect(diagnostics.recoveries[0]).toMatchObject({ generationId: 3 });
+    expect(diagnostics.recoveries.at(-1)).toMatchObject({ generationId: 34 });
+
+    await harness.coordinator.requestEmergencyStop("sigint");
+  });
+
+  it("lets one explicit Restart Loop reset only the exhausted recovery domain", async () => {
+    const options: HarnessOptions = { mode: "Show" };
+    const harness = createHarness(options);
+    await startRunning(harness);
+
+    for (const delayMs of [1_000, 2_000, 4_000] as const) {
+      harness.sessions.at(-1)!.emitFault("janvim-exited");
+      await settle();
+      await harness.timers.fireTimeout(delayMs);
+      await settle();
+    }
+    harness.sessions.at(-1)!.emitFault("janvim-exited");
+    await settle();
+    expect(harness.coordinator.diagnostics()).toMatchObject({
+      state: "safe-ready",
+      reason: "janvim-restart-limit",
+    });
+
+    const operatorGate = deferred();
+    options.recoverySessionGate = operatorGate;
+    const restart = {
+      schema: 1,
+      type: "operator-action",
+      action: "restart-loop",
+    } as const;
+    expect(harness.coordinator.handleRendererEvent(restart)).toBe(true);
+    expect(harness.coordinator.handleRendererEvent(restart)).toBe(false);
+    expect(harness.coordinator.handleRendererEvent(startEvent())).toBe(false);
+    expect(harness.coordinator.diagnostics().state).toBe("safe-ready");
+
+    operatorGate.resolve();
+    await settle();
+    expect(harness.coordinator.diagnostics()).toMatchObject({
+      state: "running",
+      generationId: 6,
+      currentLoopId: "g6-loop-1",
+    });
+
+    harness.sessions.at(-1)!.emitFault("janvim-exited");
+    await settle();
+    expect(harness.coordinator.diagnostics().state).toBe("black-recovering");
+    expect(harness.timers.active(1_000)).toBe(1);
+    await harness.timers.fireTimeout(1_000);
+    await settle();
+    expect(harness.coordinator.diagnostics().state).toBe("running");
+    await harness.coordinator.requestEmergencyStop("sigint");
+
+    const black = createHarness({ mode: "Show" });
+    await startRunning(black);
+    black.sessions[0]!.emitFault("agent-disconnected");
+    expect(black.coordinator.handleRendererEvent(stopEvent())).toBe(true);
+    await expect(black.coordinator.completion).resolves.toEqual({
+      ok: true,
+      reason: "operator-stop",
+    });
+
+    const safe = createHarness({ mode: "Show", prepareHash: WRONG_POEM_SHA256 });
+    await safe.coordinator.boot();
+    expect(safe.coordinator.handleRendererEvent(stopEvent())).toBe(true);
+    await expect(safe.coordinator.completion).resolves.toEqual({
+      ok: true,
+      reason: "operator-stop",
+    });
+  });
+
+  it("continues the bounded shutdown ladder after every injected phase failure", async () => {
+    const cases: Array<[InjectedShutdownFailure, string]> = [
+      ["driver-stop", "driver-stop-failed"],
+      ["agent-shutdown", "agent-shutdown-failed"],
+      ["close-window", "hwnd-close-failed"],
+      ["wait-natural", "wait-natural-failed"],
+      ["terminate-exact", "terminate-exact-failed"],
+      ["wait-forced", "wait-forced-failed"],
+      ["close-bridge", "bridge-close-failed"],
+      ["session-dispose", "session-dispose-failed"],
+      ["session-diagnostics", "session-diagnostics-failed"],
+      ["surface-close", "surface-close-failed"],
+      ["network-snapshot", "network-snapshot-failed"],
+      ["flush-logs", "flush-logs-failed"],
+      ["finalize-evidence", "evidence-write-failed"],
+      ["terminal-marker", "terminal-marker-failed"],
+    ];
+
+    for (const [phase, classification] of cases) {
+      const harness = createHarness({
+        mode: "Show",
+        shutdownFailures: new Set([phase]),
+      });
+      await startRunning(harness);
+      if (
+        phase === "terminate-exact" ||
+        phase === "wait-forced"
+      ) {
+        harness.sessions[0]!.naturalExit = "still-running";
+      }
+
+      await expect(
+        Promise.resolve().then(() =>
+          harness.coordinator.requestEmergencyStop("electron-quit"),
+        ),
+        phase,
+      ).resolves.toBeUndefined();
+      await expect(harness.coordinator.completion, phase).resolves.toEqual({
+        ok: false,
+        reason: "emergency-electron-quit",
+      });
+      const diagnostics = harness.coordinator.diagnostics();
+      expect(diagnostics.state, phase).toBe("stopped");
+      expect(diagnostics.shutdown.failures, phase).toContain(classification);
+      expect(diagnostics.shutdown.failures.length, phase).toBeLessThanOrEqual(16);
+      expect(harness.trace, phase).toContain("close-bridge:5000");
+      expect(harness.trace, phase).toContain("surface-close");
+      expect(harness.trace, phase).toContain("flush-logs");
+      expect(
+        harness.trace.some((entry) => entry.startsWith("finalize:")),
+        phase,
+      ).toBe(true);
+      expect(
+        harness.trace.some((entry) => entry.startsWith("terminal:")),
+        phase,
+      ).toBe(true);
+    }
+  });
+
+  it("records exact forced settlement and downgrades an incomplete normal stop", async () => {
+    const forced = createHarness({ mode: "Show" });
+    await startRunning(forced);
+    forced.sessions[0]!.naturalExit = "still-running";
+    await forced.coordinator.requestEmergencyStop("sigint");
+    expect(forced.trace).toEqual(
+      expect.arrayContaining([
+        "agent-shutdown:2000:1",
+        "close-window:2000:4096",
+        "wait-natural:5000",
+        "terminate-exact",
+        "wait-forced:5000",
+        "close-bridge:5000",
+      ]),
+    );
+    expect(forced.coordinator.diagnostics().shutdown).toMatchObject({
+      failures: [],
+      childSettled: true,
+      leaseRemoved: true,
+    });
+
+    const unsettled = createHarness({ mode: "Show", forcedExit: false });
+    await bootReady(unsettled);
+    unsettled.sessions[0]!.naturalExit = "still-running";
+    expect(unsettled.coordinator.handleRendererEvent(stopEvent())).toBe(true);
+    await expect(unsettled.coordinator.completion).resolves.toEqual({
+      ok: false,
+      reason: "shutdown-incomplete",
+    });
+    expect(unsettled.coordinator.diagnostics().shutdown).toMatchObject({
+      childSettled: false,
+      leaseRemoved: false,
+    });
+    expect(unsettled.coordinator.diagnostics().shutdown.failures).toContain(
+      "janvim-unsettled",
+    );
+  });
+
+  it("suppresses faults, stale ACKs, and operator races during one shutdown", async () => {
+    const harness = createHarness({ mode: "Show", blockedPhase: "agent-shutdown" });
+    await startRunning(harness);
+    const surface = harness.surfaces[0]!;
+    const session = harness.sessions[0]!;
+    const oldDestroyed = surface.capturedDestroyedListener();
+    const oldEvent = surface.capturedEventListener();
+    const oldFault = session.capturedFaultListener();
+    const oldDriverFailure = harness.driverOptions[0]!.onFailure;
+    const oldLoopId = harness.coordinator.diagnostics().currentLoopId!;
+
+    const shutdown = harness.coordinator.requestEmergencyStop("sigint");
+    const sameShutdown = harness.coordinator.requestEmergencyStop("window-close");
+    expect(sameShutdown).toBe(shutdown);
+    const terminalState = harness.coordinator.diagnostics();
+    expect(terminalState.state).toBe("shutting-down");
+
+    oldDestroyed();
+    oldFault("janvim-exited");
+    oldDriverFailure("late-retry-timer");
+    oldEvent({
+      schema: 1,
+      type: "presentation-ack",
+      generationId: 1,
+      loopId: oldLoopId,
+      cueId: "cue-reset",
+    });
+    expect(harness.coordinator.handleRendererEvent(stopEvent())).toBe(false);
+    expect(
+      harness.coordinator.handleRendererEvent({
+        schema: 1,
+        type: "operator-action",
+        action: "restart-loop",
+      }),
+    ).toBe(false);
+    await settle();
+
+    expect(harness.coordinator.diagnostics()).toEqual(terminalState);
+    expect(harness.sessions).toHaveLength(1);
+    expect(harness.surfaces).toHaveLength(1);
+    expect(harness.timers.active(1_000)).toBe(0);
+    expect(harness.trace.filter((entry) => entry.startsWith("agent-shutdown"))).toEqual([
+      "agent-shutdown:2000:1",
+    ]);
+
+    harness.blocker?.resolve();
+    await expect(Promise.all([shutdown, sameShutdown])).resolves.toEqual([
+      undefined,
+      undefined,
+    ]);
+    expect(harness.coordinator.diagnostics().state).toBe("stopped");
+    expect(harness.evidence).toHaveLength(1);
+  });
+
+  it("never relaunches while the old child or lease remains unsettled", async () => {
+    for (const failures of [
+      new Set<InjectedShutdownFailure>(),
+      new Set<InjectedShutdownFailure>(["wait-forced"]),
+    ]) {
+      const harness = createHarness({
+        mode: "Show",
+        forcedExit: false,
+        shutdownFailures: failures,
+      });
+      await startRunning(harness);
+      harness.sessions[0]!.naturalExit = "still-running";
+
+      harness.sessions[0]!.emitFault("janvim-exited");
+      await settle();
+      expect(harness.coordinator.diagnostics()).toMatchObject({
+        state: "safe-ready",
+        reason: "recovery-old-session-unsettled",
+      });
+      expect(harness.sessions).toHaveLength(1);
+      expect(harness.timers.active(1_000)).toBe(0);
+      expect(harness.sessions[0]!.leaseRemoved).toBe(false);
+
+      harness.coordinator.handleRendererEvent(stopEvent());
+      await harness.coordinator.completion;
+    }
+  });
+
+  it("serializes recovery cleanup with a concurrent emergency shutdown", async () => {
+    const harness = createHarness({ mode: "Show", blockedPhase: "agent-shutdown" });
+    await startRunning(harness);
+    harness.sessions[0]!.emitFault("agent-disconnected");
+    await settle();
+    expect(harness.trace.filter((entry) => entry.startsWith("agent-shutdown"))).toEqual([
+      "agent-shutdown:2000:1",
+    ]);
+
+    const shutdown = harness.coordinator.requestEmergencyStop("sigint");
+    await settle();
+    expect(harness.trace.filter((entry) => entry.startsWith("agent-shutdown"))).toEqual([
+      "agent-shutdown:2000:1",
+    ]);
+
+    harness.blocker?.resolve();
+    await expect(shutdown).resolves.toBeUndefined();
+    expect(harness.trace.filter((entry) => entry.startsWith("agent-shutdown"))).toEqual([
+      "agent-shutdown:2000:1",
+    ]);
+    expect(harness.sessions).toHaveLength(1);
+    expect(harness.coordinator.diagnostics().state).toBe("stopped");
+  });
+
+  it("bounds every unresolved recovery startup phase and aborts its side effects", async () => {
+    const phases = [
+      "start-bridge",
+      "launch-janvim",
+      "place-janvim",
+      "await-agent",
+      "prepare-original",
+    ] as const;
+
+    for (const phase of phases) {
+      const recoveryGate = deferred();
+      const harness = createHarness({
+        mode: "Show",
+        recoverySessionGate: recoveryGate,
+        recoverySessionPhase: phase,
+      });
+      await startRunning(harness);
+
+      harness.sessions[0]!.emitFault("janvim-exited");
+      await settle();
+      await harness.timers.fireTimeout(1_000);
+      await settle();
+
+      expect(harness.timers.active(10_000), phase).toBe(1);
+      await harness.timers.fireTimeout(10_000);
+      await settle();
+      expect(harness.coordinator.diagnostics(), phase).toMatchObject({
+        state: "safe-ready",
+        reason: "session-recovery-failed",
+        aggregate: { recoveryEventCount: 1 },
+      });
+      expect(harness.logs, phase).toContainEqual({
+        type: "recovery-phase-timeout",
+        phase,
+        timeoutMs: 10_000,
+      });
+      expect(harness.sessions[1]!.abortedPhases, phase).toEqual([phase]);
+
+      const beforeLateSettlement = harness.coordinator.diagnostics();
+      recoveryGate.resolve();
+      await settle();
+      expect(harness.coordinator.diagnostics(), phase).toEqual(
+        beforeLateSettlement,
+      );
+
+      harness.coordinator.handleRendererEvent(stopEvent());
+      await harness.coordinator.completion;
+    }
+  });
+
+  it("cancels an unresolved recovery phase before awaiting shutdown cleanup", async () => {
+    const recoveryGate = deferred();
+    const harness = createHarness({
+      mode: "Show",
+      recoverySessionGate: recoveryGate,
+    });
+    await startRunning(harness);
+
+    harness.sessions[0]!.emitFault("janvim-exited");
+    await settle();
+    await harness.timers.fireTimeout(1_000);
+    await settle();
+    expect(harness.timers.active(10_000)).toBe(1);
+
+    await expect(
+      harness.coordinator.requestEmergencyStop("sigint"),
+    ).resolves.toBeUndefined();
+    expect(harness.coordinator.diagnostics().state).toBe("stopped");
+    expect(harness.timers.active(10_000)).toBe(0);
+    expect(harness.sessions[1]!.abortedPhases).toEqual(["start-bridge"]);
+
+    const stopped = harness.coordinator.diagnostics();
+    recoveryGate.resolve();
+    await settle();
+    expect(harness.coordinator.diagnostics()).toEqual(stopped);
+  });
+
+  it("keeps a failed deadline cancellation visible until its stale timer fires", async () => {
+    const recoveryGate = deferred();
+    const harness = createHarness({
+      mode: "Show",
+      recoverySessionGate: recoveryGate,
+      timerClearFailure: true,
+    });
+    await startRunning(harness);
+
+    harness.sessions[0]!.emitFault("janvim-exited");
+    await settle();
+    await harness.timers.fireTimeout(1_000);
+    await settle();
+    expect(harness.timers.active(10_000)).toBe(1);
+
+    await harness.coordinator.requestEmergencyStop("sigint");
+    expect(harness.coordinator.diagnostics()).toMatchObject({
+      state: "stopped",
+      counts: { timers: 1 },
+      shutdown: {
+        failures: expect.arrayContaining([
+          "recovery-phase-timer-clear-failed",
+        ]),
+      },
+    });
+    expect(harness.timers.active(10_000)).toBe(1);
+
+    const stoppedGeneration = harness.coordinator.diagnostics().generationId;
+    await harness.timers.fireTimeout(10_000);
+    await settle();
+    expect(harness.coordinator.diagnostics()).toMatchObject({
+      state: "stopped",
+      generationId: stoppedGeneration,
+      counts: { timers: 0 },
+    });
+    recoveryGate.resolve();
+    await settle();
+  });
+
+  it("contains recovery driver-stop and shutdown timer-clear exceptions", async () => {
+    const driverFailure = createHarness({
+      mode: "Show",
+      shutdownFailures: new Set(["driver-stop"]),
+    });
+    await startRunning(driverFailure);
+    expect(() =>
+      driverFailure.sessions[0]!.emitFault("critical-ack-failed"),
+    ).not.toThrow();
+    await settle();
+    expect(driverFailure.coordinator.diagnostics().generationId).toBe(2);
+    expect(driverFailure.timers.active(1_000)).toBe(1);
+    await driverFailure.timers.fireTimeout(1_000);
+    await settle();
+    expect(driverFailure.coordinator.diagnostics().state).toBe("running");
+    await driverFailure.coordinator.requestEmergencyStop("sigint");
+
+    const timerFailure = createHarness({ mode: "Show", timerClearFailure: true });
+    await startRunning(timerFailure);
+    timerFailure.sessions[0]!.emitFault("agent-disconnected");
+    await settle();
+    expect(timerFailure.timers.active(1_000)).toBe(1);
+    await expect(
+      Promise.resolve().then(() =>
+        timerFailure.coordinator.requestEmergencyStop("sigint"),
+      ),
+    ).resolves.toBeUndefined();
+    expect(timerFailure.coordinator.diagnostics().shutdown.failures).toContain(
+      "recovery-timer-clear-failed",
+    );
+    expect(timerFailure.coordinator.diagnostics().state).toBe("stopped");
+  });
+
+  it("publishes shutting-down only after generation invalidation", async () => {
+    const harness = createHarness({ mode: "Show" });
+    await startRunning(harness);
+    await harness.coordinator.requestEmergencyStop("sigint");
+
+    const shuttingStatus = harness.surfaces[0]!.sent.find(
+      (event) => event.type === "run-status" && event.state === "shutting-down",
+    );
+    expect(shuttingStatus).toMatchObject({ generationId: 2 });
   });
 });
