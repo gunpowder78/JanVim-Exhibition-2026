@@ -104,6 +104,12 @@ class FakeAgent implements ShowLoopAgent {
 
       if (command.action.type === "reset") {
         this.bufferSha256 = this.baselineSha256;
+        this.events.push({
+          type: "editor-ack",
+          cueId: command.cueId,
+          outcome: "applied",
+          bufferSha256: this.bufferSha256,
+        });
         return this.ack(command, "applied", this.bufferSha256);
       }
 
@@ -287,8 +293,14 @@ describe("first deterministic causal loop", () => {
       "editor-ack",
       "fade",
       "reset",
+      "editor-ack",
       "ready",
     ]);
+    expect(
+      harness.events
+        .filter((event) => event.cueId === "cue-reset")
+        .map((event) => event.type),
+    ).toEqual(["reset", "editor-ack"]);
     const editor = harness.events.find((event) => event.type === "editor-action");
     const overlay = harness.events.find((event) => event.type === "key-overlay");
     expect(editor?.cueId).toBe("cue-insert");
@@ -371,7 +383,12 @@ describe("first deterministic causal loop", () => {
     expect(harness.runtime.state).toBe("safe-black");
     expect(harness.runtime.completedLoops).toBe(0);
     expect(harness.events.filter((event) => event.type === "ready")).toHaveLength(1);
-    expect(harness.events.some((event) => event.type === "reset")).toBe(false);
+    expect(harness.events.filter((event) => event.type === "reset")).toHaveLength(1);
+    expect(harness.events.at(-1)).toMatchObject({
+      type: "editor-ack",
+      cueId: "cue-reset",
+      outcome: "failed",
+    });
   });
 
   it("retries one transport timeout with the same cue id without duplicating the overlay", async () => {

@@ -435,6 +435,7 @@ export class DeterministicShowLoop {
     cue: Extract<Cue, { kind: "editor-action" }>,
     loopId: string,
   ): Promise<void> {
+    this.renderer.apply(cue);
     let acknowledgement: AgentAck;
     try {
       acknowledgement = await this.dispatchAgent({
@@ -457,7 +458,6 @@ export class DeterministicShowLoop {
       return;
     }
 
-    this.renderer.apply(cue);
     this.completedLoops += 1;
     this.resultComplete = false;
     this.resultAccepted = false;
