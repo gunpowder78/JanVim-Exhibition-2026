@@ -48,6 +48,9 @@ export class SecondarySceneController {
       this.applyStatus(event);
       return;
     }
+    if ("type" in event) {
+      return;
+    }
     this.apply(event);
   }
 

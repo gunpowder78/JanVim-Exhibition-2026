@@ -50,7 +50,44 @@ export type ControllerStatusEvent = {
   reason?: string;
 };
 
-export type RendererEvent = Cue | ControllerStatusEvent;
+export type OperatorAction = "start" | "restart-loop" | "stop-show";
+
+export type RendererToControllerEvent =
+  | { schema: 1; type: "operator-action"; action: OperatorAction }
+  | {
+      schema: 1;
+      type: "presentation-ack";
+      generationId: number;
+      loopId: string;
+      cueId: string;
+    };
+
+export type RunCueEvent = {
+  schema: 1;
+  type: "run-cue";
+  generationId: number;
+  loopId: string;
+  requiresPresentationAck: boolean;
+  cue: Cue;
+};
+
+export type RunStatusEvent = {
+  schema: 1;
+  type: "run-status";
+  generationId: number;
+  state:
+    | "booting"
+    | "ready"
+    | "running"
+    | "safe-cruise"
+    | "black-recovering"
+    | "safe-ready"
+    | "shutting-down"
+    | "stopped";
+  reason?: string;
+};
+
+export type RendererEvent = Cue | ControllerStatusEvent | RunCueEvent | RunStatusEvent;
 
 const textEncoder = new TextEncoder();
 const nonCommandText = z
@@ -162,14 +199,114 @@ const controllerStatusSchema = z
     }
   });
 
+const runtimeIdSchema = z.string().refine((value) => {
+  const byteLength = textEncoder.encode(value).byteLength;
+  return (
+    byteLength >= 1 &&
+    byteLength <= 256 &&
+    !/[\u0000-\u001f\u007f]/u.test(value)
+  );
+}, "runtime id must be 1 to 256 UTF-8 bytes without control characters");
+
+const positiveSafeIntegerSchema = z
+  .number()
+  .refine(Number.isSafeInteger, "generation id must be a safe integer")
+  .refine((value) => value > 0, "generation id must be positive");
+
+const stableReasonSchema = z
+  .string()
+  .max(64)
+  .regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/, "reason must be stable lower-case words");
+
+const operatorActionEventSchema = z
+  .object({
+    schema: z.literal(1),
+    type: z.literal("operator-action"),
+    action: z.enum(["start", "restart-loop", "stop-show"]),
+  })
+  .strict();
+
+const presentationAckEventSchema = z
+  .object({
+    schema: z.literal(1),
+    type: z.literal("presentation-ack"),
+    generationId: positiveSafeIntegerSchema,
+    loopId: runtimeIdSchema,
+    cueId: runtimeIdSchema,
+  })
+  .strict();
+
+const rendererToControllerEventSchema = z.discriminatedUnion("type", [
+  operatorActionEventSchema,
+  presentationAckEventSchema,
+]);
+
+const runCueEventSchema = z
+  .object({
+    schema: z.literal(1),
+    type: z.literal("run-cue"),
+    generationId: positiveSafeIntegerSchema,
+    loopId: runtimeIdSchema,
+    requiresPresentationAck: z.boolean(),
+    cue: manifestCueSchema,
+  })
+  .strict();
+
+const runStatusEventSchema = z
+  .object({
+    schema: z.literal(1),
+    type: z.literal("run-status"),
+    generationId: positiveSafeIntegerSchema,
+    state: z.enum([
+      "booting",
+      "ready",
+      "running",
+      "safe-cruise",
+      "black-recovering",
+      "safe-ready",
+      "shutting-down",
+      "stopped",
+    ]),
+    reason: stableReasonSchema.optional(),
+  })
+  .strict()
+  .superRefine((event, context) => {
+    if (event.state === "safe-ready" && event.reason === undefined) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["reason"],
+        message: "safe-ready status requires a stable reason",
+      });
+    }
+    if (event.state !== "safe-ready" && event.reason !== undefined) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["reason"],
+        message: "reason is only valid for safe-ready status",
+      });
+    }
+  });
+
+export function parseRendererToControllerEvent(value: unknown): RendererToControllerEvent {
+  return rendererToControllerEventSchema.parse(value) as RendererToControllerEvent;
+}
+
 export function parseRendererEvent(value: unknown): RendererEvent {
   if (
     value !== null &&
     typeof value === "object" &&
     "type" in value &&
-    value.type === "controller-status"
+    typeof value.type === "string"
   ) {
-    return controllerStatusSchema.parse(value) as ControllerStatusEvent;
+    if (value.type === "controller-status") {
+      return controllerStatusSchema.parse(value) as ControllerStatusEvent;
+    }
+    if (value.type === "run-cue") {
+      return runCueEventSchema.parse(value) as RunCueEvent;
+    }
+    if (value.type === "run-status") {
+      return runStatusEventSchema.parse(value) as RunStatusEvent;
+    }
   }
   return manifestCueSchema.parse(value) as Cue;
 }

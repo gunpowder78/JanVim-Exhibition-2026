@@ -7,6 +7,7 @@ import {
   parseAgentCommand,
   parseAgentCommandFromBytes,
   parseAgentAck,
+  parseShowManifest,
   redactToken,
   type AgentCommand,
   type AgentAck,
@@ -42,6 +43,60 @@ describe("agent protocol schema", () => {
     expect(() => parseAgentAck(goodAck)).not.toThrow();
   });
 
+  it("accepts only the parameter-free shutdown control action", () => {
+    const command = {
+      schema: 1,
+      token: goodCommand.token,
+      loopId: "loop-1",
+      cueId: "loop-1-shutdown",
+      action: { type: "shutdown" },
+    } as const;
+
+    expect(parseAgentCommand(command, "127.0.0.1")).toEqual(command);
+    expect(() =>
+      parseAgentCommand(
+        { ...command, action: { type: "shutdown", command: ":qa" } },
+        "127.0.0.1",
+      ),
+    ).toThrowError(/unrecognized|unknown/i);
+  });
+
+  it("keeps shutdown out of manifest editor actions", () => {
+    const commonPayload = {
+      displayKeys: ["Esc"],
+      semanticLabel: "control boundary",
+      critical: true,
+    } as const;
+    const manifest = {
+      schema: 1,
+      loopId: "shutdown-must-not-be-an-editor-action",
+      loopDurationMs: 1,
+      poemSha256: "b".repeat(64),
+      contentRevision: "test-1",
+      preparedBy: "schema-test",
+      cues: [
+        {
+          id: "forbidden-shutdown",
+          atMs: 0,
+          target: "main",
+          kind: "editor-action",
+          payload: { ...commonPayload, action: { type: "shutdown" } },
+        },
+        {
+          id: "required-reset",
+          atMs: 1,
+          target: "main",
+          kind: "editor-action",
+          payload: { ...commonPayload, action: { type: "reset" } },
+        },
+      ],
+    };
+
+    expect(() => parseShowManifest(manifest)).toThrowError(
+      /discriminator|union|invalid/i,
+    );
+  });
+
   it("rejects unknown actions and non-loopback host", () => {
     expect(() =>
       parseAgentCommand({ ...goodCommand, action: { type: "launch-the-flags" } }, "127.0.0.1"),
@@ -53,6 +108,7 @@ describe("agent protocol schema", () => {
     const actions = [
       { type: "prepare", poem: "白日依山尽", expectedSha256: "b".repeat(64) },
       { type: "status" },
+      { type: "shutdown" },
       { type: "move", keys: "j", repeat: 1 },
       { type: "insert", text: "x", charsPerSecond: 20 },
       { type: "select", rangeId: "verse-1" },

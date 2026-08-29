@@ -8,7 +8,10 @@ import {
 } from "./renderer-event.js";
 import type { Cue, EditorAction } from "./renderer-event.js";
 
-export { parseRendererEvent } from "./renderer-event.js";
+export {
+  parseRendererEvent,
+  parseRendererToControllerEvent,
+} from "./renderer-event.js";
 export type {
   ControllerStatusEvent,
   Cue,
@@ -16,7 +19,11 @@ export type {
   CueTarget,
   EditorAction,
   EditorPayload,
+  OperatorAction,
   RendererEvent,
+  RendererToControllerEvent,
+  RunCueEvent,
+  RunStatusEvent,
 } from "./renderer-event.js";
 
 export type ShowManifest = {
@@ -54,6 +61,13 @@ export type AgentCommand =
       loopId: string;
       cueId: string;
       action: { type: "status" };
+    }
+  | {
+      schema: 1;
+      token: string;
+      loopId: string;
+      cueId: string;
+      action: { type: "shutdown" };
     };
 
 export type AgentAck = {
@@ -169,6 +183,7 @@ const commandActionSchema = z.discriminatedUnion("type", [
   editorActionSchema,
   prepareActionSchema,
   z.object({ type: z.literal("status") }).strict(),
+  z.object({ type: z.literal("shutdown") }).strict(),
 ]);
 
 const agentCommandPayloadSchema = z
