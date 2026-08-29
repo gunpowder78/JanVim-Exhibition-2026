@@ -532,7 +532,7 @@ describe("real G2 runtime adapter boundaries", () => {
         coreBytes: 18_866_688,
         coreSha256:
           "224b3457d89fbc6cf946359683632f29f9262bae08b6f0d2e3043a3a7a6d83b3",
-        layoutEngine: "dynamic",
+        layoutEngine: "orthogonal",
       },
       content: {
         manifestSha256: "9a39ee522e556860053468854b0858bc1fafd8b7a1ca08ddff57d0371b717b35",

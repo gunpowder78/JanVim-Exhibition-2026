@@ -5,6 +5,7 @@ import { dirname } from "node:path";
 const projectRoot = dirname(fileURLToPath(import.meta.url));
 export default defineConfig({
   root: projectRoot,
+  base: "./",
   build: {
     outDir: "dist",
   },

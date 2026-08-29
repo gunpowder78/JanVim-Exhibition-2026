@@ -9,9 +9,8 @@ spark_impulse_threshold = 18000.0
 fallback_paths = ["../runtime/janvim/assets/fonts/private/FiraCodeNerdFontMono-Regular.ttf"]
 
 [layout]
-# Frozen after the 2026-08-29 dynamic/orthogonal/dynamic dual-display A/B.
-engine = "dynamic"
-dynamic_profile = "../runtime/janvim/assets/layout-profiles/computer-mixed.toml"
+# Explicit orthogonal selection avoids the observed Plugin Lab dynamic-candidate fallback.
+engine = "orthogonal"
 column_width = 20.0
 column_gap = 4.0
 glyph_advance = 24.0

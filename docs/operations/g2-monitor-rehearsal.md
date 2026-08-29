@@ -14,6 +14,13 @@
 4. 确认依赖和生产构建已完成：`npm ci`、`npm run typecheck`、`npm test`、
    `npm run build`。
 5. 保持网络可断开；现场循环不依赖网络。不要启动或修改 `D:\github\JanVim`。
+6. 当前 G2 冻结配置显式使用 `orthogonal`。首次显示器实跑证明 `dynamic` 在 Plugin Lab
+   准备缓冲区后会进入 `orthogonal_after_fallback` 并写 stderr，因此不能满足本闸门。
+
+Windows“标识”显示的 1/2、`.NET Screen.DeviceName` 的 `DISPLAY1`/`DISPLAY2` 与
+Electron `displayId` 是三套标识，不能按数字相等推断。应先在 Windows“显示设置”的排列图
+中把物理屏与桌面矩形对应，再用 Capture 中相同的 `bounds` 找到 Electron ID。最终仍以
+实体屏上实际出现的 JanVim/Web 角色为人工真值；若不符，立即放弃该彩排目录。
 
 ## 四步命令
 
@@ -87,8 +94,8 @@ Get-Content -Raw -LiteralPath "$rehearsalRoot\janvim.stderr.log"
 
 检查 `g2-run.json` 至少满足：`outcome` 为 `passed`、`completedLoops` 为 `1`、
 `resetRestoredPoem` 为 `true`、shutdown 为 natural、显示映射 SHA-256 与本轮外部映射
-一致，并且 `physicalProjectorsTested` 明确为 `false`。证据中不得出现 Bridge token、
-用户配置路径或用户 Neovim 配置内容。
+一致、`janvim.stderr.log` 为零字节，并且 `physicalProjectorsTested` 明确为 `false`。
+证据中不得出现 Bridge token、用户配置路径或用户 Neovim 配置内容。
 
 ## 验收边界
 

@@ -152,12 +152,21 @@ Child stdout and stderr are each capped at 8 MiB and stored separately. The run 
 
 - external display map, resolution, scale, and map hash;
 - artifact tag, commit, byte sizes, and SHA-256 values from the lock;
-- manifest/config hashes and selected `dynamic` layout;
+- manifest/config hashes and selected `orthogonal` layout;
 - requested and actual JanVim rectangle;
 - completed loop count, cue timing drift summary, reset result, and shutdown result;
 - operator notes and explicit `physicalProjectorsTested: false`.
 
 No evidence file contains the bridge token or user configuration paths.
+
+### 2026-08-29 monitor-rehearsal amendment
+
+The first real-monitor attempt showed that the approved `dynamic` A/B configuration enters
+`orthogonal_after_fallback` after the Plugin Lab agent prepares its nofile buffer and writes the
+fallback warning to stderr. Because G2 requires zero stderr and the artifact/product source is
+immutable, the show-only configuration now selects the already human-tested `orthogonal` engine
+explicitly. The JanVim artifact bytes, source poem, show agent, and user Neovim configuration remain
+unchanged.
 
 ## Interfaces and files
 

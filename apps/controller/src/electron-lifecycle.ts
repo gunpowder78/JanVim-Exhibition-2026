@@ -1,24 +1,22 @@
 export interface ElectronAppLifecycleAdapter {
   whenReady(): Promise<void>;
   on(event: "activate" | "window-all-closed", listener: () => void): void;
-  quit(): void;
+  exit(exitCode?: number): void;
 }
 
 export async function runElectronLifecycle(
   app: ElectronAppLifecycleAdapter,
   run: () => Promise<number>,
 ): Promise<number> {
-  let started = false;
   app.on("activate", () => undefined);
   app.on("window-all-closed", () => undefined);
   await app.whenReady();
-  if (started) return 1;
-  started = true;
+  let exitCode: number;
   try {
-    return await run();
+    exitCode = await run();
   } catch {
-    return 1;
-  } finally {
-    app.quit();
+    exitCode = 1;
   }
+  app.exit(exitCode);
+  return exitCode;
 }

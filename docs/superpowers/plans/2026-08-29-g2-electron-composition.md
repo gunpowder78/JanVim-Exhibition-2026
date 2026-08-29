@@ -1648,7 +1648,7 @@ it("finalizes evidence from the verified lock, confirmed map, and explicit snaps
       commit: "e95633101d93f8448b0f906e918b5d836ab95273",
       coreBytes: 18_866_688,
       coreSha256: "224b3457d89fbc6cf946359683632f29f9262bae08b6f0d2e3043a3a7a6d83b3",
-      layoutEngine: "dynamic",
+      layoutEngine: "orthogonal",
     },
   });
   expect(JSON.stringify(harness.evidenceRecord)).not.toContain(harness.bridgeToken);
@@ -1722,7 +1722,7 @@ async function runWithDeadline<T>(
 It receives repositoryRoot computed from `app.getAppPath()` by the Electron entry; no adapter path
 may derive from process.cwd(). The evidence finalizer re-reads and validates the lock and confirmed
 map after runtime verification, hashes the exact display-map bytes, copies the immutable artifact
-identity, uses dynamic from the locked show config, and merges only the explicit Task 5 snapshot.
+identity, uses the selected engine from the locked show config, and merges only the explicit Task 5 snapshot.
 It never serializes the bridge token, private user root, inherited environment, or user paths.
 
 Use an explicit environment copy and explicit denylist before calling the existing environment
@@ -1992,7 +1992,8 @@ it("runs once and never creates a window through activation", async () => {
   app.emit("activate");
   app.emit("window-all-closed");
   expect(run).toHaveBeenCalledTimes(1);
-  expect(app.quit).toHaveBeenCalledTimes(1);
+  expect(app.exitCount).toBe(1);
+  expect(app.exitedWith).toBe(0);
   expect(app.createdWindowCount).toBe(0);
 });
 ~~~~
@@ -2009,26 +2010,24 @@ Expected: FAIL because electron-lifecycle.ts does not exist. Then create it:
 export interface ElectronAppLifecycleAdapter {
   whenReady(): Promise<void>;
   on(event: "activate" | "window-all-closed", listener: () => void): void;
-  quit(): void;
+  exit(exitCode?: number): void;
 }
 
 export async function runElectronLifecycle(
   app: ElectronAppLifecycleAdapter,
   run: () => Promise<number>,
 ): Promise<number> {
-  let started = false;
   app.on("activate", () => {});
   app.on("window-all-closed", () => {});
   await app.whenReady();
-  if (started) return 1;
-  started = true;
+  let exitCode: number;
   try {
-    return await run();
+    exitCode = await run();
   } catch {
-    return 1;
-  } finally {
-    app.quit();
+    exitCode = 1;
   }
+  app.exit(exitCode);
+  return exitCode;
 }
 ~~~~
 
@@ -2072,26 +2071,26 @@ import { runElectronCommand } from "./electron-command.js";
 import { runElectronLifecycle } from "./electron-lifecycle.js";
 import { createElectronCommandAdapters } from "./g2-runtime-adapters.js";
 
-void runElectronLifecycle(app, async () => {
-  try {
-    const repositoryRoot = resolve(app.getAppPath(), "..", "..");
-    const command = parseG2Command(process.argv.slice(2), repositoryRoot);
-    return await runElectronCommand(
-      command,
-      createElectronCommandAdapters({
-        app,
-        BrowserWindow,
-        ipcMain,
-        screen,
-        repositoryRoot,
-      }),
-    );
-  } catch {
-    return 1;
-  }
-}).then((exitCode) => {
-  process.exitCode = exitCode;
-});
+void runElectronLifecycle(
+  app,
+  async () => {
+    try {
+      const repositoryRoot = resolve(app.getAppPath(), "..", "..");
+      const command = parseG2Command(process.argv.slice(2), repositoryRoot);
+      return await runElectronCommand(
+        command,
+        createElectronCommandAdapters({
+          BrowserWindow,
+          ipcMain,
+          screen,
+          repositoryRoot,
+        }),
+      );
+    } catch {
+      return 1;
+    }
+  },
+);
 ~~~~
 
 Change apps/controller/package.json:
@@ -2351,7 +2350,7 @@ Expected:
 
 - 0 failing tests;
 - typecheck, lint, and build exit 0;
-- runtime-verified reports layoutEngine dynamic;
+- runtime-verified reports layoutEngine orthogonal;
 - core bytes are 18866688;
 - core SHA-256 is 224b3457d89fbc6cf946359683632f29f9262bae08b6f0d2e3043a3a7a6d83b3;
 - no runtime files are tracked;

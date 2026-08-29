@@ -11,8 +11,9 @@ class FakeElectronApp implements ElectronAppLifecycleAdapter {
   private readonly ready = new Promise<void>((resolve) => {
     this.resolveReadyPromise = resolve;
   });
-  public readonly quit = vi.fn();
   public createdWindowCount = 0;
+  public exitedWith: number | undefined;
+  public exitCount = 0;
 
   public whenReady(): Promise<void> {
     return this.ready;
@@ -31,6 +32,11 @@ class FakeElectronApp implements ElectronAppLifecycleAdapter {
   public resolveReady(): void {
     this.resolveReadyPromise();
   }
+
+  public exit(exitCode = 0): void {
+    this.exitedWith = exitCode;
+    this.exitCount += 1;
+  }
 }
 
 describe("one-shot Electron lifecycle", () => {
@@ -44,17 +50,41 @@ describe("one-shot Electron lifecycle", () => {
     app.emit("activate");
     app.emit("window-all-closed");
     expect(run).toHaveBeenCalledTimes(1);
-    expect(app.quit).toHaveBeenCalledTimes(1);
+    expect(app.exitCount).toBe(1);
+    expect(app.exitedWith).toBe(0);
     expect(app.createdWindowCount).toBe(0);
   });
 
-  it("returns nonzero and still quits once when the command throws", async () => {
+  it("returns nonzero and exits once when the command throws", async () => {
     const app = new FakeElectronApp();
     const pending = runElectronLifecycle(app, async () => {
       throw new Error("command failed");
     });
     app.resolveReady();
     await expect(pending).resolves.toBe(1);
-    expect(app.quit).toHaveBeenCalledTimes(1);
+    expect(app.exitCount).toBe(1);
+    expect(app.exitedWith).toBe(1);
+  });
+
+  it("waits for command cleanup before exiting with the failed result", async () => {
+    const app = new FakeElectronApp();
+    let commandStarted = false;
+    let resolveCommand!: (exitCode: number) => void;
+    const command = new Promise<number>((resolve) => {
+      resolveCommand = resolve;
+    });
+    const pending = runElectronLifecycle(app, () => {
+      commandStarted = true;
+      return command;
+    });
+    app.resolveReady();
+    await Promise.resolve();
+
+    expect(commandStarted).toBe(true);
+    expect(app.exitCount).toBe(0);
+    resolveCommand(1);
+    await expect(pending).resolves.toBe(1);
+    expect(app.exitCount).toBe(1);
+    expect(app.exitedWith).toBe(1);
   });
 });
