@@ -72,12 +72,19 @@ const LEASE_LOCK_ACQUIRE_TIMEOUT_MS = 2_500;
 const LEASE_LOCK_RELEASE_TIMEOUT_MS = 2_500;
 const LEASE_LOCK_NAME_PREFIX = "janvim-exhibition-run-lease-";
 
-const boundedIdSchema = z
+const runIdSchema = z
   .string()
   .regex(/^[A-Za-z0-9._-]{1,64}$/)
   .refine(
     (value) => !BRIDGE_TOKEN_PATTERN.test(value),
     "run identity must not contain a bridge token",
+  );
+const controllerRunIdSchema = z
+  .string()
+  .regex(/^[A-Za-z0-9._-]{1,96}$/)
+  .refine(
+    (value) => !BRIDGE_TOKEN_PATTERN.test(value),
+    "controller run identity must not contain a bridge token",
   );
 const positiveSafeIntegerSchema = z
   .number()
@@ -111,8 +118,8 @@ const janvimIdentitySchema = z
 const runLeaseSchema = z
   .object({
     schema: z.literal(1),
-    runId: boundedIdSchema,
-    controllerRunId: boundedIdSchema,
+    runId: runIdSchema,
+    controllerRunId: controllerRunIdSchema,
     generationId: positiveSafeIntegerSchema,
     controller: controllerIdentitySchema,
     janvim: janvimIdentitySchema,

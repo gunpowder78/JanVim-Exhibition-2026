@@ -291,6 +291,16 @@ describe("run lease atomic persistence", () => {
     expect(readdirSync(root)).toEqual(["run-lease.json"]);
   });
 
+  it("preserves a valid 96-byte controller invocation identity", async () => {
+    const root = temporaryRoot("run-lease-controller-id-");
+    const path = join(root, "run-lease.json");
+    const lease = validLease({ controllerRunId: "z".repeat(96) });
+
+    await writeRunLeaseAtomic(path, lease);
+
+    expect(JSON.parse(readFileSync(path, "utf8"))).toEqual(lease);
+  });
+
   it("rejects unknown, secret, absolute-path, and out-of-bound fields before writing", async () => {
     const root = temporaryRoot("run-lease-schema-");
     const lease = validLease();
@@ -312,6 +322,7 @@ describe("run lease atomic persistence", () => {
       { ...lease, runId: "r".repeat(65) },
       { ...lease, runId: `show-${"ab".repeat(24)}` },
       { ...lease, controllerRunId: "controller run with spaces" },
+      { ...lease, controllerRunId: "z".repeat(97) },
       { ...lease, controllerRunId: `${"cd".repeat(24)}-controller` },
       { ...lease, generationId: 0 },
       {
