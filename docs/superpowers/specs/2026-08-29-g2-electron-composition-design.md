@@ -113,6 +113,11 @@ Overlay.
 
 A non-overlapping 16-ms timer calls `advance()`. The hard deadline is exactly
 `loopDurationMs + 10_000` (100 seconds for the fixture), which prevents an unbounded rehearsal.
+The drift summary records the greatest of a single executed tick's positive interval lateness and
+a single `advance()` call's positive execution overrun relative to 16 ms. Each executed tick
+re-anchors that diagnostic schedule, preventing Windows timer quantization from becoming a
+fictitious cumulative show drift. Sampling when `advance()` settles keeps even a terminal
+in-flight wait visible without requiring a following tick.
 After the reset ACK restores the original poem hash and `completedLoops` becomes one, the timer is
 stopped before the next loop can emit a cue. The secondary surface reports
 `complete-awaiting-close` and remains visible for manual inspection.
@@ -167,6 +172,16 @@ fallback warning to stderr. Because G2 requires zero stderr and the artifact/pro
 immutable, the show-only configuration now selects the already human-tested `orthogonal` engine
 explicitly. The JanVim artifact bytes, source poem, show agent, and user Neovim configuration remain
 unchanged.
+
+### 2026-08-29 Windows timer-diagnostic amendment
+
+The first complete real-monitor loop exposed `maxDriftMs: 37389.2782` despite completing the
+90-second reset. A ten-second sample on the same host showed that a requested 16-ms Node/Electron
+interval averaged 28.48 ms and that accumulating a fixed 16-ms expectation produced 4.39 seconds
+of fictitious drift. The driver therefore re-anchors the diagnostic expectation after every
+executed tick. This changes evidence accuracy only; the monotonic show clock, absolute cue
+schedule, non-overlap rule, and hard deadline are unchanged. Settlement sampling also records a
+terminal `advance()` overrun that would otherwise have no subsequent tick.
 
 ## Interfaces and files
 

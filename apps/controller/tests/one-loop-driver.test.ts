@@ -197,6 +197,32 @@ describe("one-loop driver", () => {
     expect(harness.driver.diagnostics().maxDriftMs).toBe(9);
   });
 
+  it("does not accumulate Windows timer quantization across completed ticks", async () => {
+    const harness = createDriverHarness(90_000);
+    harness.driver.start();
+
+    for (const now of [31, 62, 93]) {
+      harness.timers.setNow(now);
+      await harness.timers.fireInterval(16);
+    }
+
+    expect(harness.driver.diagnostics().maxDriftMs).toBe(15);
+  });
+
+  it("records a terminal in-flight advance overrun without requiring another tick", async () => {
+    const harness = createDeferredAdvanceHarness(90_000);
+    harness.driver.start();
+    harness.timers.setNow(16);
+    const pendingAdvance = harness.timers.fireInterval(16);
+
+    harness.timers.setNow(1_316);
+    harness.completeOneLoopAndReleaseAdvance();
+    await pendingAdvance;
+
+    expect(harness.completed).toHaveBeenCalledTimes(1);
+    expect(harness.driver.diagnostics().maxDriftMs).toBe(1_284);
+  });
+
   it("fails immediately when the deterministic loop enters safe black", async () => {
     const harness = createDriverHarness(90_000, {
       afterAdvance: (runtime) => {

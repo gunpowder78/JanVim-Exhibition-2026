@@ -97,6 +97,10 @@ Get-Content -Raw -LiteralPath "$rehearsalRoot\janvim.stderr.log"
 一致、`janvim.stderr.log` 为零字节，并且 `physicalProjectorsTested` 明确为 `false`。
 证据中不得出现 Bridge token、用户配置路径或用户 Neovim 配置内容。
 
+`maxDriftMs` 取两类数值中的最大值：相邻实际 tick 间隔超过 16 ms 的正向迟到，以及
+单次 `advance()` 执行超过 16 ms 的正向超时。它不会累计 Windows 定时器量化误差；即使
+最终 reset ACK 后不再执行下一个 tick，其等待仍会被记录。
+
 ## 验收边界
 
 两台真实显示器上的成功只建立“投影模拟”G2。它不替代两台物理投影上的三轮连续

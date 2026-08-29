@@ -507,7 +507,10 @@ git commit -m "feat: confirm external rehearsal display maps"
 - Produces: OneLoopDriver.start(), stop(), diagnostics().
 - Produces callbacks: onComplete and onFailure with stable reasons loop-deadline-exceeded,
   loop-advance-failed, loop-runtime-safe-black, loop-stopped-before-reset, or loop-count-invalid.
-- Produces: maxDriftMs measured from the injected monotonic clock against the 16-ms tick schedule.
+- Produces: maxDriftMs measured as the greatest of one executed tick's positive interval
+  lateness and one `advance()` call's positive execution overrun against 16 ms. Re-anchor after
+  every executed tick so Windows timer quantization is not accumulated across the run; sample
+  `advance()` settlement so even a terminal in-flight wait remains visible.
 
 - [ ] **Step 1: Write failing one-loop tests**
 
@@ -578,9 +581,30 @@ it("fails at exactly loop duration plus ten seconds", async () => {
 it("records maximum positive drift against the 16-ms monotonic schedule", async () => {
   const harness = createDriverHarness(90_000);
   harness.driver.start();
-  harness.clock.set(25);
+  harness.timers.setNow(25);
   await harness.timers.fireInterval(16);
   expect(harness.driver.diagnostics().maxDriftMs).toBe(9);
+});
+
+it("does not accumulate Windows timer quantization across completed ticks", async () => {
+  const harness = createDriverHarness(90_000);
+  harness.driver.start();
+  for (const now of [31, 62, 93]) {
+    harness.timers.setNow(now);
+    await harness.timers.fireInterval(16);
+  }
+  expect(harness.driver.diagnostics().maxDriftMs).toBe(15);
+});
+
+it("records a terminal in-flight advance overrun without requiring another tick", async () => {
+  const harness = createDeferredAdvanceHarness(90_000);
+  harness.driver.start();
+  harness.timers.setNow(16);
+  const pendingAdvance = harness.timers.fireInterval(16);
+  harness.timers.setNow(1_316);
+  harness.completeOneLoopAndReleaseAdvance();
+  await pendingAdvance;
+  expect(harness.driver.diagnostics().maxDriftMs).toBe(1_284);
 });
 
 it("fails immediately when the deterministic loop enters safe black", async () => {
@@ -682,11 +706,15 @@ export class OneLoopDriver {
   private async tick(): Promise<void> {
     if (this.advancing || this.terminal) return;
     const now = this.options.clock.nowMonotonic();
-    this.maxDriftMs = Math.max(this.maxDriftMs, Math.max(0, now - this.expectedTickMs));
-    this.expectedTickMs += 16;
+    this.recordDrift(now);
+    this.expectedTickMs = now + 16;
     this.advancing = true;
     try {
-      await this.options.runtime.advance();
+      try {
+        await this.options.runtime.advance();
+      } finally {
+        if (!this.terminal) this.recordDrift(this.options.clock.nowMonotonic());
+      }
       if (this.terminal) return;
       if (this.options.runtime.completedLoops === 1) {
         this.finish();
@@ -703,6 +731,10 @@ export class OneLoopDriver {
     } finally {
       this.advancing = false;
     }
+  }
+
+  private recordDrift(now: number): void {
+    this.maxDriftMs = Math.max(this.maxDriftMs, Math.max(0, now - this.expectedTickMs));
   }
 
   public stop(): void {

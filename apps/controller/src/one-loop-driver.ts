@@ -72,11 +72,15 @@ export class OneLoopDriver {
   private async tick(): Promise<void> {
     if (this.advancing || this.terminal) return;
     const now = this.options.clock.nowMonotonic();
-    this.maxDriftMs = Math.max(this.maxDriftMs, Math.max(0, now - this.expectedTickMs));
-    this.expectedTickMs += 16;
+    this.recordDrift(now);
+    this.expectedTickMs = now + 16;
     this.advancing = true;
     try {
-      await this.options.runtime.advance();
+      try {
+        await this.options.runtime.advance();
+      } finally {
+        if (!this.terminal) this.recordDrift(this.options.clock.nowMonotonic());
+      }
       if (this.terminal) return;
       if (this.options.runtime.completedLoops === 1) {
         this.finish();
@@ -97,6 +101,10 @@ export class OneLoopDriver {
     } finally {
       this.advancing = false;
     }
+  }
+
+  private recordDrift(now: number): void {
+    this.maxDriftMs = Math.max(this.maxDriftMs, Math.max(0, now - this.expectedTickMs));
   }
 
   private finish(): void {
