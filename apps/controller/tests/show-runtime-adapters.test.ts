@@ -1,0 +1,1706 @@
+import { readFileSync, readdirSync } from "node:fs";
+import { EventEmitter } from "node:events";
+import { join, win32 } from "node:path";
+import { PassThrough } from "node:stream";
+
+import { describe, expect, it, vi } from "vitest";
+
+import type { AgentAck, AgentCommand } from "@janvim-exhibition/show-schema";
+
+import type { LogStorage } from "../src/bounded-log.ts";
+import type {
+  OneLoopTimerAdapter,
+  OneLoopTimerHandle,
+} from "../src/one-loop-driver.ts";
+import type { RunLease } from "../src/run-lease.ts";
+import type { ShowCommand } from "../src/show-command.ts";
+import { parseShowRunEvidence } from "../src/show-run-evidence.ts";
+import {
+  controllerStartedAtUtc,
+  createShowLoopId,
+  createShowRuntimeAdapters,
+  type ShowRuntimeAdapterHost,
+} from "../src/show-runtime-adapters.ts";
+
+const fixtureRoot = process.cwd();
+const artifactLock = readFileSync(
+  join(fixtureRoot, "janvim-artifact.lock.json"),
+);
+const showConfig = readFileSync(
+  join(fixtureRoot, "show", "janvim-show.toml"),
+);
+const manifest = readFileSync(
+  join(fixtureRoot, "content", "fixture", "show.manifest.json"),
+);
+const poem = readFileSync(
+  join(fixtureRoot, "content", "fixture", "poem.txt"),
+);
+const pluginLabInit = readFileSync(
+  join(
+    fixtureRoot,
+    "runtime",
+    "user-root",
+    "plugin-lab",
+    "config",
+    "init.lua",
+  ),
+);
+
+const repositoryRoot = "D:\\show";
+const rehearsalRoot =
+  "D:\\VirtualData\\JanVim-Exhibition-Rehearsals\\show-001";
+const displayMapPath = `${rehearsalRoot}\\display-map.json`;
+
+const confirmedMap = {
+  schema: 1,
+  mappingStatus: "confirmed",
+  expectedDisplayCount: 2,
+  primary: {
+    displayId: "111",
+    bounds: { x: 0, y: 0, width: 1920, height: 1080 },
+    scaleFactor: 1,
+    geometrySha256:
+      "b2bc82d7bea454184acfb21ae9139e97c32aefb994443034423653e85f9c83cc",
+  },
+  secondary: {
+    displayId: "222",
+    bounds: { x: 1920, y: 0, width: 1920, height: 1080 },
+    scaleFactor: 1,
+    geometrySha256:
+      "2ebac5faac6c5f34562d1e91088736c9e70943c9c42846616a418db904319928",
+  },
+} as const;
+
+const displays = [
+  {
+    id: 111,
+    bounds: { x: 0, y: 0, width: 1920, height: 1080 },
+    workArea: { x: 0, y: 0, width: 1920, height: 1040 },
+    scaleFactor: 1,
+    rotation: 0,
+  },
+  {
+    id: 222,
+    bounds: { x: 1920, y: 0, width: 1920, height: 1080 },
+    workArea: { x: 1920, y: 0, width: 1920, height: 1040 },
+    scaleFactor: 1,
+    rotation: 0,
+  },
+] as const;
+
+class MemoryLogStorage implements LogStorage {
+  public readonly files = new Map<string, string>();
+
+  public append(path: string, text: string): void {
+    this.files.set(path, (this.files.get(path) ?? "") + text);
+  }
+
+  public size(path: string): number {
+    return Buffer.byteLength(this.files.get(path) ?? "", "utf8");
+  }
+
+  public exists(path: string): boolean {
+    return this.files.has(path);
+  }
+
+  public rename(from: string, to: string): void {
+    const value = this.files.get(from);
+    if (value === undefined) return;
+    this.files.set(to, value);
+    this.files.delete(from);
+  }
+
+  public remove(path: string): void {
+    this.files.delete(path);
+  }
+}
+
+class FailFirstLogStorage extends MemoryLogStorage {
+  private failNextAppend = true;
+
+  public override append(path: string, text: string): void {
+    if (this.failNextAppend) {
+      this.failNextAppend = false;
+      throw new Error("injected first show-log write failure");
+    }
+    super.append(path, text);
+  }
+}
+
+interface ScheduledCallback {
+  id: number;
+  delayMs: number;
+  callback: () => unknown;
+}
+
+class ManualTimers implements OneLoopTimerAdapter {
+  private readonly intervals = new Map<number, ScheduledCallback>();
+  private readonly timeouts = new Map<number, ScheduledCallback>();
+  private nextId = 1;
+  private nowMs = 100;
+  private readOffsetMs = 0;
+
+  public setInterval(callback: () => void, delayMs: number): number {
+    const scheduled = { id: this.nextId++, delayMs, callback };
+    this.intervals.set(scheduled.id, scheduled);
+    return scheduled.id;
+  }
+
+  public clearInterval(id: OneLoopTimerHandle): void {
+    if (typeof id === "number") this.intervals.delete(id);
+  }
+
+  public setTimeout(callback: () => void, delayMs: number): number {
+    const scheduled = { id: this.nextId++, delayMs, callback };
+    this.timeouts.set(scheduled.id, scheduled);
+    return scheduled.id;
+  }
+
+  public clearTimeout(id: OneLoopTimerHandle): void {
+    if (typeof id === "number") this.timeouts.delete(id);
+  }
+
+  public nowMonotonic(): number {
+    const value = this.nowMs + this.readOffsetMs;
+    this.readOffsetMs += 0.001;
+    return value;
+  }
+
+  public advanceBy(milliseconds: number): void {
+    this.nowMs += milliseconds;
+    this.readOffsetMs = 0;
+  }
+
+  public async fireInterval(delayMs: number): Promise<void> {
+    const scheduled = [...this.intervals.values()].find(
+      (candidate) => candidate.delayMs === delayMs,
+    );
+    if (scheduled === undefined) {
+      throw new Error(`no interval scheduled at ${delayMs} ms`);
+    }
+    await scheduled.callback();
+  }
+}
+
+async function settlePromises(): Promise<void> {
+  for (let index = 0; index < 32; index += 1) await Promise.resolve();
+}
+
+function showCommand(mode: ShowCommand["mode"] = "ValidateOnly"): ShowCommand {
+  return {
+    mode,
+    rehearsalRoot,
+    displayMapPath,
+    runId: "show-001",
+    controllerRunId: "controller-001",
+    networkPolicy: "OfflineRequired",
+  };
+}
+
+function createValidationHarness(options: {
+  secondaryEntryUrl?: string;
+  bridgeHost?: string;
+  activeExternalDefaultRoutes?: number;
+  connectedExternalProfiles?: number;
+  realpathOverrides?: Readonly<Record<string, string>>;
+} = {}) {
+  const trace: string[] = [];
+  const files = new Map<string, Buffer>([
+    [win32.join(repositoryRoot, "janvim-artifact.lock.json"), artifactLock],
+    [win32.join(repositoryRoot, "show", "janvim-show.toml"), showConfig],
+    [
+      win32.join(repositoryRoot, "content", "fixture", "show.manifest.json"),
+      manifest,
+    ],
+    [win32.join(repositoryRoot, "content", "fixture", "poem.txt"), poem],
+    [
+      win32.join(
+        repositoryRoot,
+        "runtime",
+        "user-root",
+        "plugin-lab",
+        "config",
+        "init.lua",
+      ),
+      pluginLabInit,
+    ],
+    [displayMapPath, Buffer.from(`${JSON.stringify(confirmedMap)}\n`, "utf8")],
+  ]);
+  const logStorage = new MemoryLogStorage();
+  const processListeners = new Set<() => void>();
+  const appListeners = new Set<(event: { preventDefault(): void }) => void>();
+
+  class ForbiddenBrowserWindow {
+    public constructor() {
+      trace.push("browser-window");
+      throw new Error("validation must not open a window");
+    }
+  }
+
+  const host = {
+    repositoryRoot,
+    BrowserWindow: ForbiddenBrowserWindow,
+    ipcMain: {
+      on: vi.fn(),
+      removeListener: vi.fn(),
+    },
+    screen: {
+      getAllDisplays: () => {
+        trace.push("display-snapshot");
+        return displays;
+      },
+    },
+    controllerProcess: {
+      pid: 7001,
+      startedAtUtc: "2026-08-30T00:00:00.000Z",
+      on: (_event: "SIGINT", listener: () => void) => {
+        processListeners.add(listener);
+      },
+      removeListener: (_event: "SIGINT", listener: () => void) => {
+        processListeners.delete(listener);
+      },
+    },
+    electronApp: {
+      on: (
+        _event: "before-quit",
+        listener: (event: { preventDefault(): void }) => void,
+      ) => {
+        appListeners.add(listener);
+      },
+      removeListener: (
+        _event: "before-quit",
+        listener: (event: { preventDefault(): void }) => void,
+      ) => {
+        appListeners.delete(listener);
+      },
+    },
+    baseEnvironment: {
+      PATH: "C:\\Windows\\System32",
+      USERPROFILE: "C:\\Users\\operator",
+    },
+    readFile: (path: string) => {
+      const resolved = win32.resolve(path);
+      trace.push(`read:${resolved}`);
+      const value = files.get(resolved);
+      if (value === undefined) throw new Error(`missing fake file: ${resolved}`);
+      return Buffer.from(value);
+    },
+    realpath: (path: string) =>
+      options.realpathOverrides?.[win32.resolve(path)] ?? win32.resolve(path),
+    execFile: async (
+      file: string,
+      args: readonly string[],
+      limits: {
+        timeoutMs: number;
+        maxStdoutBytes: number;
+        maxStderrBytes: number;
+      },
+    ) => {
+      expect(file).toBe("pwsh");
+      if (args.some((argument) => argument.endsWith("verify-runtime.ps1"))) {
+        trace.push("verify-runtime");
+        expect(limits).toMatchObject({
+          timeoutMs: 30_000,
+          maxStdoutBytes: 8_192,
+          maxStderrBytes: 8_192,
+        });
+        return { exitCode: 0, stdout: "verified\n", stderr: "" };
+      }
+      if (args.some((argument) => argument.includes("Get-NetRoute"))) {
+        trace.push("network-snapshot");
+        expect(args).toContain("-NoProfile");
+        expect(args).toContain("-NonInteractive");
+        expect(limits).toMatchObject({
+          timeoutMs: 2_000,
+          maxStdoutBytes: 16_384,
+          maxStderrBytes: 16_384,
+        });
+        return {
+          exitCode: 0,
+          stdout: JSON.stringify({
+            schema: 1,
+            activeExternalDefaultRoutes:
+              options.activeExternalDefaultRoutes ?? 0,
+            connectedExternalProfiles:
+              options.connectedExternalProfiles ?? 0,
+          }),
+          stderr: "",
+        };
+      }
+      throw new Error(`unexpected command: ${args.join(" ")}`);
+    },
+    verifyArtifact: async (lockPath: string, executablePath: string) => {
+      trace.push(`verify-artifact:${lockPath}:${executablePath}`);
+      return { ok: true as const };
+    },
+    spawn: () => {
+      trace.push("spawn");
+      throw new Error("validation must not spawn JanVim");
+    },
+    randomBytes: () => Buffer.from("ab".repeat(24), "hex"),
+    createBridge: () => {
+      trace.push("bridge");
+      throw new Error("validation must not open a bridge");
+    },
+    runWithDeadline: async <T>(
+      _timeoutMs: number,
+      operation: () => Promise<T>,
+    ): Promise<T> => operation(),
+    logStorage,
+    nowMonotonic: () => 100,
+    nowUtc: () => "2026-08-30T00:00:01.000Z",
+    sampleProcess: async () => ({ rssBytes: 1, handleCount: 1 }),
+    writeRunLease: async () => undefined,
+    replaceRunLease: async (_path: string, lease: unknown) => lease,
+    removeRunLease: async () => true,
+    writeShowEvidence: async () => undefined,
+    writeTerminalMarker: async () => undefined,
+    ...(options.secondaryEntryUrl === undefined
+      ? {}
+      : { secondaryEntryUrl: options.secondaryEntryUrl }),
+    ...(options.bridgeHost === undefined
+      ? {}
+      : { bridgeHost: options.bridgeHost }),
+  } as unknown as ShowRuntimeAdapterHost;
+
+  return {
+    adapters: createShowRuntimeAdapters(host),
+    trace,
+    processListeners,
+    appListeners,
+  };
+}
+
+function createStartupHarness(options: {
+  logStorage?: MemoryLogStorage;
+  closeChildOnWindowClose?: boolean;
+  processStartTimes?: readonly string[];
+  failAwaitAgent?: boolean;
+  missingChildStream?: "stdout" | "stderr";
+  deferLaunchArtifactVerification?: boolean;
+  deferInitialIdentityInspection?: boolean;
+  closeChildAfterSecondIdentityInspection?: boolean;
+} = {}) {
+  const trace: string[] = [];
+  const files = new Map<string, Buffer>([
+    [win32.join(repositoryRoot, "janvim-artifact.lock.json"), artifactLock],
+    [win32.join(repositoryRoot, "show", "janvim-show.toml"), showConfig],
+    [
+      win32.join(repositoryRoot, "content", "fixture", "show.manifest.json"),
+      manifest,
+    ],
+    [win32.join(repositoryRoot, "content", "fixture", "poem.txt"), poem],
+    [
+      win32.join(
+        repositoryRoot,
+        "runtime",
+        "user-root",
+        "plugin-lab",
+        "config",
+        "init.lua",
+      ),
+      pluginLabInit,
+    ],
+    [displayMapPath, Buffer.from(`${JSON.stringify(confirmedMap)}\n`, "utf8")],
+  ]);
+  const logStorage = options.logStorage ?? new MemoryLogStorage();
+  const timers = new ManualTimers();
+  let childKilled = false;
+  let releaseLaunchArtifactVerification!: () => void;
+  const launchArtifactVerificationGate = new Promise<void>((resolve) => {
+    releaseLaunchArtifactVerification = resolve;
+  });
+  let releaseInitialIdentityInspection!: () => void;
+  const initialIdentityInspectionGate = new Promise<void>((resolve) => {
+    releaseInitialIdentityInspection = resolve;
+  });
+  const child = new (class extends EventEmitter {
+    public readonly pid = 8003;
+    public readonly stdout =
+      options.missingChildStream === "stdout" ? null : new PassThrough();
+    public readonly stderr =
+      options.missingChildStream === "stderr" ? null : new PassThrough();
+    public readonly kill = vi.fn(() => {
+      trace.push("kill-janvim");
+      childKilled = true;
+      queueMicrotask(() => this.emit("close", 1));
+      return true;
+    });
+  })();
+  const leases: Array<{ path: string; lease: RunLease }> = [];
+  const sent: Array<{ channel: string; payload: unknown }> = [];
+  const sampledPids: number[] = [];
+  const evidenceAttempts: Array<{ path: string; value: unknown }> = [];
+  const evidenceWrites: Array<{ path: string; value: unknown }> = [];
+  const terminalWrites: Array<{ path: string; value: unknown }> = [];
+  const processListeners = new Set<() => void>();
+  const appListeners = new Set<(event: { preventDefault(): void }) => void>();
+  const ipcListeners = new Map<
+    string,
+    (event: { senderFrame: { url: string } | null }, payload: unknown) => void
+  >();
+  let browserOptions: Record<string, unknown> | undefined;
+  let loadedUrl: string | undefined;
+  let spawnCall:
+    | {
+        file: string;
+        args: readonly string[];
+        options: {
+          cwd: string;
+          env: NodeJS.ProcessEnv;
+          shell: false;
+          windowsHide: false;
+          stdio: "pipe";
+        };
+      }
+    | undefined;
+  let placement:
+    | {
+        pid: number;
+        bounds: { x: number; y: number; width: number; height: number };
+      }
+    | undefined;
+  let lastWindow: FakeBrowserWindow | undefined;
+  let requestFilter: { urls: string[] } | undefined;
+  let beforeRequest:
+    | ((
+        details: { url: string },
+        callback: (result: { cancel: boolean }) => void,
+      ) => void)
+    | undefined;
+  let windowOpenHandler:
+    | ((details: { url: string }) => { action: "deny" })
+    | undefined;
+  let processIdentityInspection = 0;
+  let artifactVerification = 0;
+  let timeoutFiveSecondOperations = false;
+
+  class FakeWebContents extends EventEmitter {
+    public readonly session = {
+      webRequest: {
+        onBeforeRequest: (
+          filter: { urls: string[] } | null,
+          listener?: (
+            details: { url: string },
+            callback: (result: { cancel: boolean }) => void,
+          ) => void,
+        ) => {
+          if (filter === null) {
+            requestFilter = undefined;
+            beforeRequest = undefined;
+            return;
+          }
+          requestFilter = filter;
+          beforeRequest = listener;
+        },
+      },
+    };
+    public readonly send = vi.fn((channel: string, payload: unknown) => {
+      sent.push({ channel, payload });
+      if (
+        payload !== null &&
+        typeof payload === "object" &&
+        "type" in payload &&
+        payload.type === "run-cue" &&
+        "requiresPresentationAck" in payload &&
+        payload.requiresPresentationAck === true &&
+        "generationId" in payload &&
+        typeof payload.generationId === "number" &&
+        "loopId" in payload &&
+        typeof payload.loopId === "string" &&
+        "cue" in payload &&
+        payload.cue !== null &&
+        typeof payload.cue === "object" &&
+        "id" in payload.cue &&
+        typeof payload.cue.id === "string"
+      ) {
+        const listener = [...ipcListeners.values()][0];
+        listener?.(
+          { senderFrame: { url: loadedUrl! } },
+          {
+            schema: 1,
+            type: "presentation-ack",
+            generationId: payload.generationId,
+            loopId: payload.loopId,
+            cueId: payload.cue.id,
+          },
+        );
+      }
+    });
+    public readonly setWindowOpenHandler = vi.fn(
+      (handler: (details: { url: string }) => { action: "deny" }) => {
+        windowOpenHandler = handler;
+      },
+    );
+    public readonly getOSProcessId = vi.fn(() => 8002);
+  }
+
+  class FakeBrowserWindow extends EventEmitter {
+    public readonly webContents = new FakeWebContents();
+    private destroyed = false;
+
+    public constructor(options: Record<string, unknown>) {
+      super();
+      trace.push("browser-window");
+      browserOptions = options;
+      lastWindow = this;
+    }
+
+    public async loadURL(url: string): Promise<void> {
+      trace.push("load-secondary");
+      loadedUrl = url;
+    }
+
+    public close(): void {
+      this.emit("close");
+      this.destroyed = true;
+      this.emit("closed");
+    }
+
+    public destroy(): void {
+      this.destroyed = true;
+      this.emit("closed");
+    }
+
+    public isDestroyed(): boolean {
+      return this.destroyed;
+    }
+  }
+
+  const valueAfter = (args: readonly string[], flag: string): number => {
+    const index = args.indexOf(flag);
+    return Number(args[index + 1]);
+  };
+  const host = {
+    repositoryRoot,
+    BrowserWindow: FakeBrowserWindow,
+    ipcMain: {
+      on: (
+        channel: string,
+        listener: (
+          event: { senderFrame: { url: string } | null },
+          payload: unknown,
+        ) => void,
+      ) => {
+        ipcListeners.set(channel, listener);
+      },
+      removeListener: (channel: string) => {
+        ipcListeners.delete(channel);
+      },
+    },
+    screen: {
+      getAllDisplays: () => {
+        trace.push("display-snapshot");
+        return displays;
+      },
+    },
+    controllerProcess: {
+      pid: 8001,
+      startedAtUtc: "2026-08-30T00:00:00.000Z",
+      on: (_event: "SIGINT", listener: () => void) => {
+        processListeners.add(listener);
+      },
+      removeListener: (_event: "SIGINT", listener: () => void) => {
+        processListeners.delete(listener);
+      },
+    },
+    electronApp: {
+      on: (
+        _event: "before-quit",
+        listener: (event: { preventDefault(): void }) => void,
+      ) => {
+        appListeners.add(listener);
+      },
+      removeListener: (
+        _event: "before-quit",
+        listener: (event: { preventDefault(): void }) => void,
+      ) => {
+        appListeners.delete(listener);
+      },
+    },
+    baseEnvironment: {
+      PATH: "C:\\Windows\\System32",
+      USERPROFILE: "C:\\Users\\operator",
+      MYVIMRC: "C:\\Users\\operator\\_vimrc",
+      VIMINIT: "source user.vim",
+      NVIM_APPNAME: "user-config",
+      XDG_CONFIG_HOME: "C:\\Users\\operator\\.config",
+    },
+    readFile: (path: string) => {
+      const resolved = win32.resolve(path);
+      trace.push(`read:${resolved}`);
+      const value = files.get(resolved);
+      if (value === undefined) throw new Error(`missing fake file: ${resolved}`);
+      return Buffer.from(value);
+    },
+    realpath: (path: string) => win32.resolve(path),
+    execFile: async (
+      file: string,
+      args: readonly string[],
+      limits: {
+        timeoutMs: number;
+        maxStdoutBytes: number;
+        maxStderrBytes: number;
+      },
+    ) => {
+      expect(file).toBe("pwsh");
+      if (args.some((argument) => argument.endsWith("verify-runtime.ps1"))) {
+        trace.push("verify-runtime");
+        return { exitCode: 0, stdout: "verified\n", stderr: "" };
+      }
+      if (args.some((argument) => argument.includes("Get-NetRoute"))) {
+        trace.push("network-snapshot");
+        return {
+          exitCode: 0,
+          stdout: JSON.stringify({
+            schema: 1,
+            activeExternalDefaultRoutes: 0,
+            connectedExternalProfiles: 0,
+          }),
+          stderr: "",
+        };
+      }
+      if (args.some((argument) => argument.endsWith("place-janvim-window.ps1"))) {
+        expect(limits).toMatchObject({ timeoutMs: 12_000 });
+        placement = {
+          pid: valueAfter(args, "-ChildProcessId"),
+          bounds: {
+            x: valueAfter(args, "-X"),
+            y: valueAfter(args, "-Y"),
+            width: valueAfter(args, "-Width"),
+            height: valueAfter(args, "-Height"),
+          },
+        };
+        trace.push("place-window");
+        return {
+          exitCode: 0,
+          stdout: JSON.stringify({
+            schema: 1,
+            pid: placement.pid,
+            matchedWindowCount: 1,
+            hwnd: "0x0000000000001F43",
+            visible: true,
+            owned: false,
+            requested: placement.bounds,
+            actual: placement.bounds,
+          }),
+          stderr: "",
+        };
+      }
+      if (args.some((argument) => argument.endsWith("close-janvim-window.ps1"))) {
+        trace.push("close-window");
+        const pid = valueAfter(args, "-ChildProcessId");
+        const hwnd = args[args.indexOf("-Hwnd") + 1];
+        if (options.closeChildOnWindowClose !== false) {
+          queueMicrotask(() => child.emit("close", 0));
+        }
+        return {
+          exitCode: 0,
+          stdout: JSON.stringify({
+            schema: 1,
+            pid,
+            hwnd,
+            ownershipVerified: true,
+            topLevel: true,
+            closePosted: true,
+          }),
+          stderr: "",
+        };
+      }
+      throw new Error(`unexpected command: ${args.join(" ")}`);
+    },
+    verifyArtifact: async () => {
+      trace.push("verify-artifact");
+      artifactVerification += 1;
+      if (
+        options.deferLaunchArtifactVerification === true &&
+        artifactVerification === 2
+      ) {
+        trace.push("launch-artifact-verification-deferred");
+        await launchArtifactVerificationGate;
+      }
+      return { ok: true as const };
+    },
+    spawn: (
+      file: string,
+      args: readonly string[],
+      options: {
+        cwd: string;
+        env: NodeJS.ProcessEnv;
+        shell: false;
+        windowsHide: false;
+        stdio: "pipe";
+      },
+    ) => {
+      trace.push("spawn-janvim");
+      spawnCall = { file, args, options };
+      return child;
+    },
+    inspectProcessStartedAtUtc: async (pid: number) => {
+      expect(pid).toBe(8003);
+      trace.push("inspect-janvim-start");
+      const startedAtUtc =
+        options.processStartTimes?.[processIdentityInspection] ??
+        "2026-08-30T00:00:00.500Z";
+      if (
+        options.deferInitialIdentityInspection === true &&
+        processIdentityInspection === 0
+      ) {
+        await initialIdentityInspectionGate;
+      }
+      if (
+        options.closeChildAfterSecondIdentityInspection === true &&
+        processIdentityInspection === 1
+      ) {
+        queueMicrotask(() => child.emit("close", 0));
+      }
+      processIdentityInspection += 1;
+      return startedAtUtc;
+    },
+    randomBytes: () => Buffer.from("ab".repeat(24), "hex"),
+    createBridge: (token: string) => ({
+      listen: async () => {
+        expect(token).toBe("ab".repeat(24));
+        trace.push("bridge-listen");
+        return { host: "127.0.0.1" as const, port: 32123, family: "IPv4" };
+      },
+      waitForAgent: async (timeoutMs: number) => {
+        expect(timeoutMs).toBe(10_000);
+        trace.push("await-agent");
+        if (options.failAwaitAgent === true) {
+          throw new Error("injected agent-ready failure");
+        }
+      },
+      dispatch: async (command: AgentCommand): Promise<AgentAck> => {
+        trace.push(`agent:${command.action.type}`);
+        return {
+          schema: 1,
+          loopId: command.loopId,
+          cueId: command.cueId,
+          outcome: "applied",
+          mode: "n",
+          cursor: { row: 0, col: 0 },
+          bufferSha256:
+            command.action.type === "prepare"
+              ? command.action.expectedSha256
+              : "b699de273f5bbaedb08241495f52ce863d3e8e1851275ce3b6251484d75190a8",
+        };
+      },
+      close: async () => {
+        trace.push("bridge-close");
+      },
+      diagnostics: () => ({
+        activeConnections: 1,
+        authenticatedConnections: 1,
+        pendingCommands: 0,
+        pendingTimers: 0,
+        sessionListeners: 3,
+        readyWaiters: 0,
+      }),
+    }),
+    runWithDeadline: async <T>(
+      timeoutMs: number,
+      operation: () => Promise<T>,
+    ): Promise<T> => {
+      const pending = operation();
+      if (childKilled && timeoutMs === 5_000) {
+        void pending.catch(() => undefined);
+        return undefined as T;
+      }
+      if (timeoutFiveSecondOperations && timeoutMs === 5_000) {
+        void pending.catch(() => undefined);
+        throw new Error("injected five-second timeout");
+      }
+      return pending;
+    },
+    logStorage,
+    nowMonotonic: () => timers.nowMonotonic(),
+    timers,
+    nowUtc: () => "2026-08-30T00:00:01.000Z",
+    sampleProcess: async (pid: number) => {
+      sampledPids.push(pid);
+      return { rssBytes: pid * 10, handleCount: pid };
+    },
+    writeRunLease: async (path: string, lease: RunLease) => {
+      trace.push("write-lease");
+      leases.push({ path, lease });
+    },
+    replaceRunLease: async (
+      _path: string,
+      lease: RunLease,
+      nextGenerationId: number,
+    ) => ({ ...lease, generationId: nextGenerationId }),
+    removeRunLease: async () => {
+      trace.push("remove-lease");
+      return true;
+    },
+    writeShowEvidence: async (path: string, value: unknown) => {
+      trace.push("write-evidence");
+      evidenceAttempts.push({ path, value });
+      evidenceWrites.push({ path, value: parseShowRunEvidence(value) });
+    },
+    writeTerminalMarker: async (path: string, value: unknown) => {
+      trace.push("write-terminal");
+      terminalWrites.push({ path, value });
+    },
+  } as unknown as ShowRuntimeAdapterHost;
+
+  return {
+    adapters: createShowRuntimeAdapters(host),
+    timers,
+    trace,
+    logStorage,
+    leases,
+    sent,
+    sampledPids,
+    evidenceAttempts,
+    evidenceWrites,
+    terminalWrites,
+    processListeners,
+    appListeners,
+    ipcListeners,
+    child,
+    get browserOptions() {
+      return browserOptions;
+    },
+    get loadedUrl() {
+      return loadedUrl;
+    },
+    get spawnCall() {
+      return spawnCall;
+    },
+    get placement() {
+      return placement;
+    },
+    dispatchRequest: (url: string) => {
+      let result: { cancel: boolean } | undefined;
+      beforeRequest?.({ url }, (value) => {
+        result = value;
+      });
+      return result;
+    },
+    dispatchNavigation: (url: string) => {
+      const preventDefault = vi.fn();
+      lastWindow?.webContents.emit("will-navigate", { preventDefault }, url);
+      return preventDefault.mock.calls.length;
+    },
+    dispatchWindowOpen: (url: string) => windowOpenHandler?.({ url }),
+    get requestFilter() {
+      return requestFilter;
+    },
+    emitSigint: () => {
+      for (const listener of [...processListeners]) listener();
+    },
+    emitElectronQuit: () => {
+      const preventDefault = vi.fn();
+      for (const listener of [...appListeners]) listener({ preventDefault });
+      return preventDefault.mock.calls.length;
+    },
+    emitWindowClose: () => {
+      lastWindow?.emit("close");
+    },
+    enableFiveSecondTimeouts: () => {
+      timeoutFiveSecondOperations = true;
+    },
+    releaseLaunchArtifactVerification,
+    releaseInitialIdentityInspection,
+  };
+}
+
+describe("real Task 9 show runtime adapters", () => {
+  it("uses only a valid native Electron process creation timestamp for leases", () => {
+    expect(controllerStartedAtUtc(1_788_048_000_123)).toBe(
+      "2026-08-30T00:00:00.123Z",
+    );
+    for (const value of [null, 0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(() => controllerStartedAtUtc(value)).toThrow(/creation|time/i);
+    }
+  });
+
+  it("keeps the production controller graph application-offline", () => {
+    const controllerSourceRoot = join(fixtureRoot, "apps", "controller", "src");
+    const sources = readdirSync(controllerSourceRoot)
+      .filter((name) => name.endsWith(".ts"))
+      .map((name) => ({
+        name,
+        text: readFileSync(join(controllerSourceRoot, name), "utf8"),
+      }));
+    const prohibitedNodeModules = [
+      "node:dgram",
+      "node:dns",
+      "node:http",
+      "node:https",
+      "node:tls",
+    ];
+
+    for (const { name, text } of sources) {
+      const nodeImports = Array.from(
+        text.matchAll(/\bfrom\s+["'](node:[^"']+)["']/gu),
+        (match) => match[1]!,
+      );
+      for (const specifier of nodeImports) {
+        expect(
+          prohibitedNodeModules.some(
+            (module) => specifier === module || specifier.startsWith(`${module}/`),
+          ),
+          `${name} imports ${specifier}`,
+        ).toBe(false);
+      }
+      expect(text, `${name} contains an outbound client API`).not.toMatch(
+        /\bfetch\s*\(|\bnew\s+WebSocket\b|\bcreateConnection\s*\(|\bdownloadURL\b|\bwill-download\b/u,
+      );
+      expect(text, `${name} enables a child shell`).not.toMatch(/\bshell\s*:\s*true\b/u);
+    }
+
+    const netImporters = sources
+      .filter(({ text }) => /\bfrom\s+["']node:net["']/u.test(text))
+      .map(({ name }) => name)
+      .sort();
+    expect(netImporters).toEqual(["bridge-server.ts", "run-lease.ts"]);
+    const bridgeSource = sources.find(({ name }) => name === "bridge-server.ts")!.text;
+    expect(bridgeSource).toContain('const LISTEN_HOST = "127.0.0.1"');
+    const leaseSource = sources.find(({ name }) => name === "run-lease.ts")!.text;
+    expect(leaseSource).toContain("server.listen({");
+    expect(leaseSource).toContain("path: endpoint");
+    expect(leaseSource).not.toMatch(/\bconnect\s*\(|\bcreateConnection\s*\(/u);
+
+    const adapterSource = sources.find(
+      ({ name }) => name === "show-runtime-adapters.ts",
+    )!.text;
+    expect(
+      Array.from(
+        adapterSource.matchAll(/["']-Command["']\s*,\s*([A-Z_]+)/gu),
+        (match) => match[1],
+      ),
+    ).toEqual([
+      "NETWORK_SNAPSHOT_SCRIPT",
+      "PROCESS_SAMPLE_SCRIPT",
+      "PROCESS_IDENTITY_SCRIPT",
+    ]);
+  });
+
+  it("derives unique evidence-safe loop IDs from maximum-length run identities", () => {
+    const firstRun = `${"r".repeat(63)}a`;
+    const secondRun = `${"r".repeat(63)}b`;
+    const first = createShowLoopId(firstRun, 1, 1);
+    const second = createShowLoopId(secondRun, 1, 1);
+
+    expect(first).toMatch(/^[A-Za-z0-9._-]{1,64}$/);
+    expect(Buffer.byteLength(first, "utf8")).toBeLessThanOrEqual(64);
+    expect(second).not.toBe(first);
+    expect(createShowLoopId(firstRun, 2, 1)).not.toBe(first);
+    expect(createShowLoopId(firstRun, 1, 2)).not.toBe(first);
+    expect(createShowLoopId("show-001", 3, 2)).toBe("show-001-g3-l2");
+    expect(() => createShowLoopId("../show", 1, 1)).toThrow();
+    expect(() => createShowLoopId(firstRun, 0, 1)).toThrow();
+  });
+
+  it("constructs the real default host without performing validation I/O", () => {
+    const trace: string[] = [];
+    class NoIoBrowserWindow {
+      public constructor() {
+        trace.push("window");
+      }
+    }
+    const host = {
+      repositoryRoot: "D:\\show space#percent%",
+      secondaryEntryUrl:
+        "file:///D:/show%20space%23percent%25/apps/secondary-screen/dist/index.html",
+      BrowserWindow: NoIoBrowserWindow,
+      ipcMain: {
+        on: () => trace.push("ipc-on"),
+        removeListener: () => trace.push("ipc-off"),
+      },
+      screen: {
+        getAllDisplays: () => {
+          trace.push("screen");
+          return [];
+        },
+      },
+      controllerProcess: {
+        pid: 8001,
+        startedAtUtc: "2026-08-30T00:00:00.000Z",
+        on: () => trace.push("process-on"),
+        removeListener: () => trace.push("process-off"),
+      },
+      electronApp: {
+        on: () => trace.push("app-on"),
+        removeListener: () => trace.push("app-off"),
+      },
+    } as unknown as ShowRuntimeAdapterHost;
+
+    expect(() => createShowRuntimeAdapters(host)).not.toThrow();
+    expect(trace).toEqual([]);
+  });
+
+  it("validates frozen show inputs, the exact artifact, live routing, and offline state headlessly", async () => {
+    const harness = createValidationHarness();
+
+    await expect(harness.adapters.validate(showCommand())).resolves.toBeUndefined();
+
+    expect(harness.trace).toEqual([
+      "verify-runtime",
+      "read:D:\\show\\janvim-artifact.lock.json",
+      "read:D:\\show\\show\\janvim-show.toml",
+      "read:D:\\show\\content\\fixture\\show.manifest.json",
+      "read:D:\\show\\content\\fixture\\poem.txt",
+      "read:D:\\show\\runtime\\user-root\\plugin-lab\\config\\init.lua",
+      "read:D:\\VirtualData\\JanVim-Exhibition-Rehearsals\\show-001\\display-map.json",
+      "display-snapshot",
+      "verify-artifact:D:\\show\\janvim-artifact.lock.json:D:\\show\\runtime\\janvim\\janvim-core.exe",
+      "network-snapshot",
+      "read:D:\\show\\janvim-artifact.lock.json",
+      "read:D:\\show\\show\\janvim-show.toml",
+      "read:D:\\show\\content\\fixture\\show.manifest.json",
+      "read:D:\\show\\content\\fixture\\poem.txt",
+      "read:D:\\show\\runtime\\user-root\\plugin-lab\\config\\init.lua",
+      "read:D:\\VirtualData\\JanVim-Exhibition-Rehearsals\\show-001\\display-map.json",
+    ]);
+    expect(harness.processListeners).toHaveLength(0);
+    expect(harness.appListeners).toHaveLength(0);
+  });
+
+  it.each([
+    ["exhibition repository", repositoryRoot],
+    ["JanVim product repository", "D:\\github\\JanVim"],
+    ["user Neovim configuration", "C:\\Users\\operator\\AppData\\Local\\nvim"],
+    [
+      "protected incident root",
+      "D:\\VirtualData\\TempCache\\janvim-root-export-quarantine-20260826-110433-6473a2d7ebbc4524b66c61c07e540504",
+    ],
+  ])("rejects a rehearsal junction into the %s before runtime I/O", async (_label, target) => {
+    const harness = createValidationHarness({
+      realpathOverrides: {
+        [win32.resolve(rehearsalRoot)]: target,
+        [win32.resolve(displayMapPath)]: win32.join(target, "display-map.json"),
+      },
+    });
+
+    await expect(harness.adapters.validate(showCommand())).rejects.toThrow(
+      /canonical|reparse|real path|rehearsal/i,
+    );
+    expect(harness.trace).not.toContain("verify-runtime");
+  });
+
+  it("rejects a rehearsal junction into a different sibling run", async () => {
+    const siblingRoot = win32.join(
+      "D:\\VirtualData\\JanVim-Exhibition-Rehearsals",
+      "show-002",
+    );
+    const harness = createValidationHarness({
+      realpathOverrides: {
+        [win32.resolve(rehearsalRoot)]: siblingRoot,
+        [win32.resolve(displayMapPath)]: win32.join(
+          siblingRoot,
+          "display-map.json",
+        ),
+      },
+    });
+
+    await expect(harness.adapters.validate(showCommand())).rejects.toThrow(
+      /canonical|reparse|rehearsal/i,
+    );
+    expect(harness.trace).not.toContain("verify-runtime");
+  });
+
+  it("boots the approved secondary, bridge, private JanVim child, HWND, and token-free lease in order", async () => {
+    const harness = createStartupHarness();
+    const coordinator = harness.adapters.createCoordinator(showCommand("Soak3"));
+
+    await expect(coordinator.boot()).resolves.toEqual({ ready: true });
+
+    const ordered = [
+      "verify-runtime",
+      "display-snapshot",
+      "network-snapshot",
+      "browser-window",
+      "load-secondary",
+      "bridge-listen",
+      "verify-artifact",
+      "spawn-janvim",
+      "inspect-janvim-start",
+      "place-window",
+      "write-lease",
+      "await-agent",
+      "agent:prepare",
+    ];
+    let prior = -1;
+    for (const event of ordered) {
+      const index = harness.trace.indexOf(event, prior + 1);
+      expect(index, `${event} missing from ${harness.trace.join(",")}`).toBeGreaterThan(
+        prior,
+      );
+      prior = index;
+    }
+    expect(harness.loadedUrl).toBe(
+      "file:///D:/show/apps/secondary-screen/dist/index.html",
+    );
+    expect(harness.browserOptions).toMatchObject({
+      frame: false,
+      fullscreen: true,
+      x: 1920,
+      y: 0,
+      width: 1920,
+      height: 1080,
+      webPreferences: {
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
+        preload: "D:\\show\\apps\\controller\\dist\\preload\\preload.cjs",
+      },
+    });
+    expect(harness.spawnCall).toEqual({
+      file: "D:\\show\\runtime\\janvim\\janvim-core.exe",
+      args: [
+        "--config",
+        "D:\\show\\show\\janvim-show.toml",
+        "D:\\show\\content\\fixture\\poem.txt",
+      ],
+      options: {
+        cwd: "D:\\show\\runtime\\janvim",
+        env: {
+          PATH: "C:\\Windows\\System32",
+          USERPROFILE: "C:\\Users\\operator",
+          JANVIM_USER_ROOT: "D:\\show\\runtime\\user-root",
+          JANVIM_EXHIBITION_PORT: "32123",
+          JANVIM_EXHIBITION_TOKEN: "ab".repeat(24),
+        },
+        shell: false,
+        windowsHide: false,
+        stdio: "pipe",
+      },
+    });
+    expect(harness.placement).toEqual({
+      pid: 8003,
+      bounds: { x: 0, y: 0, width: 1920, height: 1080 },
+    });
+    expect(harness.leases).toHaveLength(1);
+    expect(harness.leases[0]).toEqual({
+      path: `${rehearsalRoot}\\run-lease.json`,
+      lease: {
+        schema: 1,
+        runId: "show-001",
+        controllerRunId: "controller-001",
+        generationId: 1,
+        controller: {
+          pid: 8001,
+          startedAtUtc: "2026-08-30T00:00:00.000Z",
+        },
+        janvim: {
+          pid: 8003,
+          startedAtUtc: "2026-08-30T00:00:00.500Z",
+          hwnd: "0x0000000000001F43",
+          executableRelativePath: "janvim-core.exe",
+          executableSha256:
+            "224b3457d89fbc6cf946359683632f29f9262bae08b6f0d2e3043a3a7a6d83b3",
+        },
+      },
+    });
+    expect(JSON.stringify(harness.leases)).not.toContain("ab".repeat(24));
+
+    const controllerLog = [...harness.logStorage.files.entries()]
+      .filter(([path]) => path.includes(".controller"))
+      .map(([, value]) => value)
+      .join("");
+    const events = controllerLog
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(events).toContainEqual({
+      type: "secondary-opened",
+      runId: "show-001",
+      controllerRunId: "controller-001",
+      generationId: 1,
+      rendererPid: 8002,
+    });
+    expect(events.filter((event) => event.type === "p1-skip")).toEqual([
+      { type: "p1-skip", feature: "formula", reason: "fixture-asset-absent" },
+      { type: "p1-skip", feature: "image", reason: "fixture-asset-absent" },
+      { type: "p1-skip", feature: "matrix", reason: "fixture-asset-absent" },
+    ]);
+    expect([...harness.logStorage.files.keys()].join("\n")).not.toMatch(
+      /generation|g1/i,
+    );
+  });
+
+  it("writes strictly parseable Soak3 evidence with the three bounded P1 skips", async () => {
+    const harness = createStartupHarness();
+    const coordinator = harness.adapters.createCoordinator(showCommand("Soak3"));
+    await expect(coordinator.boot()).resolves.toEqual({ ready: true });
+    const listener = [...harness.ipcListeners.values()][0];
+    listener!(
+      { senderFrame: { url: harness.loadedUrl! } },
+      { schema: 1, type: "operator-action", action: "start" },
+    );
+    await settlePromises();
+    expect(coordinator.diagnostics().state).toBe("running");
+
+    const cueDeltasMs = [5_001, 7_001, 33_001, 10_001, 23_001, 12_001];
+    for (let loopNumber = 1; loopNumber <= 3; loopNumber += 1) {
+      for (const [cueIndex, deltaMs] of cueDeltasMs.entries()) {
+        harness.timers.advanceBy(deltaMs);
+        try {
+          await harness.timers.fireInterval(16);
+        } catch (error) {
+          throw new Error(
+            `loop ${loopNumber} cue ${cueIndex + 1}: ${JSON.stringify(
+              coordinator.diagnostics(),
+            )}`,
+            { cause: error },
+          );
+        }
+        await settlePromises();
+        if (
+          coordinator.diagnostics().state !== "running" &&
+          !(loopNumber === 3 && cueIndex === cueDeltasMs.length - 1)
+        ) {
+          throw new Error(
+            `runtime stopped after loop ${loopNumber} cue ${cueIndex + 1}: ${[
+              ...harness.logStorage.files.values(),
+            ].join("\n")}`,
+          );
+        }
+      }
+    }
+
+    const completion = await coordinator.completion;
+    expect(harness.evidenceAttempts).toHaveLength(1);
+    expect(() =>
+      parseShowRunEvidence(harness.evidenceAttempts[0]!.value),
+    ).not.toThrow();
+    expect(
+      completion,
+      JSON.stringify({ diagnostics: coordinator.diagnostics(), trace: harness.trace }),
+    ).toEqual({
+      ok: true,
+      reason: "soak-complete",
+    });
+    expect(harness.evidenceWrites).toHaveLength(1);
+    const evidence = harness.evidenceWrites[0]!.value as ReturnType<
+      typeof parseShowRunEvidence
+    >;
+    expect(evidence.loops).toHaveLength(3);
+    expect(evidence.aggregate.totalSkips).toBe(3);
+    expect(
+      evidence.loops.reduce((total, loop) => total + loop.skipCount, 0),
+    ).toBe(3);
+    expect(evidence.offlineSnapshots).toHaveLength(5);
+  });
+
+  it("keeps an early log failure sticky after the bridge token is installed", async () => {
+    const harness = createStartupHarness({
+      logStorage: new FailFirstLogStorage(),
+    });
+    const coordinator = harness.adapters.createCoordinator(showCommand("Show"));
+    await expect(coordinator.boot()).resolves.toEqual({ ready: true });
+
+    await coordinator.requestEmergencyStop("sigint");
+    await coordinator.completion;
+
+    expect(harness.evidenceWrites).toHaveLength(1);
+    const evidence = harness.evidenceWrites[0]!.value as ReturnType<
+      typeof parseShowRunEvidence
+    >;
+    expect(evidence.loggingIncomplete).toBe(true);
+    expect(evidence.aggregate.acceptanceOutcome).toBe("fail");
+  });
+
+  it("accepts only exact local renderer IPC, samples the three OS PIDs, and redacts child streams", async () => {
+    const harness = createStartupHarness();
+    const coordinator = harness.adapters.createCoordinator(showCommand("Soak3"));
+    await expect(coordinator.boot()).resolves.toEqual({ ready: true });
+    const listener = [...harness.ipcListeners.values()][0];
+    expect(listener).toBeTypeOf("function");
+
+    listener!(
+      { senderFrame: { url: harness.loadedUrl! } },
+      { schema: 1, type: "operator-action", action: "start", extra: true },
+    );
+    listener!(
+      { senderFrame: { url: "https://example.invalid/show" } },
+      { schema: 1, type: "operator-action", action: "start" },
+    );
+    expect(coordinator.diagnostics().state).toBe("ready");
+    expect(harness.sampledPids).toEqual([]);
+
+    listener!(
+      { senderFrame: { url: harness.loadedUrl! } },
+      { schema: 1, type: "operator-action", action: "start" },
+    );
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(coordinator.diagnostics().state).toBe("running");
+    expect(harness.sampledPids.slice(0, 3)).toEqual([8001, 8002, 8003]);
+
+    const token = "ab".repeat(24);
+    harness.child.stdout!.write(Buffer.from(`stdout ${token}\n`, "utf8"));
+    harness.child.stderr!.write(Buffer.from(`stderr ${token}\n`, "utf8"));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const logFiles = [...harness.logStorage.files.entries()];
+    const stdout = logFiles
+      .filter(([path]) => path.includes(".janvim-stdout"))
+      .map(([, value]) => value)
+      .join("");
+    const stderr = logFiles
+      .filter(([path]) => path.includes(".janvim-stderr"))
+      .map(([, value]) => value)
+      .join("");
+    expect(stdout).toContain("stdout [REDACTED]");
+    expect(stderr).toContain("stderr [REDACTED]");
+    expect(`${stdout}${stderr}`).not.toContain(token);
+    expect(logFiles.map(([path]) => path).join("\n")).not.toMatch(
+      /generation|g1/i,
+    );
+    await coordinator.requestEmergencyStop("electron-quit");
+    await coordinator.completion;
+  });
+
+  it("redacts bridge tokens split at every child stream chunk boundary", async () => {
+    const harness = createStartupHarness();
+    const coordinator = harness.adapters.createCoordinator(showCommand("Show"));
+    await expect(coordinator.boot()).resolves.toEqual({ ready: true });
+    const token = "ab".repeat(24);
+
+    for (let split = 1; split < token.length; split += 1) {
+      harness.child.stdout!.emit(
+        "data",
+        Buffer.from(`split-${split}:${token.slice(0, split)}`, "utf8"),
+      );
+      harness.child.stdout!.emit(
+        "data",
+        Buffer.from(`${token.slice(split)}\n`, "utf8"),
+      );
+    }
+
+    await coordinator.requestEmergencyStop("electron-quit");
+    await coordinator.completion;
+    const stdout = [...harness.logStorage.files.entries()]
+      .filter(([path]) => path.includes(".janvim-stdout"))
+      .map(([, value]) => value)
+      .join("");
+    expect(stdout).not.toContain(token);
+    expect(stdout.match(/\[REDACTED\]/g)).toHaveLength(token.length - 1);
+  });
+
+  it("redacts prohibited source and user-config paths across child stream chunks", async () => {
+    const harness = createStartupHarness();
+    const coordinator = harness.adapters.createCoordinator(showCommand("Show"));
+    await expect(coordinator.boot()).resolves.toEqual({ ready: true });
+    const prohibited = [
+      "d:\\SHOW\\apps\\controller\\src\\main.ts",
+      "D:\\github\\JanVim\\src\\lib.rs",
+      "C:\\Users\\operator\\AppData\\Local\\nvim\\init.lua",
+      "D:\\VirtualData\\TempCache\\janvim-root-export-quarantine-20260826-110433-6473a2d7ebbc4524b66c61c07e540504\\trace.log",
+    ];
+
+    for (const [index, value] of prohibited.entries()) {
+      const split = Math.floor(value.length / 2);
+      harness.child.stderr!.emit(
+        "data",
+        Buffer.from(`path-${index}:${value.slice(0, split)}`, "utf8"),
+      );
+      harness.child.stderr!.emit(
+        "data",
+        Buffer.from(`${value.slice(split)}\n`, "utf8"),
+      );
+    }
+
+    await coordinator.requestEmergencyStop("electron-quit");
+    await coordinator.completion;
+    const stderr = [...harness.logStorage.files.entries()]
+      .filter(([path]) => path.includes(".janvim-stderr"))
+      .map(([, value]) => value)
+      .join("");
+    for (const value of prohibited) {
+      expect(stderr.toLowerCase()).not.toContain(value.toLowerCase());
+    }
+    expect(stderr.match(/\[REDACTED\]/g)).toHaveLength(prohibited.length);
+  });
+
+  it("rejects online validation unless the explicit diagnostic policy is selected", async () => {
+    const offlineRequired = createValidationHarness({
+      activeExternalDefaultRoutes: 1,
+      connectedExternalProfiles: 1,
+    });
+    await expect(
+      offlineRequired.adapters.validate(showCommand()),
+    ).rejects.toThrow(/offline|required|network/i);
+
+    const diagnostic = createValidationHarness({
+      activeExternalDefaultRoutes: 1,
+      connectedExternalProfiles: 1,
+    });
+    await expect(
+      diagnostic.adapters.validate({
+        ...showCommand(),
+        networkPolicy: "DiagnosticConnected",
+      }),
+    ).resolves.toBeUndefined();
+  });
+
+  it("rejects a changed local entry and non-loopback bridge before runtime I/O", () => {
+    expect(() =>
+      createValidationHarness({
+        secondaryEntryUrl: "file:///D:/show/apps/secondary-screen/dist/other.html",
+      }),
+    ).toThrow(/entry|frozen|local/i);
+    expect(() =>
+      createValidationHarness({ bridgeHost: "0.0.0.0" }),
+    ).toThrow(/loopback|bridge/i);
+  });
+
+  it("blocks every remote web path and binds each emergency source exactly once", async () => {
+    const harness = createStartupHarness();
+    const reasons: string[] = [];
+    const dispose = harness.adapters.bindEmergencyLifecycle((reason) => {
+      reasons.push(reason);
+    });
+    expect(harness.processListeners).toHaveLength(1);
+    expect(harness.appListeners).toHaveLength(1);
+
+    const coordinator = harness.adapters.createCoordinator(showCommand("Soak3"));
+    await expect(coordinator.boot()).resolves.toEqual({ ready: true });
+    expect(harness.requestFilter).toEqual({
+      urls: [
+        "http://*/*",
+        "https://*/*",
+        "ws://*/*",
+        "wss://*/*",
+      ],
+    });
+    for (const url of [
+      "http://example.invalid/a",
+      "https://example.invalid/a",
+      "ws://example.invalid/a",
+      "wss://example.invalid/a",
+    ]) {
+      expect(harness.dispatchRequest(url)).toEqual({ cancel: true });
+      expect(harness.dispatchNavigation(url)).toBe(1);
+      expect(harness.dispatchWindowOpen(url)).toEqual({ action: "deny" });
+    }
+    expect(harness.dispatchNavigation(harness.loadedUrl!)).toBe(0);
+
+    harness.emitSigint();
+    harness.emitWindowClose();
+    expect(harness.emitElectronQuit()).toBe(1);
+    expect(reasons).toEqual(["sigint", "window-close", "electron-quit"]);
+
+    dispose();
+    dispose();
+    expect(harness.processListeners).toHaveLength(0);
+    expect(harness.appListeners).toHaveLength(0);
+    harness.emitSigint();
+    harness.emitWindowClose();
+    harness.emitElectronQuit();
+    expect(reasons).toEqual(["sigint", "window-close", "electron-quit"]);
+  });
+
+  it("writes evidence and the terminal marker only after the exact bounded shutdown ladder", async () => {
+    const harness = createStartupHarness();
+    const coordinator = harness.adapters.createCoordinator(showCommand("Show"));
+    await expect(coordinator.boot()).resolves.toEqual({ ready: true });
+
+    await coordinator.requestEmergencyStop("sigint");
+    await expect(coordinator.completion).resolves.toEqual({
+      ok: false,
+      reason: "emergency-sigint",
+    });
+
+    const ordered = [
+      "agent:shutdown",
+      "close-window",
+      "remove-lease",
+      "bridge-close",
+      "network-snapshot",
+      "write-evidence",
+      "write-terminal",
+    ];
+    let prior = harness.trace.indexOf("agent:prepare");
+    for (const event of ordered) {
+      const index = harness.trace.indexOf(event, prior + 1);
+      expect(index, `${event} missing from ${harness.trace.join(",")}`).toBeGreaterThan(
+        prior,
+      );
+      prior = index;
+    }
+    expect(harness.evidenceAttempts).toHaveLength(1);
+    expect(() =>
+      parseShowRunEvidence(harness.evidenceAttempts[0]!.value),
+    ).not.toThrow();
+    expect(harness.evidenceWrites).toHaveLength(1);
+    expect(harness.evidenceWrites[0]).toMatchObject({
+      path: `${rehearsalRoot}\\show-run.json`,
+      value: {
+        schema: 1,
+        runId: "show-001",
+        controllerRunId: "controller-001",
+        mode: "Show",
+        physicalProjectorsTested: false,
+        shutdown: {
+          requestedBy: "sigint",
+          agentShutdown: "acknowledged",
+          hwndClose: "posted",
+          janvimExit: "natural",
+          bridgeClose: "closed",
+          leaseRemoved: true,
+        },
+      },
+    });
+    expect(harness.terminalWrites).toEqual([
+      {
+        path: `${rehearsalRoot}\\controller-terminal.json`,
+        value: {
+          schema: 1,
+          runId: "show-001",
+          controllerRunId: "controller-001",
+          controllerPid: 8001,
+          outcome: "intentional-failure",
+          reason: "emergency-sigint",
+        },
+      },
+    ]);
+    const serialized = JSON.stringify({
+      evidence: harness.evidenceWrites,
+      marker: harness.terminalWrites,
+    });
+    expect(serialized).not.toContain("ab".repeat(24));
+    expect(serialized).not.toContain("C:\\Users\\operator");
+  });
+
+  it("keeps an early failed Soak3 out of acceptance evidence while marking terminal failure", async () => {
+    const harness = createStartupHarness({ failAwaitAgent: true });
+    const coordinator = harness.adapters.createCoordinator(showCommand("Soak3"));
+
+    await expect(coordinator.boot()).resolves.toEqual({
+      ready: false,
+      reason: "startup-failed",
+    });
+    await coordinator.requestEmergencyStop("electron-quit");
+    await expect(coordinator.completion).resolves.toEqual({
+      ok: false,
+      reason: "emergency-electron-quit",
+    });
+
+    expect(harness.evidenceAttempts).toHaveLength(1);
+    expect(() =>
+      parseShowRunEvidence(harness.evidenceAttempts[0]!.value),
+    ).toThrow(/three loop|three network|Soak3/i);
+    expect(harness.evidenceWrites).toHaveLength(0);
+    expect(harness.terminalWrites).toEqual([
+      {
+        path: `${rehearsalRoot}\\controller-terminal.json`,
+        value: {
+          schema: 1,
+          runId: "show-001",
+          controllerRunId: "controller-001",
+          controllerPid: 8001,
+          outcome: "intentional-failure",
+          reason: "emergency-electron-quit",
+        },
+      },
+    ]);
+  });
+
+  it("refuses missing-stdio cleanup after the spawned PID identity changes", async () => {
+    const harness = createStartupHarness({
+      missingChildStream: "stdout",
+      processStartTimes: [
+        "2026-08-30T00:00:00.500Z",
+        "2026-08-30T00:00:09.500Z",
+      ],
+      closeChildAfterSecondIdentityInspection: true,
+    });
+    const coordinator = harness.adapters.createCoordinator(showCommand("Show"));
+
+    await expect(coordinator.boot()).resolves.toEqual({
+      ready: false,
+      reason: "startup-failed",
+    });
+    await coordinator.requestEmergencyStop("electron-quit");
+    await coordinator.completion;
+
+    expect(
+      harness.trace.filter((event) => event === "inspect-janvim-start"),
+    ).toHaveLength(2);
+    expect(harness.child.kill).not.toHaveBeenCalled();
+  });
+
+  it("refuses abort cleanup when the spawned PID changes before initial inspection", async () => {
+    const harness = createStartupHarness({
+      deferLaunchArtifactVerification: true,
+      processStartTimes: [
+        "2026-08-30T00:00:00.500Z",
+        "2026-08-30T00:00:09.500Z",
+      ],
+      closeChildAfterSecondIdentityInspection: true,
+    });
+    const coordinator = harness.adapters.createCoordinator(showCommand("Show"));
+    const boot = coordinator.boot();
+    await settlePromises();
+    expect(harness.trace).toContain("launch-artifact-verification-deferred");
+
+    const shutdown = coordinator.requestEmergencyStop("sigint");
+    harness.releaseLaunchArtifactVerification();
+    await boot;
+    await shutdown;
+    await coordinator.completion;
+
+    expect(
+      harness.trace.filter((event) => event === "inspect-janvim-start"),
+    ).toHaveLength(2);
+    expect(harness.child.kill).not.toHaveBeenCalled();
+  });
+
+  it("rechecks child identity when startup aborts after initial inspection", async () => {
+    const harness = createStartupHarness({
+      deferInitialIdentityInspection: true,
+    });
+    const coordinator = harness.adapters.createCoordinator(showCommand("Show"));
+    const boot = coordinator.boot();
+    await settlePromises();
+    expect(harness.trace).toContain("inspect-janvim-start");
+
+    const shutdown = coordinator.requestEmergencyStop("sigint");
+    harness.releaseInitialIdentityInspection();
+    await boot;
+    await shutdown;
+    await coordinator.completion;
+
+    const inspections = harness.trace
+      .map((event, index) => ({ event, index }))
+      .filter(({ event }) => event === "inspect-janvim-start");
+    const termination = harness.trace.indexOf("kill-janvim");
+    expect(inspections).toHaveLength(2);
+    expect(termination).toBeGreaterThan(inspections[1]!.index);
+  });
+
+  it("refuses forced termination when the retained JanVim creation time no longer matches", async () => {
+    const harness = createStartupHarness({
+      closeChildOnWindowClose: false,
+      processStartTimes: [
+        "2026-08-30T00:00:00.500Z",
+        "2026-08-30T00:00:09.500Z",
+      ],
+    });
+    const coordinator = harness.adapters.createCoordinator(showCommand("Show"));
+    await expect(coordinator.boot()).resolves.toEqual({ ready: true });
+    harness.enableFiveSecondTimeouts();
+
+    await coordinator.requestEmergencyStop("sigint");
+    await coordinator.completion;
+
+    expect(
+      harness.trace.filter((event) => event === "inspect-janvim-start"),
+    ).toHaveLength(2);
+    expect(harness.child.kill).not.toHaveBeenCalled();
+    expect(harness.evidenceWrites[0]).toMatchObject({
+      value: {
+        shutdown: {
+          janvimExit: "unsettled",
+          leaseRemoved: false,
+        },
+      },
+    });
+  });
+});

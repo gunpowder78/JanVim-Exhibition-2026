@@ -478,7 +478,7 @@ class FakeSession implements ShowRunSession {
     return this.naturalExit;
   }
 
-  public terminateExactJanVim(): void {
+  public async terminateExactJanVim(): Promise<void> {
     this.trace.push("terminate-exact");
     if (this.failPhase("terminate-exact")) {
       throw new Error("injected exact terminate failure");

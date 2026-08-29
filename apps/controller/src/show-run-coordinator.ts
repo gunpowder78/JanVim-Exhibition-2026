@@ -104,7 +104,7 @@ export interface ShowRunSession {
   sendAgentShutdown(timeoutMs: 2_000, retryLimit: 1): Promise<void>;
   closePlacedWindow(timeoutMs: 2_000, maxOutputBytes: 4_096): Promise<void>;
   waitForJanVimExit(timeoutMs: 5_000): Promise<"natural" | "still-running">;
-  terminateExactJanVim(): void;
+  terminateExactJanVim(): Promise<void>;
   waitForForcedExit(timeoutMs: 5_000): Promise<boolean>;
   closeBridge(timeoutMs: 5_000): Promise<void>;
   dispose(): void;
@@ -487,7 +487,7 @@ export class ShowRunCoordinator {
     );
     let childSettled = exit === "natural";
     if (!childSettled) {
-      bestEffortSync(() => session.terminateExactJanVim());
+      await bestEffort(() => session.terminateExactJanVim());
       childSettled = await bestEffortResult(
         () => session.waitForForcedExit(5_000),
         false,
@@ -1615,7 +1615,7 @@ export class ShowRunCoordinator {
           this.shutdownDiagnostics.childSettled = true;
         } else {
           this.shutdownDiagnostics.forcedTermination = true;
-          this.runShutdownPhaseSync("terminate-exact-failed", () =>
+          await this.runShutdownPhase("terminate-exact-failed", () =>
             session.terminateExactJanVim(),
           );
           const forced = await this.runShutdownPhase(
