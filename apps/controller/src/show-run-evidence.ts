@@ -131,6 +131,7 @@ export type ShowRunEvidenceRecord = {
 const MAX_SAFE_INTEGER = Number.MAX_SAFE_INTEGER;
 const HASH_PATTERN = /^[0-9a-f]{64}$/;
 const RUN_ID_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
+const CONTROLLER_RUN_ID_PATTERN = /^[A-Za-z0-9._-]{1,96}$/;
 const CORE_SHA256 =
   "224b3457d89fbc6cf946359683632f29f9262bae08b6f0d2e3043a3a7a6d83b3";
 const JANVIM_PRODUCT_ROOT = "D:\\github\\JanVim";
@@ -544,7 +545,7 @@ const showRunEvidenceSchema = z
   .object({
     schema: z.literal(1),
     runId: z.string().regex(RUN_ID_PATTERN),
-    controllerRunId: z.string().regex(RUN_ID_PATTERN),
+    controllerRunId: z.string().regex(CONTROLLER_RUN_ID_PATTERN),
     mode: z.enum(["Soak3", "Show"]),
     acceptanceScope: z.enum(["monitor-simulation", "physical-projectors"]),
     physicalProjectorsTested: z.boolean(),

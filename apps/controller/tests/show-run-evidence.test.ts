@@ -299,6 +299,22 @@ describe("strict show-run evidence schema", () => {
     expect(parsed.offlineSnapshots.every((snapshot) => snapshot.offline)).toBe(true);
   });
 
+  it("preserves the 96-byte controller invocation identity without widening run IDs", () => {
+    const controllerRunId = "c".repeat(96);
+    expect(
+      parseShowRunEvidence(validEvidenceRecord({ controllerRunId }))
+        .controllerRunId,
+    ).toBe(controllerRunId);
+    expect(() =>
+      parseShowRunEvidence(
+        validEvidenceRecord({ controllerRunId: "c".repeat(97) }),
+      ),
+    ).toThrow();
+    expect(() =>
+      parseShowRunEvidence(validEvidenceRecord({ runId: "r".repeat(65) })),
+    ).toThrow();
+  });
+
   it("rejects the wrong Soak3 loop or snapshot cardinality and duplicate loop IDs", () => {
     for (const loopCount of [2, 4]) {
       const record = cloneRecord();
