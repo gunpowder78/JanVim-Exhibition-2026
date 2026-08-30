@@ -40,6 +40,10 @@ $expectedPoemSha256 = 'b699de273f5bbaedb08241495f52ce863d3e8e1851275ce3b6251484d
 $incidentExitCode = 70
 $maximumJsonBytes = 4096
 $maximumEvidenceBytes = 262144
+$maximumGraphManifestBytes = 262144
+$maximumGraphModules = 256
+$maximumCompiledModuleBytes = 16777216L
+$maximumLaunchFileBytes = 268435456L
 $maximumRuntimeExecutableBytes = 268435456L
 $crashWindowMilliseconds = 600000L
 $restartDelaysMilliseconds = @(1000, 2000, 4000)
@@ -638,6 +642,35 @@ function Get-ExactFileSha256 {
     }
 }
 
+function New-FrozenInputClaimSpecification {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][long]$MaximumBytes,
+        [Parameter(Mandatory = $true)][string]$Reason
+    )
+
+    try {
+        Assert-RequiredLeaf -Path $Path -Reason $Reason
+        $item = Get-Item -LiteralPath $Path -Force
+        if ($item.Length -lt 1 -or $item.Length -gt $MaximumBytes) {
+            throw $Reason
+        }
+        $fileSha256 = Get-ExactFileSha256 `
+            -Path $Path `
+            -ExpectedBytes ([long]$item.Length) `
+            -Reason $Reason
+        return [pscustomobject]@{
+            Path = $Path
+            ExpectedBytes = [long]$item.Length
+            MaximumBytes = $MaximumBytes
+            ExpectedSha256 = $fileSha256
+        }
+    }
+    catch {
+        throw $Reason
+    }
+}
+
 function Open-FrozenInputClaims {
     param([Parameter(Mandatory = $true)][object[]]$Specifications)
 
@@ -707,6 +740,115 @@ function Test-HashValue {
     param([Parameter(Mandatory = $true)][object]$Value)
 
     return $Value -is [string] -and $Value -cmatch '^[0-9a-f]{64}$'
+}
+
+function Read-StrictElectronModuleGraph {
+    param(
+        [Parameter(Mandatory = $true)][string]$Text,
+        [Parameter(Mandatory = $true)][string]$RepositoryRoot,
+        [Parameter(Mandatory = $true)][string]$ControllerDistRoot,
+        [Parameter(Mandatory = $true)][string]$CompiledEntry,
+        [Parameter(Mandatory = $true)][string]$ShowAdapterEntry
+    )
+
+    try {
+        $manifest = $Text | ConvertFrom-Json -Depth 8 -DateKind String
+    }
+    catch {
+        throw 'electron-module-graph-invalid'
+    }
+    if ($manifest -isnot [pscustomobject]) {
+        throw 'electron-module-graph-invalid'
+    }
+    Assert-ExactPropertySet `
+        -InputObject $manifest `
+        -ExpectedNames @('schema', 'status', 'files') `
+        -Reason 'electron-module-graph-invalid'
+    if (
+        -not (Test-ExactJsonInteger `
+            -Value (Get-RequiredPropertyValue -InputObject $manifest -Name 'schema' -Reason 'electron-module-graph-invalid') `
+            -Expected 1) -or
+        (Get-RequiredPropertyValue -InputObject $manifest -Name 'status' -Reason 'electron-module-graph-invalid') -cne 'compiled-electron-main-graph-verified'
+    ) {
+        throw 'electron-module-graph-invalid'
+    }
+    $filesValue = Get-RequiredPropertyValue `
+        -InputObject $manifest `
+        -Name 'files' `
+        -Reason 'electron-module-graph-invalid'
+    if ($filesValue -isnot [array]) {
+        throw 'electron-module-graph-invalid'
+    }
+    $files = @($filesValue)
+    if ($files.Count -lt 1 -or $files.Count -gt $maximumGraphModules) {
+        throw 'electron-module-graph-invalid'
+    }
+
+    $seenPaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $specifications = [Collections.Generic.List[object]]::new()
+    $previousRelativePath = $null
+    $compiledEntrySeen = $false
+    $showAdapterSeen = $false
+    foreach ($file in $files) {
+        if ($file -isnot [pscustomobject]) {
+            throw 'electron-module-graph-invalid'
+        }
+        Assert-ExactPropertySet `
+            -InputObject $file `
+            -ExpectedNames @('relativePath', 'bytes', 'sha256') `
+            -Reason 'electron-module-graph-invalid'
+        $relativePath = Get-RequiredPropertyValue `
+            -InputObject $file `
+            -Name 'relativePath' `
+            -Reason 'electron-module-graph-invalid'
+        $bytes = Get-RequiredPropertyValue `
+            -InputObject $file `
+            -Name 'bytes' `
+            -Reason 'electron-module-graph-invalid'
+        $sha256 = Get-RequiredPropertyValue `
+            -InputObject $file `
+            -Name 'sha256' `
+            -Reason 'electron-module-graph-invalid'
+        if (
+            $relativePath -isnot [string] -or
+            $relativePath -cnotmatch '^apps/controller/dist/src/(?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+\.(?:js|mjs|cjs)$' -or
+            -not (Test-PositiveInteger -Value $bytes) -or
+            [long]$bytes -gt $maximumCompiledModuleBytes -or
+            -not (Test-HashValue -Value $sha256) -or
+            ($null -ne $previousRelativePath -and [string]::CompareOrdinal($previousRelativePath, $relativePath) -ge 0) -or
+            -not $seenPaths.Add($relativePath)
+        ) {
+            throw 'electron-module-graph-invalid'
+        }
+        $path = Resolve-ShowFullPath `
+            -Path (Join-Path $RepositoryRoot $relativePath) `
+            -Label 'electron-module-graph-path'
+        if (
+            -not (Test-ShowAtOrBelow -Candidate $path -Root $ControllerDistRoot) -or
+            ([IO.Path]::GetRelativePath($RepositoryRoot, $path).Replace('\', '/')) -cne $relativePath
+        ) {
+            throw 'electron-module-graph-invalid'
+        }
+        Assert-RequiredLeaf -Path $path -Reason 'electron-module-graph-invalid'
+        Assert-NoReparseTraversal -Path $path -Reason 'electron-module-graph-invalid'
+        if (Test-ShowPathEqual -Left $path -Right $CompiledEntry) {
+            $compiledEntrySeen = $true
+        }
+        if (Test-ShowPathEqual -Left $path -Right $ShowAdapterEntry) {
+            $showAdapterSeen = $true
+        }
+        $specifications.Add([pscustomobject]@{
+            Path = $path
+            ExpectedBytes = [long]$bytes
+            MaximumBytes = $maximumCompiledModuleBytes
+            ExpectedSha256 = $sha256
+        })
+        $previousRelativePath = $relativePath
+    }
+    if (-not $compiledEntrySeen -or -not $showAdapterSeen) {
+        throw 'electron-module-graph-invalid'
+    }
+    return $specifications.ToArray()
 }
 
 function Test-JsonInteger {
@@ -1720,10 +1862,13 @@ if ($primaryDisplay.displayId -ceq $secondaryDisplay.displayId) {
 }
 
 $controllerPackage = Join-Path $repositoryRoot 'apps\controller'
+$controllerPackageManifestPath = Join-Path $controllerPackage 'package.json'
+$controllerDistRoot = Join-Path $controllerPackage 'dist\src'
 $electronCommand = Join-Path $repositoryRoot 'node_modules\.bin\electron.cmd'
 $electronExecutable = Join-Path $repositoryRoot 'node_modules\electron\dist\electron.exe'
 $compiledEntry = Join-Path $controllerPackage 'dist\src\electron-main.js'
 $showAdapterEntry = Join-Path $controllerPackage 'dist\src\show-runtime-adapters.js'
+$moduleGraphVerifier = Join-Path $repositoryRoot 'scripts\verify-electron-module-graph.mjs'
 $verifyRuntime = Join-Path $repositoryRoot 'scripts\verify-runtime.ps1'
 $windowCloseHelper = Join-Path $repositoryRoot 'scripts\close-janvim-window.ps1'
 $artifactLockPath = Join-Path $repositoryRoot 'janvim-artifact.lock.json'
@@ -1736,8 +1881,10 @@ $janvimExecutablePath = Join-Path $runtimeRoot 'janvim-core.exe'
 foreach ($requiredFile in @(
     $electronCommand,
     $electronExecutable,
+    $controllerPackageManifestPath,
     $compiledEntry,
     $showAdapterEntry,
+    $moduleGraphVerifier,
     $verifyRuntime,
     $windowCloseHelper,
     $artifactLockPath,
@@ -1752,6 +1899,19 @@ foreach ($requiredFile in @(
 }
 
 Assert-NetworkPolicySnapshot -WorkingDirectory $repositoryRoot
+
+$verifierClaimSpecifications = @(
+    New-FrozenInputClaimSpecification `
+        -Path $moduleGraphVerifier `
+        -MaximumBytes 1048576L `
+        -Reason 'graph-verifier-snapshot-failed'
+    New-FrozenInputClaimSpecification `
+        -Path $verifyRuntime `
+        -MaximumBytes 1048576L `
+        -Reason 'runtime-verifier-snapshot-failed'
+)
+$frozenInputClaims = Open-FrozenInputClaims -Specifications $verifierClaimSpecifications
+try {
 
 $nodeCandidates = @(Get-Command -Name 'node' -CommandType Application -ErrorAction Stop)
 if ($nodeCandidates.Count -lt 1) {
@@ -1771,6 +1931,38 @@ if (
     $nodeVersionResult.Stdout.Trim() -cne $expectedNodeVersion
 ) {
     throw 'node-version-mismatch'
+}
+
+$moduleGraphResult = Invoke-BoundedProcess `
+    -FilePath $nodeCommand `
+    -Arguments @($moduleGraphVerifier) `
+    -WorkingDirectory $repositoryRoot `
+    -TimeoutMilliseconds 30000 `
+    -MaximumOutputBytes $maximumGraphManifestBytes `
+    -Reason 'electron-module-graph-verification-failed'
+if (
+    $moduleGraphResult.ExitCode -ne 0 -or
+    -not [string]::IsNullOrWhiteSpace($moduleGraphResult.Stderr)
+) {
+    throw 'electron-module-graph-verification-failed'
+}
+$moduleGraphSpecifications = @(Read-StrictElectronModuleGraph `
+    -Text $moduleGraphResult.Stdout `
+    -RepositoryRoot $repositoryRoot `
+    -ControllerDistRoot $controllerDistRoot `
+    -CompiledEntry $compiledEntry `
+    -ShowAdapterEntry $showAdapterEntry)
+
+$controllerPackageSnapshot = Read-BoundedJsonSnapshot `
+    -Path $controllerPackageManifestPath `
+    -MaximumBytes 65536 `
+    -Reason 'controller-package-invalid'
+$controllerPackageManifest = $controllerPackageSnapshot.Value
+if (
+    (Get-RequiredPropertyValue -InputObject $controllerPackageManifest -Name 'main' -Reason 'controller-package-invalid') -cne 'dist/src/electron-main.js' -or
+    (Get-RequiredPropertyValue -InputObject $controllerPackageManifest -Name 'type' -Reason 'controller-package-invalid') -cne 'module'
+) {
+    throw 'controller-package-invalid'
 }
 
 $artifactLockSnapshot = Read-BoundedJsonSnapshot `
@@ -1840,7 +2032,26 @@ if (
     throw 'frozen-poem-hash-mismatch'
 }
 
-$frozenInputClaims = Open-FrozenInputClaims -Specifications @(
+$launchClaimSpecifications = @(
+    New-FrozenInputClaimSpecification `
+        -Path $electronExecutable `
+        -MaximumBytes $maximumLaunchFileBytes `
+        -Reason 'electron-executable-snapshot-failed'
+    New-FrozenInputClaimSpecification `
+        -Path $electronCommand `
+        -MaximumBytes 1048576L `
+        -Reason 'electron-command-snapshot-failed'
+    New-FrozenInputClaimSpecification `
+        -Path $windowCloseHelper `
+        -MaximumBytes 1048576L `
+        -Reason 'window-close-helper-snapshot-failed'
+    [pscustomobject]@{
+        Path = $controllerPackageManifestPath
+        ExpectedBytes = [long]$controllerPackageSnapshot.ByteLength
+        MaximumBytes = 65536L
+        ExpectedSha256 = $controllerPackageSnapshot.FileSha256
+    }
+    $moduleGraphSpecifications
     [pscustomobject]@{
         Path = $resolvedDisplayMapPath
         ExpectedBytes = [long]$displayMapSnapshot.ByteLength
@@ -1884,7 +2095,10 @@ $frozenInputClaims = Open-FrozenInputClaims -Specifications @(
         ExpectedSha256 = $lockedCoreHash
     }
 )
-try {
+$launchClaims = Open-FrozenInputClaims -Specifications $launchClaimSpecifications
+foreach ($launchClaim in $launchClaims) {
+    $frozenInputClaims.Add($launchClaim)
+}
 $verificationArguments = @('-NoProfile', '-NonInteractive', '-File', $verifyRuntime)
 Assert-NetworkPolicySnapshot -WorkingDirectory $repositoryRoot
 $verificationResult = Invoke-BoundedProcess `

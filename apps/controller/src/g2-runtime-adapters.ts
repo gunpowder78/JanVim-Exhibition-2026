@@ -218,6 +218,7 @@ interface ValidatedRuntimeInputs {
   manifest: ShowManifest;
   poemBytes: Buffer;
   poemSnapshot: FrozenRuntimeSnapshot;
+  runtimeCoreSnapshot: FrozenRuntimeSnapshot;
 }
 const PRIVATE_ENVIRONMENT_DENYLIST = new Set([
   "MYVIMRC",
@@ -348,6 +349,8 @@ export function createG2RuntimeDependencies(
     },
 
     startJanVim: async (bridge) => {
+      const inputs = requireValidatedInputs();
+      assertFrozenSnapshotUnchanged(inputs.runtimeCoreSnapshot);
       if (startedChild !== undefined) {
         return { ok: false, reason: "janvim-already-started" };
       }
@@ -560,6 +563,7 @@ export function createG2RuntimeDependencies(
       const manifestBytes = inputs.manifestBytes;
       assertFrozenSnapshotUnchanged(inputs.poemSnapshot);
       const poemBytes = inputs.poemBytes;
+      assertFrozenSnapshotUnchanged(inputs.runtimeCoreSnapshot);
       const manifest = inputs.manifest;
       const record: G2EvidenceRecord = {
         schema: 1,
@@ -807,6 +811,15 @@ function validateStaticRuntimeInputs(
   const poemFile = readFrozenG2File(host, paths.poem, "poem");
   const poemBytes = poemFile.bytes;
   if (sha256(poemBytes) !== manifest.poemSha256) throw new Error("poem-hash-mismatch");
+  const runtimeCore = readFrozenG2File(
+    host,
+    paths.janvimExecutable,
+    "runtime-core",
+    {
+      expectedSize: lock.coreBytes,
+      expectedSha256: lock.coreSha256,
+    },
+  );
   return {
     artifactLockBytes: Buffer.from(artifactLockBytes),
     artifactLockSnapshot: artifactLock.snapshot,
@@ -820,6 +833,7 @@ function validateStaticRuntimeInputs(
     manifest,
     poemBytes: Buffer.from(poemBytes),
     poemSnapshot: poemFile.snapshot,
+    runtimeCoreSnapshot: runtimeCore.snapshot,
   };
 }
 
@@ -827,10 +841,12 @@ function readFrozenG2File(
   host: Pick<NormalizedRuntimeHost, "readFile">,
   path: string,
   label: string,
+  expected: { expectedSize: number; expectedSha256: string } | undefined =
+    undefined,
 ): { bytes: Buffer; snapshot: FrozenRuntimeSnapshot } {
   const snapshot = readFrozenRuntimeSnapshot({
     readFile: (targetPath) => host.readFile(targetPath),
-    files: [{ label, path }],
+    files: [{ label, path, ...expected }],
   });
   return {
     bytes: Buffer.from(snapshot.files[0]!.bytes),
@@ -990,8 +1006,10 @@ const artifactLockSchema = z
     checksum: z.string().min(1),
     checksumSha256: hashSchema,
     core: z.literal("janvim-core.exe"),
-    coreBytes: z.number().int().positive(),
-    coreSha256: hashSchema,
+    coreBytes: z.literal(18_866_688),
+    coreSha256: z.literal(
+      "224b3457d89fbc6cf946359683632f29f9262bae08b6f0d2e3043a3a7a6d83b3",
+    ),
     runtimeLua: z.string().min(1),
     runtimeLuaSha256: hashSchema,
     artifactConfig: z.string().min(1),

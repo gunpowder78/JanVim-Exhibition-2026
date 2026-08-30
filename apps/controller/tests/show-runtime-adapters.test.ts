@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readFileSync, readdirSync } from "node:fs";
 import { EventEmitter } from "node:events";
 import { join, win32 } from "node:path";
@@ -49,6 +50,9 @@ const pluginLabInit = readFileSync(
     "config",
     "init.lua",
   ),
+);
+const janVimCore = readFileSync(
+  join(fixtureRoot, "runtime", "janvim", "janvim-core.exe"),
 );
 
 const repositoryRoot = "D:\\show";
@@ -272,6 +276,10 @@ function createValidationHarness(options: {
       pluginLabInit,
     ],
     [displayMapPath, Buffer.from(`${JSON.stringify(confirmedMap)}\n`, "utf8")],
+    [
+      win32.join(repositoryRoot, "runtime", "janvim", "janvim-core.exe"),
+      Buffer.from(janVimCore),
+    ],
   ]);
   const logStorage = new MemoryLogStorage();
   const processListeners = new Set<() => void>();
@@ -415,6 +423,12 @@ function createValidationHarness(options: {
     trace,
     processListeners,
     appListeners,
+    replaceRuntimeCoreBytes: (value: Uint8Array) => {
+      files.set(
+        win32.join(repositoryRoot, "runtime", "janvim", "janvim-core.exe"),
+        Buffer.from(value),
+      );
+    },
   };
 }
 
@@ -496,6 +510,10 @@ function createStartupHarness(options: {
       pluginLabInit,
     ],
     [displayMapPath, Buffer.from(`${JSON.stringify(confirmedMap)}\n`, "utf8")],
+    [
+      win32.join(repositoryRoot, "runtime", "janvim", "janvim-core.exe"),
+      Buffer.from(janVimCore),
+    ],
   ]);
   const logStorage = options.logStorage ?? new MemoryLogStorage();
   const timers = new ManualTimers();
@@ -1188,6 +1206,12 @@ function createStartupHarness(options: {
     releaseLaunchArtifactVerification,
     releaseInitialIdentityInspection,
     releaseLoopPrepare: loopPrepareGate.resolve,
+    replaceRuntimeCoreBytes: (value: Uint8Array) => {
+      files.set(
+        win32.join(repositoryRoot, "runtime", "janvim", "janvim-core.exe"),
+        Buffer.from(value),
+      );
+    },
   };
 }
 
@@ -1492,6 +1516,7 @@ describe("real Task 9 show runtime adapters", () => {
       "read:D:\\show\\content\\fixture\\poem.txt",
       "read:D:\\show\\runtime\\user-root\\plugin-lab\\config\\init.lua",
       "read:D:\\VirtualData\\JanVim-Exhibition-Rehearsals\\show-001\\display-map.json",
+      "read:D:\\show\\runtime\\janvim\\janvim-core.exe",
       "display-snapshot",
       "verify-artifact:D:\\show\\janvim-artifact.lock.json:D:\\show\\runtime\\janvim\\janvim-core.exe",
       "network-snapshot",
@@ -1501,7 +1526,12 @@ describe("real Task 9 show runtime adapters", () => {
       "read:D:\\show\\content\\fixture\\poem.txt",
       "read:D:\\show\\runtime\\user-root\\plugin-lab\\config\\init.lua",
       "read:D:\\VirtualData\\JanVim-Exhibition-Rehearsals\\show-001\\display-map.json",
+      "read:D:\\show\\runtime\\janvim\\janvim-core.exe",
     ]);
+    expect(janVimCore.byteLength).toBe(18_866_688);
+    expect(createHash("sha256").update(janVimCore).digest("hex")).toBe(
+      "224b3457d89fbc6cf946359683632f29f9262bae08b6f0d2e3043a3a7a6d83b3",
+    );
     expect(harness.processListeners).toHaveLength(0);
     expect(harness.appListeners).toHaveLength(0);
   });
@@ -1686,6 +1716,48 @@ describe("real Task 9 show runtime adapters", () => {
     expect([...harness.logStorage.files.keys()].join("\n")).not.toMatch(
       /generation|g1/i,
     );
+  });
+
+  it("rejects a runtime-core byte change after validation before spawn", async () => {
+    const harness = createStartupHarness();
+    const coordinator = harness.adapters.createCoordinator(showCommand("Show"));
+    const dependencies = (
+      coordinator as unknown as { dependencies: ShowRunCoordinatorDependencies }
+    ).dependencies;
+    await dependencies.validate();
+    const session = dependencies.createSession(1);
+    const changedCore = Buffer.from(janVimCore);
+    changedCore[0] = changedCore[0]! ^ 0xff;
+    harness.replaceRuntimeCoreBytes(changedCore);
+    const signal = new AbortController().signal;
+    await session.startBridge(signal);
+
+    await expect(session.launchJanVim(signal)).rejects.toThrow(
+      "runtime-core-changed-during-run",
+    );
+    expect(harness.spawnInvocationCount()).toBe(0);
+  });
+
+  it("rejects a runtime-core byte change after validation before evidence passes", async () => {
+    const harness = createStartupHarness();
+    const coordinator = harness.adapters.createCoordinator(showCommand("Show"));
+    const dependencies = (
+      coordinator as unknown as { dependencies: ShowRunCoordinatorDependencies }
+    ).dependencies;
+    await dependencies.validate();
+    const changedCore = Buffer.from(janVimCore);
+    changedCore[changedCore.byteLength - 1] =
+      changedCore[changedCore.byteLength - 1]! ^ 0xff;
+    harness.replaceRuntimeCoreBytes(changedCore);
+
+    await expect(
+      dependencies.finalizeEvidence(
+        { ok: true, reason: "soak-complete" },
+        coordinator.diagnostics(),
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow("runtime-core-changed-during-run");
+    expect(harness.evidenceAttempts).toHaveLength(0);
   });
 
   it("does not revive a stopped runtime when deferred loop preparation settles", async () => {

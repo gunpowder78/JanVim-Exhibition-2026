@@ -582,6 +582,12 @@ async function validateShowInputs(
       { label: "poem", path: paths.poem },
       { label: "plugin-lab-init", path: paths.pluginLabInit },
       { label: "display-map", path: paths.displayMap },
+      {
+        label: "runtime-core",
+        path: paths.janvimExecutable,
+        expectedSize: TASK9_ARTIFACT_IDENTITY.coreBytes,
+        expectedSha256: TASK9_ARTIFACT_IDENTITY.coreSha256,
+      },
     ],
   });
   const file = (label: string): Buffer => {
@@ -1532,6 +1538,7 @@ class RuntimeShowSession implements ShowRunSession {
 
   public async launchJanVim(signal: AbortSignal): Promise<void> {
     const epoch = this.captureLifecycle(signal, "janvim-launch-aborted");
+    assertFrozenSnapshotUnchanged(this.options.inputs.snapshot);
     const token = this.bridgeToken;
     const port = this.bridgePort;
     if (token === undefined || port === undefined) {

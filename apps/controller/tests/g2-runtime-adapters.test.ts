@@ -31,6 +31,9 @@ const manifestText = readFileSync(
 const poemText = readFileSync(
   join(repositoryFixtureRoot, "content", "fixture", "poem.txt"),
 );
+const janVimCore = readFileSync(
+  join(repositoryFixtureRoot, "runtime", "janvim", "janvim-core.exe"),
+);
 
 const confirmedMap = {
   schema: 1,
@@ -114,6 +117,10 @@ function createAdapterHarness(
     [win32.join(repositoryRoot, "show", "janvim-show.toml"), showConfig],
     [win32.join(repositoryRoot, "content", "fixture", "show.manifest.json"), manifestText],
     [win32.join(repositoryRoot, "content", "fixture", "poem.txt"), poemText],
+    [
+      win32.join(repositoryRoot, "runtime", "janvim", "janvim-core.exe"),
+      Buffer.from(janVimCore),
+    ],
     [displayMapPath, Buffer.from(`${JSON.stringify(confirmedMap)}\n`, "utf8")],
   ]);
   const logStorage = new MemoryLogStorage();
@@ -355,7 +362,7 @@ function createAdapterHarness(
       return readPaths;
     },
     get spawnCall() {
-      return spawnCall!;
+      return spawnCall;
     },
     get verifyInvocation() {
       return verifyInvocation!;
@@ -418,6 +425,12 @@ function createAdapterHarness(
     replaceDisplayMapBytes: (value: Uint8Array) => {
       files.set(displayMapPath, Buffer.from(value));
     },
+    replaceRuntimeCoreBytes: (value: Uint8Array) => {
+      files.set(
+        win32.join(repositoryRoot, "runtime", "janvim", "janvim-core.exe"),
+        Buffer.from(value),
+      );
+    },
   };
 }
 
@@ -473,7 +486,12 @@ describe("real G2 runtime adapter boundaries", () => {
       "D:\\rehearsal\\display-map.json",
       "D:\\show\\content\\fixture\\show.manifest.json",
       "D:\\show\\content\\fixture\\poem.txt",
+      "D:\\show\\runtime\\janvim\\janvim-core.exe",
     ]);
+    expect(janVimCore.byteLength).toBe(18_866_688);
+    expect(createHash("sha256").update(janVimCore).digest("hex")).toBe(
+      "224b3457d89fbc6cf946359683632f29f9262bae08b6f0d2e3043a3a7a6d83b3",
+    );
   });
 
   it("spawns the locked executable with only show config, fixture poem, and private environment", async () => {
@@ -485,6 +503,7 @@ describe("real G2 runtime adapter boundaries", () => {
     harness.baseEnvironment.XDG_CONFIG_HOME = "C:\\Users\\operator\\.config";
     harness.baseEnvironment.XDG_DATA_HOME = "C:\\Users\\operator\\.local\\share";
     harness.baseEnvironment.XDG_STATE_HOME = "C:\\Users\\operator\\.local\\state";
+    await expect(harness.dependencies.validate()).resolves.toEqual({ ok: true });
     const bridge = await harness.dependencies.startBridge();
     const result = await harness.dependencies.startJanVim(bridge);
     expect(result).toMatchObject({ ok: true, child: { pid: 4242 } });
@@ -559,6 +578,7 @@ describe("real G2 runtime adapter boundaries", () => {
 
   it("classifies the bounded child streams from the observed process output", async () => {
     const harness = createAdapterHarness([]);
+    await expect(harness.dependencies.validate()).resolves.toEqual({ ok: true });
     const bridge = await harness.dependencies.startBridge();
     await expect(harness.dependencies.startJanVim(bridge)).resolves.toMatchObject({
       ok: true,
@@ -640,6 +660,7 @@ describe("real G2 runtime adapter boundaries", () => {
       "D:\\show\\show\\janvim-show.toml",
       "D:\\show\\content\\fixture\\show.manifest.json",
       "D:\\show\\content\\fixture\\poem.txt",
+      "D:\\show\\runtime\\janvim\\janvim-core.exe",
     ]);
     expect(harness.evidenceRecord).toMatchObject({
       schema: 1,
@@ -743,6 +764,34 @@ describe("real G2 runtime adapter boundaries", () => {
     await expect(
       harness.dependencies.finalizeEvidence(validFinalizationSnapshot()),
     ).rejects.toThrow(/display-map.*changed/i);
+    expect(harness.evidenceRecord).toBeUndefined();
+  });
+
+  it("rejects a runtime-core byte change after validation before spawn", async () => {
+    const harness = createAdapterHarness([]);
+    await expect(harness.dependencies.validate()).resolves.toEqual({ ok: true });
+    const changedCore = Buffer.from(janVimCore);
+    changedCore[0] = changedCore[0]! ^ 0xff;
+    harness.replaceRuntimeCoreBytes(changedCore);
+    const bridge = await harness.dependencies.startBridge();
+
+    await expect(harness.dependencies.startJanVim(bridge)).rejects.toThrow(
+      "runtime-core-changed-during-run",
+    );
+    expect(harness.spawnCall).toBeUndefined();
+  });
+
+  it("rejects a runtime-core byte change after validation before evidence passes", async () => {
+    const harness = createAdapterHarness([]);
+    await expect(harness.dependencies.validate()).resolves.toEqual({ ok: true });
+    const changedCore = Buffer.from(janVimCore);
+    changedCore[changedCore.byteLength - 1] =
+      changedCore[changedCore.byteLength - 1]! ^ 0xff;
+    harness.replaceRuntimeCoreBytes(changedCore);
+
+    await expect(
+      harness.dependencies.finalizeEvidence(validFinalizationSnapshot()),
+    ).rejects.toThrow("runtime-core-changed-during-run");
     expect(harness.evidenceRecord).toBeUndefined();
   });
 

@@ -61,13 +61,46 @@ function fakeNodeExecutableTemplate(): string {
   fakeNodeTemplate = join(publishRoot, "FakeNode.exe");
   const source = String.raw`
 using System;
+using System.IO;
+using System.Security.Cryptography;
+using System.Text.Json;
 using System.Threading;
 
 public static class JanVimShowFakeNode
 {
     public static int Main(string[] arguments)
     {
-        if (arguments.Length != 1 || arguments[0] != "--version") return 91;
+        if (arguments.Length != 1) return 91;
+        if (Path.GetFileName(arguments[0]).Equals("verify-electron-module-graph.mjs", StringComparison.Ordinal)) {
+            string root = Environment.CurrentDirectory;
+            string[] relativePaths = new[] {
+                "apps/controller/dist/src/electron-main.js",
+                "apps/controller/dist/src/runtime-adapter-common.js",
+                "apps/controller/dist/src/show-runtime-adapters.js"
+            };
+            object[] files = new object[relativePaths.Length];
+            for (int index = 0; index < relativePaths.Length; index++) {
+                string relativePath = relativePaths[index];
+                string path = Path.Combine(root, relativePath.Replace('/', Path.DirectorySeparatorChar));
+                byte[] bytes = File.ReadAllBytes(path);
+                files[index] = new {
+                    relativePath,
+                    bytes = bytes.LongLength,
+                    sha256 = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant()
+                };
+            }
+            string sequenceLog = Environment.GetEnvironmentVariable("SHOW_TEST_SEQUENCE_LOG");
+            if (!String.IsNullOrWhiteSpace(sequenceLog)) {
+                File.AppendAllText(sequenceLog, "graph-verify" + Environment.NewLine);
+            }
+            Console.Out.WriteLine(JsonSerializer.Serialize(new {
+                schema = 1,
+                status = "compiled-electron-main-graph-verified",
+                files
+            }));
+            return 0;
+        }
+        if (arguments[0] != "--version") return 91;
         string behavior = Environment.GetEnvironmentVariable("SHOW_TEST_NODE_BEHAVIOR") ?? "normal";
         if (behavior == "noisy") {
             Console.Out.Write(new string('x', 8192));
@@ -155,6 +188,7 @@ interface LauncherFixture {
   closeLog: string;
   leaseMutationLog: string;
   inputMutationLog: string;
+  launchMutationLog: string;
   terminalMarker: string;
   leasePath: string;
   evidencePath: string;
@@ -163,7 +197,10 @@ interface LauncherFixture {
   electronExecutable: string;
   compiledEntry: string;
   showAdapterEntry: string;
+  transitiveModule: string;
+  graphVerifier: string;
   verifyRuntime: string;
+  closeHelper: string;
   showConfig: string;
   poem: string;
   manifest: string;
@@ -186,6 +223,7 @@ interface RunOptions {
     | "matching-success-wrong-artifact-evidence"
     | "matching-success-wrong-content-evidence"
     | "matching-success-partial-evidence"
+    | "crash-then-success"
     | "crash"
     | "lease-then-success"
     | "marker-and-lease-success"
@@ -198,6 +236,15 @@ interface RunOptions {
   closeReceipt?: "valid" | "ownership-false" | "coercible-booleans";
   closeLeaseMutation?: "none" | "attempt-replace";
   inputMutation?: "none" | "attempt-display-map-append";
+  launchMutation?:
+    | "none"
+    | "electron-executable"
+    | "electron-main"
+    | "transitive-module"
+    | "graph-verifier"
+    | "runtime-verifier"
+    | "close-helper"
+    | "runtime-core";
   nodeVersion?: string;
   nodeBehavior?: "normal" | "noisy" | "hang";
   verifyExit?: number;
@@ -251,6 +298,25 @@ $record = [ordered]@{
 Add-Content -LiteralPath $env:SHOW_TEST_INVOCATION_LOG -Value ($record | ConvertTo-Json -Compress -Depth 8)
 Add-Content -LiteralPath $env:SHOW_TEST_SEQUENCE_LOG -Value 'electron'
 $invocationCount = @([IO.File]::ReadAllLines($env:SHOW_TEST_INVOCATION_LOG)).Count
+if ($env:SHOW_TEST_LAUNCH_MUTATION -cne 'none' -and $invocationCount -eq 1) {
+    $startInfo = [Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = 'pwsh'
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardInput = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    foreach ($argument in @(
+        '-NoProfile',
+        '-NonInteractive',
+        '-File',
+        $env:SHOW_TEST_LAUNCH_MUTATION_HELPER
+    )) {
+        $startInfo.ArgumentList.Add($argument)
+    }
+    $mutator = [Diagnostics.Process]::Start($startInfo)
+    $mutator.Dispose()
+}
 
 $runId = Get-ShowFlag -Name 'run-id'
 $controllerRunId = Get-ShowFlag -Name 'controller-run-id'
@@ -557,6 +623,14 @@ switch ($behavior) {
         Write-TerminalMarker -ControllerProcessId $controllerPid -Outcome 'intentional-success' -Reason 'operator-stop'
         exit 0
     }
+    'crash-then-success' {
+        if ($invocationCount -eq 1) {
+            exit 9
+        }
+        Write-ShowEvidence -Mutation 'none'
+        Write-TerminalMarker -ControllerProcessId $controllerPid -Outcome 'intentional-success' -Reason 'operator-stop'
+        exit 0
+    }
     'marker-and-lease-success' {
         Write-RunLease -Mismatch $false -Unprovable $false
         Write-TerminalMarker -ControllerProcessId $controllerPid -Outcome 'intentional-success' -Reason 'operator-stop'
@@ -578,6 +652,33 @@ switch ($behavior) {
     default {
         exit [int]$env:SHOW_TEST_CONTROLLER_EXIT
     }
+}
+`;
+
+const fakeLaunchMutationHelper = String.raw`
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
+Start-Sleep -Milliseconds 500
+$replacement = "$($env:SHOW_TEST_LAUNCH_MUTATION_TARGET).changed-$PID"
+try {
+    [IO.File]::Copy($env:SHOW_TEST_LAUNCH_MUTATION_TARGET, $replacement, $false)
+    [IO.File]::AppendAllText(
+        $replacement,
+        ([Environment]::NewLine + 'changed-launch-bytes' + [Environment]::NewLine)
+    )
+    [IO.File]::Move($replacement, $env:SHOW_TEST_LAUNCH_MUTATION_TARGET, $true)
+    Add-Content -LiteralPath $env:SHOW_TEST_LAUNCH_MUTATION_LOG -Value 'replaced'
+}
+catch {
+    if (Test-Path -LiteralPath $replacement -PathType Leaf) {
+        [IO.File]::Delete($replacement)
+    }
+    $leafError = $_.Exception
+    while ($null -ne $leafError.InnerException) {
+        $leafError = $leafError.InnerException
+    }
+    $hresult = [uint32]([long]$leafError.HResult -band 0xffffffffL)
+    Add-Content -LiteralPath $env:SHOW_TEST_LAUNCH_MUTATION_LOG -Value ('blocked:{0:X8}' -f $hresult)
 }
 `;
 
@@ -733,6 +834,7 @@ function makeLauncherFixture(): LauncherFixture {
   const closeLog = join(root, "close-invocations.ndjson");
   const leaseMutationLog = join(root, "lease-mutation.log");
   const inputMutationLog = join(root, "input-mutation.log");
+  const launchMutationLog = join(root, "launch-mutation.log");
   const terminalMarker = win32.join(externalRoot, "controller-terminal.json");
   const leasePath = win32.join(externalRoot, "run-lease.json");
   const evidencePath = win32.join(externalRoot, "show-run.json");
@@ -754,7 +856,17 @@ function makeLauncherFixture(): LauncherFixture {
     "src",
     "show-runtime-adapters.js",
   );
+  const transitiveModule = join(
+    root,
+    "apps",
+    "controller",
+    "dist",
+    "src",
+    "runtime-adapter-common.js",
+  );
+  const graphVerifier = join(root, "scripts", "verify-electron-module-graph.mjs");
   const verifyRuntime = join(root, "scripts", "verify-runtime.ps1");
+  const closeHelper = join(root, "scripts", "close-janvim-window.ps1");
   const checkedInMap = join(root, "show", "display-map.json");
   const janvimExecutable = join(root, "runtime", "janvim", "janvim-core.exe");
 
@@ -773,8 +885,9 @@ function makeLauncherFixture(): LauncherFixture {
   }
   copyFileSync(productionScript, script);
   writeText(join(root, "AGENTS.md"), "# JanVim Exhibition 2026 agent instructions\n");
-  writeText(compiledEntry, "// built Electron entry\n");
-  writeText(showAdapterEntry, "// built show adapter entry\n");
+  writeText(compiledEntry, 'import "./show-runtime-adapters.js";\n');
+  writeText(showAdapterEntry, 'import "./runtime-adapter-common.js";\n');
+  writeText(transitiveModule, "export const runtimeCommon = true;\n");
   writeText(janvimExecutable, "immutable fake runtime payload\n");
   writeText(checkedInMap, '{"schema":1,"mappingStatus":"unconfirmed"}\n');
   const showConfig = copyFixtureFile("show/janvim-show.toml", root);
@@ -782,6 +895,7 @@ function makeLauncherFixture(): LauncherFixture {
   const manifest = copyFixtureFile("content/fixture/show.manifest.json", root);
   copyFixtureFile("runtime/user-root/plugin-lab/config/init.lua", root);
   const artifactLock = copyFixtureFile("janvim-artifact.lock.json", root);
+  copyFixtureFile("scripts/verify-electron-module-graph.mjs", root);
   const fixtureLock = JSON.parse(
     readFileSync(artifactLock, "utf8"),
   ) as Record<string, unknown>;
@@ -808,16 +922,15 @@ function makeLauncherFixture(): LauncherFixture {
     ].join("\r\n"),
   );
   linkSync(fakeElectronExecutableTemplate(), electronExecutable);
+  copyFixtureFile("apps/controller/package.json", root);
   writeText(
-    join(root, "apps", "controller", "package.json"),
-    `${JSON.stringify({ main: "fake-electron.cjs", type: "commonjs" })}\n`,
-  );
-  writeText(
-    join(root, "apps", "controller", "fake-electron.cjs"),
+    compiledEntry,
     [
-      'const { spawnSync } = require("node:child_process");',
-      'const { appendFileSync } = require("node:fs");',
-      'const { join } = require("node:path");',
+      'import { spawnSync } from "node:child_process";',
+      'import { appendFileSync } from "node:fs";',
+      'import { join } from "node:path";',
+      'import { fileURLToPath } from "node:url";',
+      'const controllerDirectory = fileURLToPath(new URL(".", import.meta.url));',
       "const controllerOutputBytes = Number(process.env.SHOW_TEST_CONTROLLER_OUTPUT_BYTES ?? 0);",
       "if (controllerOutputBytes > 0) {",
       '  process.stdout.write("o".repeat(controllerOutputBytes));',
@@ -829,7 +942,7 @@ function makeLauncherFixture(): LauncherFixture {
       '    "-NoProfile",',
       '    "-NonInteractive",',
       '    "-File",',
-      '    join(__dirname, "..", "..", "node_modules", ".bin", "fake-electron.ps1"),',
+      '    join(controllerDirectory, "..", "..", "..", "..", "node_modules", ".bin", "fake-electron.ps1"),',
       "  ],",
       "  {",
       '    encoding: "utf8",',
@@ -851,7 +964,11 @@ function makeLauncherFixture(): LauncherFixture {
     ].join("\n"),
   );
   writeText(join(root, "node_modules", ".bin", "fake-electron.ps1"), fakeElectron);
-  writeText(join(root, "scripts", "close-janvim-window.ps1"), fakeCloseHelper);
+  writeText(closeHelper, fakeCloseHelper);
+  writeText(
+    join(root, "scripts", "attempt-launch-mutation.ps1"),
+    fakeLaunchMutationHelper,
+  );
   linkSync(fakeNodeExecutableTemplate(), join(root, "bin", "node.exe"));
   writeText(
     join(root, "psmodules", "NetTCPIP", "NetTCPIP.psm1"),
@@ -883,6 +1000,7 @@ function makeLauncherFixture(): LauncherFixture {
     closeLog,
     leaseMutationLog,
     inputMutationLog,
+    launchMutationLog,
     terminalMarker,
     leasePath,
     evidencePath,
@@ -891,7 +1009,10 @@ function makeLauncherFixture(): LauncherFixture {
     electronExecutable,
     compiledEntry,
     showAdapterEntry,
+    transitiveModule,
+    graphVerifier,
     verifyRuntime,
+    closeHelper,
     showConfig,
     poem,
     manifest,
@@ -947,6 +1068,17 @@ function runLauncher(
     if (name.toLowerCase() === "psmodulepath") delete childEnvironment[name];
   }
   childEnvironment.PSModulePath = modulePath;
+  const launchMutation = options.launchMutation ?? "none";
+  const launchMutationTarget = {
+    none: fixture.compiledEntry,
+    "electron-executable": fixture.electronExecutable,
+    "electron-main": fixture.compiledEntry,
+    "transitive-module": fixture.transitiveModule,
+    "graph-verifier": fixture.graphVerifier,
+    "runtime-verifier": fixture.verifyRuntime,
+    "close-helper": fixture.closeHelper,
+    "runtime-core": fixture.janvimExecutable,
+  }[launchMutation];
   return spawnSync(
     "pwsh",
     ["-NoProfile", "-NonInteractive", "-File", fixture.script, ...args],
@@ -967,6 +1099,14 @@ function runLauncher(
           options.closeLeaseMutation ?? "none",
         SHOW_TEST_INPUT_MUTATION: options.inputMutation ?? "none",
         SHOW_TEST_INPUT_MUTATION_LOG: fixture.inputMutationLog,
+        SHOW_TEST_LAUNCH_MUTATION: launchMutation,
+        SHOW_TEST_LAUNCH_MUTATION_TARGET: launchMutationTarget,
+        SHOW_TEST_LAUNCH_MUTATION_LOG: fixture.launchMutationLog,
+        SHOW_TEST_LAUNCH_MUTATION_HELPER: join(
+          fixture.root,
+          "scripts",
+          "attempt-launch-mutation.ps1",
+        ),
         SHOW_TEST_CONTROLLER_EXIT: String(options.controllerExit ?? 9),
         SHOW_TEST_CONTROLLER_OUTPUT_BYTES: String(
           options.controllerOutputBytes ?? 0,
@@ -1168,7 +1308,11 @@ describe("offline show launcher and external watchdog", () => {
       expect(result.status, `${output(result)}\n${diagnostic}`).toBe(0);
       expect(invocations(fixture)).toHaveLength(1);
       const sequence = readFileSync(fixture.sequenceLog, "utf8").trim().split(/\r?\n/u);
+      expect(sequence.indexOf("graph-verify")).toBeGreaterThanOrEqual(0);
       expect(sequence.indexOf("verify")).toBeGreaterThanOrEqual(0);
+      expect(sequence.indexOf("verify")).toBeGreaterThan(
+        sequence.indexOf("graph-verify"),
+      );
       expect(sequence.indexOf("electron")).toBeGreaterThan(sequence.indexOf("verify"));
       expect(sequence).not.toContain("electron-wrapper");
     } finally {
@@ -1729,6 +1873,44 @@ describe("offline show launcher and external watchdog", () => {
       fixture.cleanup();
     }
   }, 15_000);
+
+  it.each([
+    ["electron executable", "electron-executable", (fixture: LauncherFixture) => fixture.electronExecutable],
+    ["electron-main.js", "electron-main", (fixture: LauncherFixture) => fixture.compiledEntry],
+    ["transitive module", "transitive-module", (fixture: LauncherFixture) => fixture.transitiveModule],
+    ["graph verifier", "graph-verifier", (fixture: LauncherFixture) => fixture.graphVerifier],
+    ["runtime verifier", "runtime-verifier", (fixture: LauncherFixture) => fixture.verifyRuntime],
+    ["close helper", "close-helper", (fixture: LauncherFixture) => fixture.closeHelper],
+    ["JanVim core", "runtime-core", (fixture: LauncherFixture) => fixture.janvimExecutable],
+  ] as const)(
+    "holds the %s claim across the watchdog relaunch gap",
+    (_label, launchMutation, targetPath) => {
+      const fixture = makeLauncherFixture();
+      const target = targetPath(fixture);
+      const originalSha256 = sha256(target);
+      try {
+        const result = runLauncher(
+          fixture,
+          launcherArguments(fixture, "Show"),
+          {
+            behavior: "crash-then-success",
+            launchMutation,
+            timeoutMs: 15_000,
+          },
+        );
+        const mutationDiagnostic = existsSync(fixture.launchMutationLog)
+          ? readFileSync(fixture.launchMutationLog, "utf8").trim()
+          : "launch-mutation-log-missing";
+        expect(result.status, `${output(result)}\n${mutationDiagnostic}`).toBe(0);
+        expect(invocations(fixture)).toHaveLength(2);
+        expect(mutationDiagnostic).toMatch(/^blocked:800700(?:05|20)$/u);
+        expect(sha256(target)).toBe(originalSha256);
+      } finally {
+        fixture.cleanup();
+      }
+    },
+    20_000,
+  );
 
   it("does not trust a terminal marker with the wrong controller PID", () => {
     const fixture = makeLauncherFixture();
