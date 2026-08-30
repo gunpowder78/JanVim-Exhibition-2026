@@ -14,6 +14,10 @@ import type {
 } from "../src/one-loop-driver.ts";
 import type { RunLease } from "../src/run-lease.ts";
 import type { ShowCommand } from "../src/show-command.ts";
+import type {
+  ShowRunCoordinatorDependencies,
+  ShowSecondarySurface,
+} from "../src/show-run-coordinator.ts";
 import { parseShowRunEvidence } from "../src/show-run-evidence.ts";
 import {
   controllerStartedAtUtc,
@@ -380,6 +384,11 @@ function createStartupHarness(options: {
   deferLaunchArtifactVerification?: boolean;
   deferInitialIdentityInspection?: boolean;
   closeChildAfterSecondIdentityInspection?: boolean;
+  cleanupFailures?: readonly (
+    | "close-listener"
+    | "ipc"
+    | "web-guard"
+  )[];
 } = {}) {
   const trace: string[] = [];
   const files = new Map<string, Buffer>([
@@ -437,8 +446,17 @@ function createStartupHarness(options: {
   const appListeners = new Set<(event: { preventDefault(): void }) => void>();
   const ipcListeners = new Map<
     string,
-    (event: { senderFrame: { url: string } | null }, payload: unknown) => void
+    (
+      event: { sender?: unknown; senderFrame: { url: string } | null },
+      payload: unknown,
+    ) => void
   >();
+  const cleanupAttempts = {
+    closeListenerRemoval: 0,
+    ipcRemoval: 0,
+    webGuardDisposal: 0,
+    windowClose: 0,
+  };
   let browserOptions: Record<string, unknown> | undefined;
   let loadedUrl: string | undefined;
   let spawnCall:
@@ -516,7 +534,7 @@ function createStartupHarness(options: {
       ) {
         const listener = [...ipcListeners.values()][0];
         listener?.(
-          { senderFrame: { url: loadedUrl! } },
+          { sender: this, senderFrame: { url: loadedUrl! } },
           {
             schema: 1,
             type: "presentation-ack",
@@ -533,6 +551,19 @@ function createStartupHarness(options: {
       },
     );
     public readonly getOSProcessId = vi.fn(() => 8002);
+
+    public override removeListener(
+      eventName: string | symbol,
+      listener: (...args: unknown[]) => void,
+    ): this {
+      if (eventName === "will-navigate") {
+        cleanupAttempts.webGuardDisposal += 1;
+        if (options.cleanupFailures?.includes("web-guard") === true) {
+          throw new Error("injected web-guard cleanup failure");
+        }
+      }
+      return super.removeListener(eventName, listener);
+    }
   }
 
   class FakeBrowserWindow extends EventEmitter {
@@ -552,6 +583,7 @@ function createStartupHarness(options: {
     }
 
     public close(): void {
+      cleanupAttempts.windowClose += 1;
       this.emit("close");
       this.destroyed = true;
       this.emit("closed");
@@ -564,6 +596,19 @@ function createStartupHarness(options: {
 
     public isDestroyed(): boolean {
       return this.destroyed;
+    }
+
+    public override removeListener(
+      eventName: string | symbol,
+      listener: (...args: unknown[]) => void,
+    ): this {
+      if (eventName === "close") {
+        cleanupAttempts.closeListenerRemoval += 1;
+        if (options.cleanupFailures?.includes("close-listener") === true) {
+          throw new Error("injected close-listener cleanup failure");
+        }
+      }
+      return super.removeListener(eventName, listener);
     }
   }
 
@@ -578,13 +623,17 @@ function createStartupHarness(options: {
       on: (
         channel: string,
         listener: (
-          event: { senderFrame: { url: string } | null },
+          event: { sender?: unknown; senderFrame: { url: string } | null },
           payload: unknown,
         ) => void,
       ) => {
         ipcListeners.set(channel, listener);
       },
       removeListener: (channel: string) => {
+        cleanupAttempts.ipcRemoval += 1;
+        if (options.cleanupFailures?.includes("ipc") === true) {
+          throw new Error("injected IPC cleanup failure");
+        }
         ipcListeners.delete(channel);
       },
     },
@@ -859,6 +908,7 @@ function createStartupHarness(options: {
     processListeners,
     appListeners,
     ipcListeners,
+    cleanupAttempts,
     child,
     get browserOptions() {
       return browserOptions;
@@ -871,6 +921,9 @@ function createStartupHarness(options: {
     },
     get placement() {
       return placement;
+    },
+    get webContents() {
+      return lastWindow?.webContents;
     },
     dispatchRequest: (url: string) => {
       let result: { cancel: boolean } | undefined;
@@ -908,6 +961,44 @@ function createStartupHarness(options: {
 }
 
 describe("real Task 9 show runtime adapters", () => {
+  it.each([
+    [["close-listener"], "injected close-listener cleanup failure"],
+    [["ipc"], "injected IPC cleanup failure"],
+    [["web-guard"], "injected web-guard cleanup failure"],
+    [
+      ["close-listener", "ipc", "web-guard"],
+      "injected close-listener cleanup failure",
+    ],
+  ] as const)(
+    "attempts every secondary cleanup once when %j throws",
+    async (cleanupFailures, firstError) => {
+      const harness = createStartupHarness({ cleanupFailures });
+      const coordinator = harness.adapters.createCoordinator(showCommand("Show"));
+      const dependencies = (
+        coordinator as unknown as {
+          dependencies: ShowRunCoordinatorDependencies;
+        }
+      ).dependencies;
+      await dependencies.validate();
+      const surface: ShowSecondarySurface = await dependencies.openSecondary(
+        1,
+        new AbortController().signal,
+      );
+      surface.onEvent(() => undefined);
+      surface.onDestroyed(() => undefined);
+
+      expect(() => surface.close()).toThrowError(firstError);
+      expect(() => surface.close()).not.toThrow();
+      expect(harness.cleanupAttempts).toEqual({
+        closeListenerRemoval: 1,
+        ipcRemoval: 1,
+        webGuardDisposal: 1,
+        windowClose: 1,
+      });
+      expect(surface.diagnostics()).toEqual({ listeners: 0 });
+    },
+  );
+
   it("uses only a valid native Electron process creation timestamp for leases", () => {
     expect(controllerStartedAtUtc(1_788_048_000_123)).toBe(
       "2026-08-30T00:00:00.123Z",
@@ -1230,7 +1321,10 @@ describe("real Task 9 show runtime adapters", () => {
     await expect(coordinator.boot()).resolves.toEqual({ ready: true });
     const listener = [...harness.ipcListeners.values()][0];
     listener!(
-      { senderFrame: { url: harness.loadedUrl! } },
+      {
+        sender: harness.webContents,
+        senderFrame: { url: harness.loadedUrl! },
+      },
       { schema: 1, type: "operator-action", action: "start" },
     );
     await settlePromises();
@@ -1314,18 +1408,34 @@ describe("real Task 9 show runtime adapters", () => {
     expect(listener).toBeTypeOf("function");
 
     listener!(
-      { senderFrame: { url: harness.loadedUrl! } },
+      {
+        sender: { id: "replaced-renderer" },
+        senderFrame: { url: harness.loadedUrl! },
+      },
+      { schema: 1, type: "operator-action", action: "start" },
+    );
+    listener!(
+      {
+        sender: harness.webContents,
+        senderFrame: { url: harness.loadedUrl! },
+      },
       { schema: 1, type: "operator-action", action: "start", extra: true },
     );
     listener!(
-      { senderFrame: { url: "https://example.invalid/show" } },
+      {
+        sender: harness.webContents,
+        senderFrame: { url: "https://example.invalid/show" },
+      },
       { schema: 1, type: "operator-action", action: "start" },
     );
     expect(coordinator.diagnostics().state).toBe("ready");
     expect(harness.sampledPids).toEqual([]);
 
     listener!(
-      { senderFrame: { url: harness.loadedUrl! } },
+      {
+        sender: harness.webContents,
+        senderFrame: { url: harness.loadedUrl! },
+      },
       { schema: 1, type: "operator-action", action: "start" },
     );
     await new Promise<void>((resolve) => setImmediate(resolve));

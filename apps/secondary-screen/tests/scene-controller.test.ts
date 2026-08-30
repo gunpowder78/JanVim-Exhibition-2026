@@ -258,6 +258,81 @@ describe("secondary scene controller", () => {
     expect(frames.pending()).toBe(0);
   });
 
+  it("rejects stale generations and presents the first cue owned by the current generation", () => {
+    const { root, controller } = makeController();
+    const frames = new FakeAnimationFrames();
+    const sent: RendererToControllerEvent[] = [];
+    bindTask9Runtime(controller, frames, sent);
+    const stalePrompt = visualCue("stale-prompt", "prompt", {
+      text: "stale generation text",
+    });
+    const currentPrompt = visualCue("current-prompt", "prompt", {
+      text: "current generation text",
+    });
+
+    controller.applyEvent({
+      schema: 1,
+      type: "run-cue",
+      generationId: 1,
+      loopId: "loop-1",
+      requiresPresentationAck: true,
+      cue: promptCue(),
+    });
+    frames.runNext();
+    controller.applyEvent({
+      schema: 1,
+      type: "run-status",
+      generationId: 2,
+      state: "black-recovering",
+    });
+    frames.runAll();
+    controller.applyEvent({
+      schema: 1,
+      type: "run-status",
+      generationId: 1,
+      state: "ready",
+    });
+    controller.applyEvent({
+      schema: 1,
+      type: "run-cue",
+      generationId: 1,
+      loopId: "loop-1",
+      requiresPresentationAck: false,
+      cue: stalePrompt,
+    });
+
+    expect(sent.filter((event) => event.type === "presentation-ack")).toEqual(
+      [],
+    );
+    expect(root.dataset.controllerState).toBe("black-recovering");
+    expect(root.dataset.scene).toBe("black");
+    expect(root.textContent).not.toContain("stale generation text");
+
+    controller.applyEvent({
+      schema: 1,
+      type: "run-cue",
+      generationId: 2,
+      loopId: "loop-2",
+      requiresPresentationAck: true,
+      cue: currentPrompt,
+    });
+    expect(root.textContent).toContain("current generation text");
+    expect(sent).toEqual([]);
+
+    frames.runNext();
+    expect(sent).toEqual([]);
+    frames.runNext();
+    expect(sent).toEqual([
+      {
+        schema: 1,
+        type: "presentation-ack",
+        generationId: 2,
+        loopId: "loop-2",
+        cueId: "current-prompt",
+      },
+    ]);
+  });
+
   it("keeps the G2 ready page on the same closed Start action", () => {
     const { root, controller } = makeController();
     const frames = new FakeAnimationFrames();

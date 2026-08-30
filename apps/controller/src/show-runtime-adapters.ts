@@ -1272,18 +1272,34 @@ async function openShowSecondary(input: {
     (event) => {
       for (const listener of [...eventListeners]) listener(event);
     },
+    window.webContents,
   );
   let disposed = false;
   const dispose = (): void => {
     if (disposed) return;
     disposed = true;
-    closeEvents.removeListener("close", onWindowClose);
-    try {
-      disposeIpc();
-    } finally {
-      disposeGuards();
+    intentionalClose = true;
+    let cleanupError: unknown;
+    const cleanupActions: readonly (() => void)[] = [
+      () => closeEvents.removeListener("close", onWindowClose),
+      disposeIpc,
+      disposeGuards,
+      () => {
+        eventListeners.clear();
+        destroyedListeners.clear();
+      },
+      () => {
+        if (!window.isDestroyed()) window.close();
+      },
+    ];
+    for (const action of cleanupActions) {
+      try {
+        action();
+      } catch (error) {
+        cleanupError ??= error;
+      }
     }
-    eventListeners.clear();
+    if (cleanupError !== undefined) throw cleanupError;
   };
   const onClosed = (): void => {
     try {
@@ -1338,12 +1354,7 @@ async function openShowSecondary(input: {
       return () => destroyedListeners.delete(listener);
     },
     close: () => {
-      intentionalClose = true;
-      try {
-        dispose();
-      } finally {
-        if (!window.isDestroyed()) window.close();
-      }
+      dispose();
     },
     diagnostics: () => ({
       listeners: eventListeners.size + destroyedListeners.size,

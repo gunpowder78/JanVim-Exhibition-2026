@@ -15,7 +15,7 @@ import {
 import * as preloadModule from "../src/preload.ts";
 
 type RendererIpcListener = (
-  event: { senderFrame: { url: string } | null },
+  event: { sender?: unknown; senderFrame: { url: string } | null },
   payload: unknown,
 ) => void;
 
@@ -27,6 +27,7 @@ type Task9ControllerMain = {
     },
     readyPageUrl: string,
     onEvent: (event: RendererToControllerEvent) => void,
+    expectedSender?: unknown,
   ) => () => void;
 };
 
@@ -183,9 +184,7 @@ describe("controller composition root", () => {
       (preloadModule as { RENDERER_EVENT_CHANNEL?: string }).RENDERER_EVENT_CHANNEL,
     ).toBe("janvim-exhibition:renderer-event");
 
-    let registered:
-      | ((event: { senderFrame: { url: string } | null }, payload: unknown) => void)
-      | undefined;
+    let registered: RendererIpcListener | undefined;
     const removed: unknown[] = [];
     const received: RendererToControllerEvent[] = [];
     const ipc = {
@@ -220,7 +219,10 @@ describe("controller composition root", () => {
     );
     expect(received).toEqual([]);
 
-    registered?.({ senderFrame: { url: readyPageUrl } }, presentation);
+    registered?.(
+      { sender: { id: "unscoped-g2-sender" }, senderFrame: { url: readyPageUrl } },
+      presentation,
+    );
     expect(received).toEqual([presentation]);
 
     unbind?.();
@@ -229,6 +231,57 @@ describe("controller composition root", () => {
     expect(() =>
       bindLocalRendererEvents?.(ipc, "https://example.com/", () => undefined),
     ).toThrowError(/local file/i);
+  });
+
+  it("requires the exact current sender for Start, Stop, and presentation ACK", () => {
+    const bindLocalRendererEvents = (controllerMain as Task9ControllerMain)
+      .bindLocalRendererEvents;
+    expect(bindLocalRendererEvents).toBeTypeOf("function");
+
+    let registered: RendererIpcListener | undefined;
+    const received: RendererToControllerEvent[] = [];
+    const readyPageUrl = "file:///show/safety.html";
+    const oldSender = { id: "old-renderer" };
+    const currentSender = { id: "current-renderer" };
+    const events = [
+      { schema: 1, type: "operator-action", action: "start" },
+      { schema: 1, type: "operator-action", action: "stop-show" },
+      {
+        schema: 1,
+        type: "presentation-ack",
+        generationId: 2,
+        loopId: "loop-2",
+        cueId: "cue-reset",
+      },
+    ] as const;
+
+    bindLocalRendererEvents?.(
+      {
+        on: (_channel, listener) => {
+          registered = listener;
+        },
+        removeListener: () => undefined,
+      },
+      readyPageUrl,
+      (event) => received.push(event),
+      currentSender,
+    );
+
+    for (const event of events) {
+      registered?.(
+        { sender: oldSender, senderFrame: { url: readyPageUrl } },
+        event,
+      );
+    }
+    expect(received).toEqual([]);
+
+    for (const event of events) {
+      registered?.(
+        { sender: currentSender, senderFrame: { url: readyPageUrl } },
+        event,
+      );
+    }
+    expect(received).toEqual(events);
   });
 
   it("emits Node-compatible ESM imports for the built Electron main", () => {

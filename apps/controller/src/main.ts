@@ -48,6 +48,7 @@ export interface ControllerDependencies {
 }
 
 export interface LocalStartIpcEvent {
+  sender?: unknown;
   senderFrame: { url: string } | null;
 }
 
@@ -153,12 +154,14 @@ export function bindLocalRendererEvents(
   ipcMain: IpcMainAdapter,
   readyPageUrl: string,
   onEvent: (event: RendererToControllerEvent) => void,
+  expectedSender?: unknown,
 ): () => void {
   if (!isLocalFileUrl(readyPageUrl)) {
     throw new Error("Ready page URL must be a local file URL");
   }
 
   const listener = (event: LocalStartIpcEvent, payload: unknown): void => {
+    if (expectedSender !== undefined && event.sender !== expectedSender) return;
     if (event.senderFrame?.url !== readyPageUrl) return;
     try {
       onEvent(parseRendererToControllerEvent(payload));

@@ -519,7 +519,10 @@ function createComposedHost(options: {
   const networkBoundaryEvents: NetworkBoundaryEvent[] = [];
   const ipcListeners = new Map<
     string,
-    (event: { senderFrame: { url: string } | null }, payload: unknown) => void
+    (
+      event: { sender?: unknown; senderFrame: { url: string } | null },
+      payload: unknown,
+    ) => void
   >();
   const processListeners = new Set<() => void>();
   const appListeners = new Set<(event: { preventDefault(): void }) => void>();
@@ -549,11 +552,21 @@ function createComposedHost(options: {
 
   const routeRendererEvent = (payload: RendererToControllerEvent): void => {
     const listener = [...ipcListeners.values()][0];
-    if (listener === undefined || loadedUrl === undefined) {
+    if (
+      listener === undefined ||
+      loadedUrl === undefined ||
+      currentWindow === undefined
+    ) {
       throw new Error("composed renderer is not bound");
     }
     rendererEvents.push(structuredClone(payload));
-    listener({ senderFrame: { url: loadedUrl } }, payload);
+    listener(
+      {
+        sender: currentWindow.webContents,
+        senderFrame: { url: loadedUrl },
+      },
+      payload,
+    );
   };
 
   class ComposedWebContents extends EventEmitter {
@@ -694,7 +707,7 @@ function createComposedHost(options: {
       on: (
         channel: string,
         listener: (
-          event: { senderFrame: { url: string } | null },
+          event: { sender?: unknown; senderFrame: { url: string } | null },
           payload: unknown,
         ) => void,
       ) => ipcListeners.set(channel, listener),

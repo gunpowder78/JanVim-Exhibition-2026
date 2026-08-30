@@ -44,6 +44,7 @@ export class SecondarySceneController {
   private firstPresentationFrame?: number;
   private secondPresentationFrame?: number;
   private presentationEpoch = 0;
+  private activeGenerationId?: number;
   private statusKey = "";
 
   public constructor(
@@ -70,10 +71,12 @@ export class SecondarySceneController {
     }
     if ("type" in event) {
       if (event.type === "run-status") {
+        if (!this.adoptGeneration(event.generationId)) return;
         this.applyRunStatus(event);
         return;
       }
       if (event.type === "run-cue") {
+        if (!this.adoptGeneration(event.generationId)) return;
         this.apply(event.cue);
         if (event.requiresPresentationAck) this.schedulePresentationAck(event);
       }
@@ -308,25 +311,55 @@ export class SecondarySceneController {
 
   private schedulePresentationAck(event: RunCueEvent): void {
     const runtime = this.runtime;
-    if (runtime === undefined) return;
+    const generationId = this.activeGenerationId;
+    if (runtime === undefined || generationId !== event.generationId) return;
     this.cancelPresentationAck();
     const epoch = this.presentationEpoch;
 
     this.firstPresentationFrame = runtime.requestFrame(() => {
-      if (epoch !== this.presentationEpoch || this.runtime !== runtime) return;
+      if (
+        epoch !== this.presentationEpoch ||
+        this.runtime !== runtime ||
+        this.activeGenerationId !== generationId
+      ) {
+        return;
+      }
       this.firstPresentationFrame = undefined;
       this.secondPresentationFrame = runtime.requestFrame(() => {
-        if (epoch !== this.presentationEpoch || this.runtime !== runtime) return;
+        if (
+          epoch !== this.presentationEpoch ||
+          this.runtime !== runtime ||
+          this.activeGenerationId !== generationId
+        ) {
+          return;
+        }
         this.secondPresentationFrame = undefined;
         runtime.sendRendererEvent({
           schema: 1,
           type: "presentation-ack",
-          generationId: event.generationId,
+          generationId,
           loopId: event.loopId,
           cueId: event.cue.id,
         });
       });
     });
+  }
+
+  private adoptGeneration(generationId: number): boolean {
+    if (
+      this.activeGenerationId !== undefined &&
+      generationId < this.activeGenerationId
+    ) {
+      return false;
+    }
+    if (
+      this.activeGenerationId === undefined ||
+      generationId > this.activeGenerationId
+    ) {
+      this.cancelPresentationAck();
+      this.activeGenerationId = generationId;
+    }
+    return true;
   }
 
   private cancelPresentationAck(): void {
