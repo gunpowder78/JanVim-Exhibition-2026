@@ -20,6 +20,7 @@ import {
   type ResourceSamplerTimerHandle,
 } from "../src/resource-sampler.ts";
 import { RunTelemetry } from "../src/run-telemetry.ts";
+import type { EvidenceAcceptance } from "../src/show-run-evidence.ts";
 import {
   ShowRunCoordinator,
   type PrimaryCueCompletionEvent,
@@ -679,6 +680,7 @@ class FakeSession implements ShowRunSession {
 
 interface HarnessOptions {
   mode?: "Soak3" | "Show";
+  evidenceAcceptance?: EvidenceAcceptance;
   blockedPhase?: string;
   phaseDeferrals?: Map<string, Deferred>;
   prepareHash?: string;
@@ -1045,6 +1047,7 @@ function createHarness(options: HarnessOptions = {}) {
         throw new Error("injected evidence failure");
       }
       evidence.push({ result, diagnostics });
+      return options.evidenceAcceptance ?? "pass";
     },
     writeTerminalMarker: async (result, signal?: AbortSignal) => {
       trace.push(`terminal:${result.reason}`);
@@ -2169,6 +2172,50 @@ describe("show run coordinator", () => {
     expect(harness.coordinator.handleRendererEvent(startEvent())).toBe(false);
     expect(harness.coordinator.handleRendererEvent(stopEvent())).toBe(false);
     expect(harness.driverOptions).toHaveLength(1);
+  });
+
+  it("downgrades accepted shutdown to acceptance-failed before terminal publication", async () => {
+    const harness = createHarness({
+      mode: "Soak3",
+      evidenceAcceptance: "fail",
+    });
+    await startRunning(harness);
+
+    await completeResetBoundary(harness, 1, 10);
+    await completeResetBoundary(harness, 2, 20);
+    await completeResetBoundary(harness, 3, 30);
+
+    await expect(harness.coordinator.completion).resolves.toEqual({
+      ok: false,
+      reason: "acceptance-failed",
+    });
+    expect(harness.evidence.map(({ result }) => result)).toEqual([
+      { ok: true, reason: "soak-complete" },
+    ]);
+    expect(harness.terminalMarkers).toEqual([
+      { ok: false, reason: "acceptance-failed" },
+    ]);
+    expect(harness.trace).toContain("terminal:acceptance-failed");
+  });
+
+  it("keeps diagnostic evidence distinct from intentional command success", async () => {
+    const harness = createHarness({
+      mode: "Soak3",
+      evidenceAcceptance: "diagnostic",
+    });
+    await startRunning(harness);
+
+    await completeResetBoundary(harness, 1, 10);
+    await completeResetBoundary(harness, 2, 20);
+    await completeResetBoundary(harness, 3, 30);
+
+    await expect(harness.coordinator.completion).resolves.toEqual({
+      ok: true,
+      reason: "soak-complete",
+    });
+    expect(harness.terminalMarkers).toEqual([
+      { ok: true, reason: "soak-complete" },
+    ]);
   });
 
   it("retains bounded aggregates across 100 Show loops and queues Stop at boundary 100", async () => {

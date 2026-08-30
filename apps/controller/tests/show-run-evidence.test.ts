@@ -13,7 +13,9 @@ import { basename, dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  evaluateShowAcceptance,
   parseShowRunEvidence,
+  TASK9_ARTIFACT_IDENTITY,
   writeShowRunEvidenceAtomic,
   type LoopEvidence,
   type ShowRunEvidenceRecord,
@@ -24,8 +26,6 @@ const HASH_A = "a".repeat(64);
 const HASH_B = "b".repeat(64);
 const HASH_C = "c".repeat(64);
 const POEM_SHA256 = "d".repeat(64);
-const CORE_SHA256 =
-  "224b3457d89fbc6cf946359683632f29f9262bae08b6f0d2e3043a3a7a6d83b3";
 const PROTECTED_PATHS = [
   "D:\\VirtualData\\TempCache\\janvim-root-export-quarantine-20260826-110433-6473a2d7ebbc4524b66c61c07e540504",
   "D:\\VirtualData\\TempCache\\janvim-task5-cached-d42e9769283e47dc8b98cf94baee739d",
@@ -141,9 +141,7 @@ function validEvidenceRecord(
       tag: "v0.10.1-gmk.4",
       commit: "e95633101d93f8448b0f906e918b5d836ab95273",
       layoutEngine: "orthogonal",
-      lockSha256: HASH_B,
-      coreBytes: 18_866_688,
-      coreSha256: CORE_SHA256,
+      ...TASK9_ARTIFACT_IDENTITY,
     },
     content: {
       revision: "20260829-0001",
@@ -289,6 +287,25 @@ function reverseObjectKeys(value: unknown): unknown {
 }
 
 describe("strict show-run evidence schema", () => {
+  it("binds evidence to the exact frozen Task 9 artifact identity", () => {
+    expect(TASK9_ARTIFACT_IDENTITY).toEqual({
+      lockSha256:
+        "4f20b82db6807975799b68a5aea85679e67c75d99dbffe4a71bc5b35fc57b90d",
+      coreBytes: 18_866_688,
+      coreSha256:
+        "224b3457d89fbc6cf946359683632f29f9262bae08b6f0d2e3043a3a7a6d83b3",
+    });
+    expect(Object.isFrozen(TASK9_ARTIFACT_IDENTITY)).toBe(true);
+
+    const wrongLock = cloneRecord();
+    wrongLock.artifact.lockSha256 = HASH_B;
+    expect(() => parseShowRunEvidence(wrongLock)).toThrow(/artifact|lock/i);
+
+    const wrongCoreSize = cloneRecord();
+    wrongCoreSize.artifact.coreBytes = 18_866_687;
+    expect(() => parseShowRunEvidence(wrongCoreSize)).toThrow(/artifact|bytes/i);
+  });
+
   it("round-trips the minimal passing Soak3 record with three unique loops and five offline snapshots", () => {
     const record = validEvidenceRecord();
 
@@ -717,6 +734,10 @@ describe("strict show-run evidence schema", () => {
         "resources",
         (record) => { record.loops[0]!.resources.sampleIncomplete = true; },
       ],
+      [
+        "runtime count stability",
+        (record) => { record.loops[0]!.countsAtEnd.timers += 1; },
+      ],
     ];
 
     for (const [name, mutate] of mutations) {
@@ -724,6 +745,143 @@ describe("strict show-run evidence schema", () => {
       mutate(record);
       expect(() => parseShowRunEvidence(record), name).toThrow();
     }
+  });
+
+  it("evaluates every Task 9 pass gate before preserving a parseable fail record", () => {
+    const emptyScalar = () => scalarAggregate(0, null, null, null);
+    const mutations: Array<
+      [string, (record: ShowRunEvidenceRecord) => void]
+    > = [
+      ["drift boundary", (record) => setCumulativeDrift(record, 250)],
+      [
+        "secondary P95 boundary",
+        (record) => setAggregateP95(record, "secondaryPresentLatencyMs", 100),
+      ],
+      [
+        "instant primary P95 boundary",
+        (record) => setAggregateP95(record, "primaryInstantAckLatencyMs", 100),
+      ],
+      [
+        "insert overhead P95 boundary",
+        (record) => setAggregateP95(record, "primaryInsertOverheadMs", 100),
+      ],
+      [
+        "missing measured primary summary",
+        (record) => {
+          record.loops = record.loops.map((loop) => ({
+            ...loop,
+            completedPrimaryCueCount: 0,
+            primaryCompletionLatencyMs: latencySummary(0, null, null, null),
+            primaryInstantAckLatencyMs: latencySummary(0, null, null, null),
+            primaryInsertOverheadMs: latencySummary(0, null, null, null),
+          }));
+          record.aggregate.primaryCompletionLatencyMs = latencySummary(
+            0,
+            null,
+            null,
+            null,
+          );
+          record.aggregate.primaryInstantAckLatencyMs = latencySummary(
+            0,
+            null,
+            null,
+            null,
+          );
+          record.aggregate.primaryInsertOverheadMs = latencySummary(
+            0,
+            null,
+            null,
+            null,
+          );
+        },
+      ],
+      [
+        "incomplete resource sample",
+        (record) => { record.loops[0]!.resources.sampleIncomplete = true; },
+      ],
+      [
+        "empty process resource sample",
+        (record) => {
+          record.loops[0]!.resources.controller = {
+            rssBytes: emptyScalar(),
+            handleCount: emptyScalar(),
+          };
+        },
+      ],
+      [
+        "runtime count growth",
+        (record) => { record.loops[0]!.countsAtEnd.listeners += 1; },
+      ],
+      [
+        "reset hash mismatch",
+        (record) => { record.loops[0]!.resetBufferSha256 = HASH_A; },
+      ],
+      [
+        "shutdown phase failure",
+        (record) => { record.shutdown.agentShutdown = "failed"; },
+      ],
+      [
+        "retained lease",
+        (record) => { record.shutdown.leaseRemoved = false; },
+      ],
+      [
+        "online sample",
+        (record) => {
+          record.offlineSnapshots[0] = {
+            ...record.offlineSnapshots[0]!,
+            activeExternalDefaultRoutes: 1,
+            offline: false,
+          };
+          record.aggregate.offlineSampleCount = 4;
+          record.aggregate.onlineSampleCount = 1;
+          record.offlineVerified = false;
+        },
+      ],
+      ["incomplete logging", (record) => { record.loggingIncomplete = true; }],
+    ];
+
+    const passing = cloneRecord();
+    expect(
+      evaluateShowAcceptance(passing, {
+        requestedResultOk: true,
+        diagnosticConnected: false,
+      }),
+    ).toBe("pass");
+
+    for (const [name, mutate] of mutations) {
+      const record = cloneRecord();
+      mutate(record);
+      const acceptance = evaluateShowAcceptance(record, {
+        requestedResultOk: true,
+        diagnosticConnected: false,
+      });
+      expect(acceptance, name).toBe("fail");
+      record.aggregate.acceptanceOutcome = acceptance;
+      expect(
+        parseShowRunEvidence(record).aggregate.acceptanceOutcome,
+        `${name} preservation`,
+      ).toBe("fail");
+    }
+  });
+
+  it("keeps diagnostic runs distinct and rejects incomplete Soak3 cardinality", () => {
+    const diagnostic = validShowRecord();
+    expect(
+      evaluateShowAcceptance(diagnostic, {
+        requestedResultOk: true,
+        diagnosticConnected: true,
+      }),
+    ).toBe("diagnostic");
+
+    const incomplete = cloneRecord();
+    incomplete.loops = incomplete.loops.slice(0, 2);
+    incomplete.aggregate.completedLoops = 2;
+    expect(
+      evaluateShowAcceptance(incomplete, {
+        requestedResultOk: true,
+        diagnosticConnected: false,
+      }),
+    ).toBe("fail");
   });
 
   it("rejects secrets and every protected source or user-config path in nested evidence", () => {

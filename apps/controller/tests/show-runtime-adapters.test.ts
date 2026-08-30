@@ -246,10 +246,14 @@ function createValidationHarness(options: {
   activeExternalDefaultRoutes?: number;
   connectedExternalProfiles?: number;
   realpathOverrides?: Readonly<Record<string, string>>;
+  artifactLockBytes?: Buffer;
 } = {}) {
   const trace: string[] = [];
   const files = new Map<string, Buffer>([
-    [win32.join(repositoryRoot, "janvim-artifact.lock.json"), artifactLock],
+    [
+      win32.join(repositoryRoot, "janvim-artifact.lock.json"),
+      options.artifactLockBytes ?? artifactLock,
+    ],
     [win32.join(repositoryRoot, "show", "janvim-show.toml"), showConfig],
     [
       win32.join(repositoryRoot, "content", "fixture", "show.manifest.json"),
@@ -1498,6 +1502,24 @@ describe("real Task 9 show runtime adapters", () => {
     expect(harness.appListeners).toHaveLength(0);
   });
 
+  it("rejects a structurally valid artifact lock whose exact file hash changed", async () => {
+    const changedLock = Buffer.from(
+      artifactLock
+        .toString("utf8")
+        .replace('"archiveBytes": 31345595', '"archiveBytes": 31345594'),
+      "utf8",
+    );
+    const harness = createValidationHarness({ artifactLockBytes: changedLock });
+
+    await expect(harness.adapters.validate(showCommand())).rejects.toThrow(
+      /artifact.*lock.*hash/i,
+    );
+    expect(harness.trace).not.toContain("network-snapshot");
+    expect(harness.trace.some((event) => event.startsWith("verify-artifact:"))).toBe(
+      false,
+    );
+  });
+
   it.each([
     ["exhibition repository", repositoryRoot],
     ["JanVim product repository", "D:\\github\\JanVim"],
@@ -2373,10 +2395,7 @@ describe("real Task 9 show runtime adapters", () => {
       reason: "emergency-electron-quit",
     });
 
-    expect(harness.evidenceAttempts).toHaveLength(1);
-    expect(() =>
-      parseShowRunEvidence(harness.evidenceAttempts[0]!.value),
-    ).toThrow(/three loop|three network|Soak3/i);
+    expect(harness.evidenceAttempts).toHaveLength(0);
     expect(harness.evidenceWrites).toHaveLength(0);
     expect(harness.terminalWrites).toEqual([
       {

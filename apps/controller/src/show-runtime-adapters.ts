@@ -99,7 +99,11 @@ import type {
   NetworkSnapshotEvidence,
   ShowRunEvidenceRecord,
 } from "./show-run-evidence.js";
-import { writeShowRunEvidenceAtomic } from "./show-run-evidence.js";
+import {
+  evaluateShowAcceptance,
+  TASK9_ARTIFACT_IDENTITY,
+  writeShowRunEvidenceAtomic,
+} from "./show-run-evidence.js";
 import {
   ShowRunCoordinator,
   type CoordinatorDiagnostics,
@@ -112,8 +116,6 @@ import {
 import { placeJanVimWindow, type WindowPlacementReceipt } from "./window-placer.js";
 import { closePlacedJanVimWindow } from "./window-closer.js";
 
-const CORE_SHA256 =
-  "224b3457d89fbc6cf946359683632f29f9262bae08b6f0d2e3043a3a7a6d83b3";
 const JANVIM_PRODUCT_ROOT = "D:\\github\\JanVim";
 const P1_SKIP_COUNT = 3;
 const RUN_ID_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
@@ -418,11 +420,30 @@ function createCoordinator(
     },
     finalizeEvidence: async (result, diagnostics, signal) => {
       const current = requireInputs();
+      if (
+        command.mode === "Soak3" &&
+        diagnostics.aggregate.completedLoops < 3
+      ) {
+        return "fail";
+      }
+      const evidence = buildShowEvidence(
+        command,
+        current,
+        result,
+        diagnostics,
+        logger,
+      );
+      const acceptance = evaluateShowAcceptance(evidence, {
+        requestedResultOk: result.ok,
+        diagnosticConnected: command.networkPolicy === "DiagnosticConnected",
+      });
+      evidence.aggregate.acceptanceOutcome = acceptance;
       await host.writeShowEvidence(
         paths.evidence,
-        buildShowEvidence(command, current, result, diagnostics, logger),
+        evidence,
         signal,
       );
+      return acceptance;
     },
     writeTerminalMarker: async (result, signal) => {
       await host.writeTerminalMarker(
@@ -568,6 +589,16 @@ async function validateShowInputs(
     if (match === undefined) throw new Error(`Missing frozen input: ${label}`);
     return Buffer.from(match.bytes);
   };
+
+  const artifactLockFile = snapshot.files.find(
+    (entry) => entry.label === "artifact-lock",
+  );
+  if (
+    artifactLockFile === undefined ||
+    artifactLockFile.sha256 !== TASK9_ARTIFACT_IDENTITY.lockSha256
+  ) {
+    throw new Error("artifact-lock-hash-mismatch");
+  }
 
   const lock = artifactLockSchema.parse(
     JSON.parse(file("artifact-lock").toString("utf8")),
@@ -827,23 +858,6 @@ function buildShowEvidence(
         : 0,
   }));
   const loggingIncomplete = logger.snapshot().incomplete;
-  const canPass =
-    result.ok &&
-    offlineVerified &&
-    diagnostics.aggregate.completedLoops > 0 &&
-    diagnostics.aggregate.cumulativeVisibleDriftMs < 250 &&
-    shutdown.agentShutdown === "acknowledged" &&
-    shutdown.hwndClose === "posted" &&
-    shutdown.janvimExit === "natural" &&
-    shutdown.bridgeClose === "closed" &&
-    shutdown.leaseRemoved &&
-    !loggingIncomplete &&
-    diagnostics.aggregate.secondaryPresentLatencyMs.count > 0 &&
-    diagnostics.aggregate.primaryCompletionLatencyMs.count > 0 &&
-    diagnostics.aggregate.primaryInstantAckLatencyMs.count +
-      diagnostics.aggregate.primaryInsertOverheadMs.count ===
-      diagnostics.aggregate.primaryCompletionLatencyMs.count;
-
   return {
     schema: 1,
     runId: command.runId,
@@ -874,9 +888,7 @@ function buildShowEvidence(
       tag: "v0.10.1-gmk.4",
       commit: "e95633101d93f8448b0f906e918b5d836ab95273",
       layoutEngine: "orthogonal",
-      lockSha256: file("artifact-lock").sha256,
-      coreBytes: inputs.lock.coreBytes,
-      coreSha256: CORE_SHA256,
+      ...TASK9_ARTIFACT_IDENTITY,
     },
     content: {
       revision: inputs.manifest.contentRevision,
@@ -911,12 +923,7 @@ function buildShowEvidence(
       primaryInsertOverheadMs: {
         ...diagnostics.aggregate.primaryInsertOverheadMs,
       },
-      acceptanceOutcome:
-        command.networkPolicy === "DiagnosticConnected"
-          ? "diagnostic"
-          : canPass
-            ? "pass"
-            : "fail",
+      acceptanceOutcome: "fail",
     },
     recoveries: diagnostics.recoveries.map((recovery) => ({ ...recovery })),
     shutdown,
@@ -1655,7 +1662,7 @@ class RuntimeShowSession implements ShowRunSession {
         startedAtUtc: childStartedAtUtc,
         hwnd: placement.receipt.hwnd,
         executableRelativePath: "janvim-core.exe",
-        executableSha256: CORE_SHA256,
+        executableSha256: TASK9_ARTIFACT_IDENTITY.coreSha256,
       },
     };
     await this.options.host.writeRunLease(this.options.paths.runLease, lease);
@@ -2371,8 +2378,8 @@ const artifactLockSchema = z
     checksum: z.string().min(1),
     checksumSha256: hashSchema,
     core: z.literal("janvim-core.exe"),
-    coreBytes: z.literal(18_866_688),
-    coreSha256: z.literal(CORE_SHA256),
+    coreBytes: z.literal(TASK9_ARTIFACT_IDENTITY.coreBytes),
+    coreSha256: z.literal(TASK9_ARTIFACT_IDENTITY.coreSha256),
     runtimeLua: z.string().min(1),
     runtimeLuaSha256: hashSchema,
     artifactConfig: z.string().min(1),

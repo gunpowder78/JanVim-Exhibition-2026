@@ -12,6 +12,16 @@ import type {
   LoopTelemetrySummary,
 } from "./run-telemetry.js";
 
+export const TASK9_ARTIFACT_IDENTITY = Object.freeze({
+  lockSha256:
+    "4f20b82db6807975799b68a5aea85679e67c75d99dbffe4a71bc5b35fc57b90d",
+  coreBytes: 18_866_688,
+  coreSha256:
+    "224b3457d89fbc6cf946359683632f29f9262bae08b6f0d2e3043a3a7a6d83b3",
+} as const);
+
+export type EvidenceAcceptance = "pass" | "fail" | "diagnostic";
+
 export type NetworkSnapshotEvidence = {
   sampledAtMs: number;
   activeExternalDefaultRoutes: number;
@@ -63,7 +73,7 @@ export type RunAggregateEvidence = {
   primaryCompletionLatencyMs: LatencySummary;
   primaryInstantAckLatencyMs: LatencySummary;
   primaryInsertOverheadMs: LatencySummary;
-  acceptanceOutcome: "pass" | "fail" | "diagnostic";
+  acceptanceOutcome: EvidenceAcceptance;
 };
 
 export type ShowRunEvidenceRecord = {
@@ -96,9 +106,9 @@ export type ShowRunEvidenceRecord = {
     tag: "v0.10.1-gmk.4";
     commit: "e95633101d93f8448b0f906e918b5d836ab95273";
     layoutEngine: "orthogonal";
-    lockSha256: string;
-    coreBytes: number;
-    coreSha256: "224b3457d89fbc6cf946359683632f29f9262bae08b6f0d2e3043a3a7a6d83b3";
+    lockSha256: typeof TASK9_ARTIFACT_IDENTITY.lockSha256;
+    coreBytes: typeof TASK9_ARTIFACT_IDENTITY.coreBytes;
+    coreSha256: typeof TASK9_ARTIFACT_IDENTITY.coreSha256;
   };
   content: {
     revision: string;
@@ -133,8 +143,6 @@ const PUBLISHED_TEMP_CLEANUP_ATTEMPTS = 3;
 const HASH_PATTERN = /^[0-9a-f]{64}$/;
 const RUN_ID_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
 const CONTROLLER_RUN_ID_PATTERN = /^[A-Za-z0-9._-]{1,96}$/;
-const CORE_SHA256 =
-  "224b3457d89fbc6cf946359683632f29f9262bae08b6f0d2e3043a3a7a6d83b3";
 const JANVIM_PRODUCT_ROOT = "D:\\github\\JanVim";
 const USER_NVIM_CONFIG_FRAGMENT = "AppData\\Local\\nvim";
 const SECRET_TEXT_PATTERN =
@@ -216,9 +224,9 @@ const artifactSchema = z
     tag: z.literal("v0.10.1-gmk.4"),
     commit: z.literal("e95633101d93f8448b0f906e918b5d836ab95273"),
     layoutEngine: z.literal("orthogonal"),
-    lockSha256: hashSchema,
-    coreBytes: safePositiveIntegerSchema,
-    coreSha256: z.literal(CORE_SHA256),
+    lockSha256: z.literal(TASK9_ARTIFACT_IDENTITY.lockSha256),
+    coreBytes: z.literal(TASK9_ARTIFACT_IDENTITY.coreBytes),
+    coreSha256: z.literal(TASK9_ARTIFACT_IDENTITY.coreSha256),
   })
   .strict();
 
@@ -737,107 +745,180 @@ const showRunEvidenceSchema = z
     }
 
     if (record.aggregate.acceptanceOutcome !== "pass") return;
-
-    if (!record.offlineVerified) {
-      addIssue(
-        ["offlineVerified"],
-        "passing evidence requires offline verification",
-      );
-    }
-    if (record.aggregate.cumulativeVisibleDriftMs >= 250) {
-      addIssue(
-        ["aggregate", "cumulativeVisibleDriftMs"],
-        "passing cumulative visible drift must be below 250 ms",
-      );
-    }
-
-    const measuredSummaries: Array<
-      [keyof RunAggregateEvidence, LatencySummary, boolean]
-    > = [
-      [
-        "secondaryPresentLatencyMs",
-        record.aggregate.secondaryPresentLatencyMs,
-        true,
-      ],
-      [
-        "primaryCompletionLatencyMs",
-        record.aggregate.primaryCompletionLatencyMs,
-        false,
-      ],
-      [
-        "primaryInstantAckLatencyMs",
-        record.aggregate.primaryInstantAckLatencyMs,
-        true,
-      ],
-      [
-        "primaryInsertOverheadMs",
-        record.aggregate.primaryInsertOverheadMs,
-        true,
-      ],
-    ];
-    for (const [field, summary, gated] of measuredSummaries) {
-      if (summary.count === 0 || summary.p95Ms === null) {
-        addIssue(
-          ["aggregate", field],
-          "passing evidence requires a measured P95 summary",
-        );
-      } else if (gated && summary.p95Ms >= 100) {
-        addIssue(
-          ["aggregate", field, "p95Ms"],
-          "passing P95 must be below 100 ms",
-        );
-      }
-    }
-
-    for (let index = 0; index < record.loops.length; index += 1) {
-      const loop = record.loops[index]!;
-      if (loop.resetBufferSha256 !== record.content.poemSha256) {
-        addIssue(
-          ["loops", index, "resetBufferSha256"],
-          "passing reset hash must match the content poem hash",
-        );
-      }
-      if (loop.resources.sampleIncomplete) {
-        addIssue(
-          ["loops", index, "resources", "sampleIncomplete"],
-          "passing evidence requires complete resource samples",
-        );
-      }
-      for (const role of ["controller", "renderer", "janvim"] as const) {
-        if (
-          loop.resources[role].rssBytes.count === 0 ||
-          loop.resources[role].handleCount.count === 0
-        ) {
-          addIssue(
-            ["loops", index, "resources", role],
-            "passing evidence requires resource samples for every process",
-          );
-        }
-      }
-    }
-
-    if (
-      record.shutdown.agentShutdown !== "acknowledged" ||
-      record.shutdown.hwndClose !== "posted" ||
-      record.shutdown.janvimExit !== "natural" ||
-      record.shutdown.bridgeClose !== "closed" ||
-      !record.shutdown.leaseRemoved ||
-      record.shutdown.requestedBy === "fatal-fault" ||
-      (record.mode === "Soak3" &&
-        record.shutdown.requestedBy !== "soak-complete")
-    ) {
-      addIssue(
-        ["shutdown"],
-        "passing evidence requires the complete successful shutdown ladder",
-      );
-    }
-    if (record.loggingIncomplete) {
-      addIssue(
-        ["loggingIncomplete"],
-        "passing evidence requires complete bounded logging",
-      );
+    for (const failure of showAcceptanceFailures(record)) {
+      addIssue(failure.path, failure.message);
     }
   });
+
+type AcceptanceFailure = {
+  path: Array<string | number>;
+  message: string;
+};
+
+const RUNTIME_COUNT_FIELDS = [
+  "listeners",
+  "timers",
+  "connections",
+  "pendingCommands",
+] as const;
+
+function showAcceptanceFailures(
+  record: ShowRunEvidenceRecord,
+): AcceptanceFailure[] {
+  const failures: AcceptanceFailure[] = [];
+  const fail = (path: Array<string | number>, message: string): void => {
+    failures.push({ path, message });
+  };
+
+  if (
+    record.artifact.lockSha256 !== TASK9_ARTIFACT_IDENTITY.lockSha256 ||
+    record.artifact.coreBytes !== TASK9_ARTIFACT_IDENTITY.coreBytes ||
+    record.artifact.coreSha256 !== TASK9_ARTIFACT_IDENTITY.coreSha256
+  ) {
+    fail(["artifact"], "passing evidence requires the exact Task 9 artifact");
+  }
+
+  const expectedRetainedLoops = Math.min(record.aggregate.completedLoops, 3);
+  const expectedRetainedSnapshots = Math.min(
+    record.aggregate.completedLoops + 2,
+    record.mode === "Soak3" ? 5 : 8,
+  );
+  const cardinalityAccepted =
+    record.aggregate.completedLoops > 0 &&
+    record.loops.length === expectedRetainedLoops &&
+    record.offlineSnapshots.length === expectedRetainedSnapshots &&
+    (record.mode !== "Soak3" || record.aggregate.completedLoops === 3);
+  if (!cardinalityAccepted) {
+    fail(
+      ["loops"],
+      "passing evidence requires the exact mode loop and sample cardinality",
+    );
+  }
+
+  if (
+    !record.offlineVerified ||
+    record.offlineSnapshots.length === 0 ||
+    record.offlineSnapshots.some((snapshot) => !snapshot.offline) ||
+    record.aggregate.offlineSampleCount !== record.offlineSnapshots.length ||
+    record.aggregate.onlineSampleCount !== 0
+  ) {
+    fail(["offlineVerified"], "passing evidence requires offline verification");
+  }
+  if (record.aggregate.cumulativeVisibleDriftMs >= 250) {
+    fail(
+      ["aggregate", "cumulativeVisibleDriftMs"],
+      "passing cumulative visible drift must be below 250 ms",
+    );
+  }
+
+  const measuredSummaries: Array<
+    [keyof RunAggregateEvidence, LatencySummary, boolean]
+  > = [
+    [
+      "secondaryPresentLatencyMs",
+      record.aggregate.secondaryPresentLatencyMs,
+      true,
+    ],
+    [
+      "primaryCompletionLatencyMs",
+      record.aggregate.primaryCompletionLatencyMs,
+      false,
+    ],
+    [
+      "primaryInstantAckLatencyMs",
+      record.aggregate.primaryInstantAckLatencyMs,
+      true,
+    ],
+    [
+      "primaryInsertOverheadMs",
+      record.aggregate.primaryInsertOverheadMs,
+      true,
+    ],
+  ];
+  for (const [field, summary, gated] of measuredSummaries) {
+    if (summary.count === 0 || summary.p95Ms === null) {
+      fail(
+        ["aggregate", field],
+        "passing evidence requires a measured P95 summary",
+      );
+    } else if (gated && summary.p95Ms >= 100) {
+      fail(
+        ["aggregate", field, "p95Ms"],
+        "passing P95 must be below 100 ms",
+      );
+    }
+  }
+
+  for (let index = 0; index < record.loops.length; index += 1) {
+    const loop = record.loops[index]!;
+    if (loop.resetBufferSha256 !== record.content.poemSha256) {
+      fail(
+        ["loops", index, "resetBufferSha256"],
+        "passing reset hash must match the content poem hash",
+      );
+    }
+    if (loop.resources.sampleIncomplete) {
+      fail(
+        ["loops", index, "resources", "sampleIncomplete"],
+        "passing evidence requires complete resource samples",
+      );
+    }
+    for (const role of ["controller", "renderer", "janvim"] as const) {
+      if (
+        loop.resources[role].rssBytes.count === 0 ||
+        loop.resources[role].handleCount.count === 0
+      ) {
+        fail(
+          ["loops", index, "resources", role],
+          "passing evidence requires resource samples for every process",
+        );
+      }
+    }
+    for (const field of RUNTIME_COUNT_FIELDS) {
+      if (loop.countsAtEnd[field] > loop.countsAtStart[field]) {
+        fail(
+          ["loops", index, "countsAtEnd", field],
+          "passing evidence cannot contain runtime count growth",
+        );
+      }
+    }
+  }
+
+  const expectedShutdownReason =
+    record.mode === "Soak3" ? "soak-complete" : "operator-stop";
+  if (
+    record.shutdown.agentShutdown !== "acknowledged" ||
+    record.shutdown.hwndClose !== "posted" ||
+    record.shutdown.janvimExit !== "natural" ||
+    record.shutdown.bridgeClose !== "closed" ||
+    !record.shutdown.leaseRemoved ||
+    record.shutdown.requestedBy !== expectedShutdownReason
+  ) {
+    fail(
+      ["shutdown"],
+      "passing evidence requires the complete successful shutdown ladder",
+    );
+  }
+  if (record.loggingIncomplete) {
+    fail(
+      ["loggingIncomplete"],
+      "passing evidence requires complete bounded logging",
+    );
+  }
+  return failures;
+}
+
+export function evaluateShowAcceptance(
+  record: ShowRunEvidenceRecord,
+  options: {
+    requestedResultOk: boolean;
+    diagnosticConnected: boolean;
+  },
+): EvidenceAcceptance {
+  if (options.diagnosticConnected) return "diagnostic";
+  if (!options.requestedResultOk) return "fail";
+  return showAcceptanceFailures(record).length === 0 ? "pass" : "fail";
+}
 
 export function parseShowRunEvidence(value: unknown): ShowRunEvidenceRecord {
   const record = showRunEvidenceSchema.parse(value) as ShowRunEvidenceRecord;

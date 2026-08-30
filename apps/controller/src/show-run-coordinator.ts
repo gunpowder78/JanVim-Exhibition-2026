@@ -21,6 +21,7 @@ import type {
   ResourceSummary,
 } from "./resource-sampler.js";
 import type {
+  EvidenceAcceptance,
   NetworkSnapshotEvidence,
   RuntimeCountEvidence,
 } from "./show-run-evidence.js";
@@ -153,7 +154,7 @@ export interface ShowRunCoordinatorDependencies {
     result: ShowRunResult,
     diagnostics: CoordinatorDiagnostics,
     signal: AbortSignal,
-  ): Promise<void>;
+  ): Promise<EvidenceAcceptance>;
   writeTerminalMarker(
     result: ShowRunResult,
     signal: AbortSignal,
@@ -2362,7 +2363,7 @@ export class ShowRunCoordinator {
 
       let finalResult = this.classifyShutdownResult(result);
       const evidenceDiagnostics = this.diagnostics();
-      await this.runShutdownPhase(
+      const evidenceAcceptance = await this.runShutdownPhase(
         "evidence-write-failed",
         FINALIZATION_PHASE_TIMEOUT_MS,
         (signal) =>
@@ -2372,13 +2373,16 @@ export class ShowRunCoordinator {
             signal,
           ),
       );
-      finalResult = this.classifyShutdownResult(result);
+      finalResult = this.classifyShutdownResult(finalResult);
+      if (finalResult.ok && evidenceAcceptance === "fail") {
+        finalResult = { ok: false, reason: "acceptance-failed" };
+      }
       await this.runShutdownPhase(
         "terminal-marker-failed",
         FINALIZATION_PHASE_TIMEOUT_MS,
         (signal) => this.dependencies.writeTerminalMarker(finalResult, signal),
       );
-      finalResult = this.classifyShutdownResult(result);
+      finalResult = this.classifyShutdownResult(finalResult);
       this.transition("stopped", finalResult.reason);
       this.resolveCompletion(finalResult);
     }).catch(() => {

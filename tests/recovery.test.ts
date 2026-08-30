@@ -1347,7 +1347,12 @@ describe("Task 9 recovery operations", () => {
     });
     expect(acceptedHost.evidenceValues).toHaveLength(1);
     expect(acceptedHost.evidenceAttempts).toHaveLength(1);
-    expect(acceptedHost.terminalValues).toHaveLength(1);
+    expect(acceptedHost.terminalValues).toEqual([
+      expect.objectContaining({
+        outcome: "intentional-success",
+        reason: "soak-complete",
+      }),
+    ]);
     const acceptedEvidence = acceptedHost.evidenceValues[0]!;
     expect(parseShowRunEvidence(acceptedHost.evidenceAttempts[0])).toEqual(
       acceptedEvidence,
@@ -1473,8 +1478,8 @@ describe("Task 9 recovery operations", () => {
       await advanceComposedLoop(rejectedHost);
     }
     await expect(rejectedCoordinator.completion).resolves.toEqual({
-      ok: true,
-      reason: "soak-complete",
+      ok: false,
+      reason: "acceptance-failed",
     });
     expect(rejectedHost.evidenceValues).toHaveLength(1);
     expect(parseShowRunEvidence(rejectedHost.evidenceAttempts[0])).toEqual(
@@ -1485,7 +1490,12 @@ describe("Task 9 recovery operations", () => {
       cumulativeVisibleDriftMs: 250,
       acceptanceOutcome: "fail",
     });
-    expect(rejectedHost.terminalValues).toHaveLength(1);
+    expect(rejectedHost.terminalValues).toEqual([
+      expect.objectContaining({
+        outcome: "intentional-failure",
+        reason: "acceptance-failed",
+      }),
+    ]);
     expect(
       rejectedHost.runtimeNetworkBoundaryEvents.filter(
         (event) => event.kind === "exec-file" && event.value.includes("Get-NetRoute"),

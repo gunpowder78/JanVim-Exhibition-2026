@@ -166,6 +166,17 @@ describe("Task 9 Electron command dispatcher", () => {
     },
   );
 
+  it("returns nonzero when strict evidence downgrades an otherwise successful run", async () => {
+    const harness = createHarness({
+      completion: { ok: false, reason: "acceptance-failed" },
+    });
+
+    await expect(
+      runShowElectronCommand(command("Soak3"), harness.adapters),
+    ).resolves.toBe(1);
+    expect(harness.disposeCount).toBe(1);
+  });
+
   it("forwards each bound emergency source to the one coordinator", async () => {
     const harness = createHarness({ deferredCompletion: true });
     const pending = runShowElectronCommand(command("Show"), harness.adapters);

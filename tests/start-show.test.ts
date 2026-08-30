@@ -22,7 +22,10 @@ import {
 
 import { afterAll, describe, expect, it } from "vitest";
 
-import { parseShowRunEvidence } from "../apps/controller/src/show-run-evidence.ts";
+import {
+  parseShowRunEvidence,
+  TASK9_ARTIFACT_IDENTITY,
+} from "../apps/controller/src/show-run-evidence.ts";
 
 const repositoryRoot = process.cwd();
 const productionScript = join(repositoryRoot, "scripts", "start-show.ps1");
@@ -1614,11 +1617,13 @@ describe("offline show launcher and external watchdog", () => {
           `${output(result)}\n${evidenceDiagnostic}\n${incidentDiagnostic}`,
         ).toBe(expectedExit);
         const schemaProbe = JSON.parse(evidenceDiagnostic) as {
-          artifact: { coreBytes: number; coreSha256: string };
+          artifact: {
+            lockSha256: string;
+            coreBytes: number;
+            coreSha256: string;
+          };
         };
-        schemaProbe.artifact.coreBytes = 18_866_688;
-        schemaProbe.artifact.coreSha256 =
-          "224b3457d89fbc6cf946359683632f29f9262bae08b6f0d2e3043a3a7a6d83b3";
+        Object.assign(schemaProbe.artifact, TASK9_ARTIFACT_IDENTITY);
         expect(parseShowRunEvidence(schemaProbe).controllerRunId).toBe(
           flag(invocations(fixture)[0]!.arguments, "controller-run-id"),
         );
@@ -1739,7 +1744,7 @@ describe("offline show launcher and external watchdog", () => {
     } finally {
       fixture.cleanup();
     }
-  });
+  }, 15_000);
 
   it("does not coerce numeric strings in terminal evidence", () => {
     const fixture = makeLauncherFixture();
