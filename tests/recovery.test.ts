@@ -915,6 +915,26 @@ function composedCommand(mode: "Soak3" | "Show"): ShowCommand & { mode: typeof m
 }
 
 const cueDeltasMs = [5_001, 7_001, 33_001, 10_001, 23_001, 12_001] as const;
+const forbiddenNetworkProbeUrls = [
+  "http://attempt-recorder.invalid/probe",
+  "https://dns.attempt-recorder.invalid/probe",
+  "ws://attempt-recorder.invalid/probe",
+  "wss://attempt-recorder.invalid/probe",
+] as const;
+
+function expectNoExternalNetworkAttempts(
+  host: ReturnType<typeof createComposedHost>,
+): void {
+  expect(host.networkAttempts).toEqual([]);
+}
+
+function probeCancelledForbiddenNetworkAttempts(
+  host: ReturnType<typeof createComposedHost>,
+): void {
+  for (const url of forbiddenNetworkProbeUrls) {
+    expect(host.probeRemoteRequest(url), url).toEqual({ cancel: true });
+  }
+}
 
 async function startComposedRun(
   host: ReturnType<typeof createComposedHost>,
@@ -922,15 +942,8 @@ async function startComposedRun(
 ) {
   const coordinator = host.adapters.createCoordinator(composedCommand(mode));
   await expect(coordinator.boot()).resolves.toEqual({ ready: true });
-  expect(host.networkAttempts).toEqual([]);
-  for (const url of [
-    "http://attempt-recorder.invalid/probe",
-    "https://dns.attempt-recorder.invalid/probe",
-    "ws://attempt-recorder.invalid/probe",
-    "wss://attempt-recorder.invalid/probe",
-  ]) {
-    expect(host.probeRemoteRequest(url), url).toEqual({ cancel: true });
-  }
+  expectNoExternalNetworkAttempts(host);
+  probeCancelledForbiddenNetworkAttempts(host);
   expect(host.networkAttempts).toEqual(["http", "https", "dns", "ws", "wss"]);
   host.clearNetworkAttempts();
   host.beginRuntimeNetworkObservation();
@@ -1237,6 +1250,25 @@ describe("Task 9 recovery operations", () => {
     }
   });
 
+  it("rejects forbidden post-clear WebRequests with the accepted-run assertion", async () => {
+    const host = createComposedHost();
+    const coordinator = host.adapters.createCoordinator(composedCommand("Show"));
+    await expect(coordinator.boot()).resolves.toEqual({ ready: true });
+
+    expectNoExternalNetworkAttempts(host);
+    probeCancelledForbiddenNetworkAttempts(host);
+    expect(host.networkAttempts).toEqual(["http", "https", "dns", "ws", "wss"]);
+    host.clearNetworkAttempts();
+    host.beginRuntimeNetworkObservation();
+
+    probeCancelledForbiddenNetworkAttempts(host);
+    expect(host.networkAttempts).toEqual(["http", "https", "dns", "ws", "wss"]);
+    expect(() => expectNoExternalNetworkAttempts(host)).toThrowError();
+
+    host.clearNetworkAttempts();
+    await coordinator.requestEmergencyStop("sigint");
+  });
+
   it("composes the strict dispatcher, fake-clock Soak3, telemetry, resources, and evidence threshold", async () => {
     const acceptedHost = createComposedHost({
       resetPrimaryDelaysMs: [83, 83, 83],
@@ -1375,7 +1407,7 @@ describe("Task 9 recovery operations", () => {
         (event) => event.kind === "exec-file" && event.value.includes("Get-NetRoute"),
       ),
     ).toHaveLength(4);
-    expect(acceptedHost.networkAttempts).toEqual([]);
+    expectNoExternalNetworkAttempts(acceptedHost);
 
     const rejectedHost = createComposedHost({
       resetPrimaryDelaysMs: [84, 83, 83],
@@ -1403,7 +1435,7 @@ describe("Task 9 recovery operations", () => {
         (event) => event.kind === "exec-file" && event.value.includes("Get-NetRoute"),
       ),
     ).toHaveLength(4);
-    expect(rejectedHost.networkAttempts).toEqual([]);
+    expectNoExternalNetworkAttempts(rejectedHost);
   });
 
   it("safe-cruises a secondary loss and replaces only the secondary with a fresh loop", async () => {
@@ -1592,7 +1624,7 @@ describe("Task 9 recovery operations", () => {
         ).size,
       ).toBe(writeBacksAtBoundary.length);
       assertRuntimeLogBounds(host.logStorage);
-      expect(host.networkAttempts).toEqual([]);
+      expectNoExternalNetworkAttempts(host);
     }
     const completion = await coordinator.completion;
     expect(
@@ -1638,7 +1670,7 @@ describe("Task 9 recovery operations", () => {
         (event) => event.kind === "exec-file" && event.value.includes("Get-NetRoute"),
       ),
     ).toHaveLength(101);
-    expect(host.networkAttempts).toEqual([]);
+    expectNoExternalNetworkAttempts(host);
     assertRuntimeLogBounds(host.logStorage);
     assertDefaultLogBudgetBounds(new MemoryLogStorage());
   });
