@@ -352,9 +352,21 @@ interface RunOptions {
   routeDestinationPrefix?: string;
   routeInterfaceAlias?: string;
   routeNextHop?: string;
+  routeState?: "Alive" | "Dead";
   profileCount?: number;
   profileInterfaceAlias?: string;
-  profileIpv4Connectivity?: "Internet" | "NoTraffic";
+  profileIpv4Connectivity?:
+    | "Disconnected"
+    | "NoTraffic"
+    | "Subnet"
+    | "LocalNetwork"
+    | "Internet";
+  profileIpv6Connectivity?:
+    | "Disconnected"
+    | "NoTraffic"
+    | "Subnet"
+    | "LocalNetwork"
+    | "Internet";
   janvimPid?: number;
   janvimStartedAtUtc?: string;
   janvimExecutableRelativePath?: string;
@@ -838,7 +850,7 @@ function Get-NetRoute {
             DestinationPrefix = $env:SHOW_TEST_ROUTE_DESTINATION_PREFIX
             NextHop = $env:SHOW_TEST_ROUTE_NEXT_HOP
             InterfaceAlias = $env:SHOW_TEST_ROUTE_INTERFACE_ALIAS
-            State = 'Alive'
+            State = $env:SHOW_TEST_ROUTE_STATE
         }
     }
 }
@@ -855,7 +867,7 @@ function Get-NetConnectionProfile {
         [pscustomobject]@{
             InterfaceAlias = $env:SHOW_TEST_PROFILE_INTERFACE_ALIAS
             IPv4Connectivity = $env:SHOW_TEST_PROFILE_IPV4_CONNECTIVITY
-            IPv6Connectivity = 'NoTraffic'
+            IPv6Connectivity = $env:SHOW_TEST_PROFILE_IPV6_CONNECTIVITY
         }
     }
 }
@@ -1291,11 +1303,14 @@ function runLauncher(
         SHOW_TEST_ROUTE_INTERFACE_ALIAS:
           options.routeInterfaceAlias ?? "Ethernet",
         SHOW_TEST_ROUTE_NEXT_HOP: options.routeNextHop ?? "10.0.0.1",
+        SHOW_TEST_ROUTE_STATE: options.routeState ?? "Alive",
         SHOW_TEST_PROFILE_COUNT: String(options.profileCount ?? 0),
         SHOW_TEST_PROFILE_INTERFACE_ALIAS:
           options.profileInterfaceAlias ?? "Ethernet",
         SHOW_TEST_PROFILE_IPV4_CONNECTIVITY:
           options.profileIpv4Connectivity ?? "Internet",
+        SHOW_TEST_PROFILE_IPV6_CONNECTIVITY:
+          options.profileIpv6Connectivity ?? "NoTraffic",
         SHOW_TEST_INVOCATION_LOG: fixture.invocationLog,
         SHOW_TEST_SEQUENCE_LOG: fixture.sequenceLog,
         SHOW_TEST_CLOSE_LOG: fixture.closeLog,
@@ -2222,41 +2237,80 @@ describe("offline show launcher and external watchdog", () => {
     }
   }, 15_000);
 
-  it("rejects every alive default route and connected profile under OfflineRequired", () => {
-    for (const options of [
-      { routeCount: 1, profileCount: 0 },
-      { routeCount: 1, profileCount: 0, routeNextHop: "0.0.0.0" },
-      {
-        routeCount: 1,
-        profileCount: 0,
-        routeInterfaceAlias: "Loopback-looking external route",
-      },
-      {
-        routeCount: 1,
-        profileCount: 0,
-        routeDestinationPrefix: "10.9.0.0/16",
-      },
-      { routeCount: 0, profileCount: 1 },
-      {
-        routeCount: 0,
-        profileCount: 1,
-        profileInterfaceAlias: "Loopback-looking external profile",
-      },
-    ]) {
+  it.each([
+    ["alive non-default", "10.0.0.0/8", "Alive", "Ethernet", false],
+    [
+      "alive IPv4 default with a loopback-looking alias",
+      "0.0.0.0/0",
+      "Alive",
+      "Loopback Pseudo-Interface 1",
+      true,
+    ],
+    ["alive IPv6 default with a localized alias", "::/0", "Alive", "任意本地化名称", true],
+    ["dead IPv4 default", "0.0.0.0/0", "Dead", "Ethernet", false],
+  ] as const)(
+    "classifies the %s route by exact prefix and state",
+    (_label, routeDestinationPrefix, routeState, routeInterfaceAlias, blocked) => {
       const fixture = makeLauncherFixture();
       try {
         const result = runLauncher(
           fixture,
           launcherArguments(fixture, "ValidateOnly"),
-          options,
+          {
+            behavior: "matching-success",
+            routeCount: 1,
+            profileCount: 0,
+            routeDestinationPrefix,
+            routeState,
+            routeInterfaceAlias,
+          },
         );
-        expect(result.status).not.toBe(0);
+        if (blocked) {
+          expect(result.status, output(result)).not.toBe(0);
+          expect(invocations(fixture)).toHaveLength(0);
+        } else {
+          expect(result.status, output(result)).toBe(0);
+          expect(invocations(fixture)).toHaveLength(1);
+        }
+      } finally {
+        fixture.cleanup();
+      }
+    },
+    20_000,
+  );
+
+  it.each([
+    ["IPv4 Subnet", "Subnet", "NoTraffic"],
+    ["IPv4 LocalNetwork", "LocalNetwork", "NoTraffic"],
+    ["IPv4 Internet", "Internet", "NoTraffic"],
+    ["IPv6 Subnet", "NoTraffic", "Subnet"],
+    ["IPv6 LocalNetwork", "NoTraffic", "LocalNetwork"],
+    ["IPv6 Internet", "NoTraffic", "Internet"],
+  ] as const)(
+    "rejects a profile with %s connectivity under OfflineRequired",
+    (_label, profileIpv4Connectivity, profileIpv6Connectivity) => {
+      const fixture = makeLauncherFixture();
+      try {
+        const result = runLauncher(
+          fixture,
+          launcherArguments(fixture, "ValidateOnly"),
+          {
+            behavior: "matching-success",
+            routeCount: 0,
+            profileCount: 1,
+            profileInterfaceAlias: "任意本地化名称",
+            profileIpv4Connectivity,
+            profileIpv6Connectivity,
+          },
+        );
+        expect(result.status, output(result)).not.toBe(0);
         expect(invocations(fixture)).toHaveLength(0);
       } finally {
         fixture.cleanup();
       }
-    }
-  }, 30_000);
+    },
+    20_000,
+  );
 
   it("terminates a hung network snapshot before any show process starts", () => {
     const fixture = makeLauncherFixture();

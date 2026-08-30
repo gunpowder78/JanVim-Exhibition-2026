@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import { readFileSync, readdirSync } from "node:fs";
 import { EventEmitter } from "node:events";
 import { join, win32 } from "node:path";
@@ -244,11 +245,128 @@ function showCommand(mode: ShowCommand["mode"] = "ValidateOnly"): ShowCommand {
   };
 }
 
+type FakeNetworkConnectivity =
+  | "Disconnected"
+  | "NoTraffic"
+  | "Subnet"
+  | "LocalNetwork"
+  | "Internet";
+
+interface FakeNetworkRoute {
+  AddressFamily: "IPv4" | "IPv6";
+  DestinationPrefix: string;
+  InterfaceAlias: string;
+  NextHop: string;
+  State: "Alive" | "Dead";
+}
+
+interface FakeNetworkProfile {
+  InterfaceAlias: string;
+  IPv4Connectivity: FakeNetworkConnectivity;
+  IPv6Connectivity: FakeNetworkConnectivity;
+}
+
+const fakeNetworkSnapshotHost = String.raw`
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+Import-Module -Name 'Microsoft.PowerShell.Utility' -ErrorAction Stop
+$PSModuleAutoLoadingPreference = 'None'
+Set-StrictMode -Version Latest
+$payloadBytes = [Convert]::FromBase64String([Console]::In.ReadToEnd().Trim())
+$payloadText = [Text.UTF8Encoding]::new($false, $true).GetString($payloadBytes)
+$payload = $payloadText | ConvertFrom-Json -Depth 8
+
+function Get-NetRoute {
+    [CmdletBinding()]
+    param(
+        [string]$AddressFamily,
+        [string]$DestinationPrefix
+    )
+
+    foreach ($route in @($payload.routes)) {
+        if (
+            $PSBoundParameters.ContainsKey('AddressFamily') -and
+            [string]$route.AddressFamily -cne $AddressFamily
+        ) {
+            continue
+        }
+        if (
+            $PSBoundParameters.ContainsKey('DestinationPrefix') -and
+            [string]$route.DestinationPrefix -cne $DestinationPrefix
+        ) {
+            continue
+        }
+        [pscustomobject]@{
+            AddressFamily = [string]$route.AddressFamily
+            DestinationPrefix = [string]$route.DestinationPrefix
+            InterfaceAlias = [string]$route.InterfaceAlias
+            NextHop = [string]$route.NextHop
+            State = [string]$route.State
+        }
+    }
+}
+
+function Get-NetConnectionProfile {
+    [CmdletBinding()]
+    param()
+
+    foreach ($profile in @($payload.profiles)) {
+        [pscustomobject]@{
+            InterfaceAlias = [string]$profile.InterfaceAlias
+            IPv4Connectivity = [string]$profile.IPv4Connectivity
+            IPv6Connectivity = [string]$profile.IPv6Connectivity
+        }
+    }
+}
+
+$scriptBytes = [Convert]::FromBase64String($env:SHOW_TEST_NETWORK_SCRIPT_BASE64)
+$scriptText = [Text.UTF8Encoding]::new($false, $true).GetString($scriptBytes)
+& ([scriptblock]::Create($scriptText))
+`;
+
+function executeFakeNetworkSnapshot(
+  script: string,
+  routes: readonly FakeNetworkRoute[],
+  profiles: readonly FakeNetworkProfile[],
+): { exitCode: number; stdout: string; stderr: string } {
+  const result = spawnSync(
+    "pwsh",
+    ["-NoProfile", "-NonInteractive", "-Command", fakeNetworkSnapshotHost],
+    {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        SHOW_TEST_NETWORK_SCRIPT_BASE64: Buffer.from(script, "utf8").toString(
+          "base64",
+        ),
+      },
+      input: Buffer.from(
+        JSON.stringify({ routes, profiles }),
+        "utf8",
+      ).toString("base64"),
+      maxBuffer: 1024 * 1024,
+      timeout: 5_000,
+      windowsHide: true,
+    },
+  );
+  if (result.error !== undefined && result.error.code !== "ETIMEDOUT") {
+    throw result.error;
+  }
+  return {
+    exitCode: result.status ?? 1,
+    stdout: result.stdout ?? "",
+    stderr:
+      result.error?.code === "ETIMEDOUT"
+        ? `${result.stderr ?? ""}\nfake-network-snapshot-timeout`
+        : (result.stderr ?? ""),
+  };
+}
+
 function createValidationHarness(options: {
   secondaryEntryUrl?: string;
   bridgeHost?: string;
-  activeExternalDefaultRoutes?: number;
-  connectedExternalProfiles?: number;
+  routes?: readonly FakeNetworkRoute[];
+  profiles?: readonly FakeNetworkProfile[];
   realpathOverrides?: Readonly<Record<string, string>>;
   artifactLockBytes?: Buffer;
 } = {}) {
@@ -370,17 +488,16 @@ function createValidationHarness(options: {
           maxStdoutBytes: 16_384,
           maxStderrBytes: 16_384,
         });
-        return {
-          exitCode: 0,
-          stdout: JSON.stringify({
-            schema: 1,
-            activeExternalDefaultRoutes:
-              options.activeExternalDefaultRoutes ?? 0,
-            connectedExternalProfiles:
-              options.connectedExternalProfiles ?? 0,
-          }),
-          stderr: "",
-        };
+        const commandIndex = args.indexOf("-Command");
+        const script = args[commandIndex + 1];
+        if (commandIndex < 0 || script === undefined) {
+          throw new Error("network snapshot command fixture is incomplete");
+        }
+        return executeFakeNetworkSnapshot(
+          script,
+          options.routes ?? [],
+          options.profiles ?? [],
+        );
       }
       throw new Error(`unexpected command: ${args.join(" ")}`);
     },
@@ -2243,18 +2360,168 @@ describe("real Task 9 show runtime adapters", () => {
     expect(stderr.match(/\[REDACTED\]/g)).toHaveLength(prohibited.length);
   });
 
+  it.each([
+    [
+      "alive non-default",
+      {
+        AddressFamily: "IPv4",
+        DestinationPrefix: "10.0.0.0/8",
+        InterfaceAlias: "Ethernet",
+        NextHop: "0.0.0.0",
+        State: "Alive",
+      },
+      false,
+    ],
+    [
+      "alive IPv4 default with a loopback-looking alias",
+      {
+        AddressFamily: "IPv4",
+        DestinationPrefix: "0.0.0.0/0",
+        InterfaceAlias: "Loopback Pseudo-Interface 1",
+        NextHop: "10.0.0.1",
+        State: "Alive",
+      },
+      true,
+    ],
+    [
+      "alive IPv6 default with a localized alias",
+      {
+        AddressFamily: "IPv6",
+        DestinationPrefix: "::/0",
+        InterfaceAlias: "任意本地化名称",
+        NextHop: "fe80::1",
+        State: "Alive",
+      },
+      true,
+    ],
+    [
+      "dead IPv4 default",
+      {
+        AddressFamily: "IPv4",
+        DestinationPrefix: "0.0.0.0/0",
+        InterfaceAlias: "Ethernet",
+        NextHop: "10.0.0.1",
+        State: "Dead",
+      },
+      false,
+    ],
+  ] as const)(
+    "classifies the fake-exec %s route by exact prefix and state",
+    async (_label, route, blocked) => {
+      const harness = createValidationHarness({ routes: [route] });
+      const validation = harness.adapters.validate(showCommand());
+
+      if (blocked) {
+        await expect(validation).rejects.toThrow(/offline|required|network/i);
+      } else {
+        await expect(validation).resolves.toBeUndefined();
+      }
+    },
+  );
+
+  it.each([
+    ["IPv4 Subnet", "Subnet", "NoTraffic"],
+    ["IPv4 LocalNetwork", "LocalNetwork", "NoTraffic"],
+    ["IPv4 Internet", "Internet", "NoTraffic"],
+    ["IPv6 Subnet", "NoTraffic", "Subnet"],
+    ["IPv6 LocalNetwork", "NoTraffic", "LocalNetwork"],
+    ["IPv6 Internet", "NoTraffic", "Internet"],
+  ] as const)(
+    "rejects a fake-exec profile with %s connectivity",
+    async (_label, IPv4Connectivity, IPv6Connectivity) => {
+      const harness = createValidationHarness({
+        profiles: [
+          {
+            InterfaceAlias: "任意本地化名称",
+            IPv4Connectivity,
+            IPv6Connectivity,
+          },
+        ],
+      });
+
+      await expect(harness.adapters.validate(showCommand())).rejects.toThrow(
+        /offline|required|network/i,
+      );
+    },
+  );
+
+  it.each([
+    [
+      "route",
+      {
+        routes: Array.from({ length: 1_025 }, () => ({
+          AddressFamily: "IPv4" as const,
+          DestinationPrefix: "0.0.0.0/0",
+          InterfaceAlias: "Ethernet",
+          NextHop: "10.0.0.1",
+          State: "Alive" as const,
+        })),
+      },
+    ],
+    [
+      "profile",
+      {
+        profiles: Array.from({ length: 257 }, () => ({
+          InterfaceAlias: "Ethernet",
+          IPv4Connectivity: "Internet" as const,
+          IPv6Connectivity: "NoTraffic" as const,
+        })),
+      },
+    ],
+  ] as const)(
+    "fails closed when the fake-exec %s snapshot exceeds its finite cap",
+    async (_label, network) => {
+      const harness = createValidationHarness(network);
+
+      await expect(
+        harness.adapters.validate({
+          ...showCommand(),
+          networkPolicy: "DiagnosticConnected",
+        }),
+      ).rejects.toThrow(/network.*snapshot/i);
+    },
+  );
+
   it("rejects online validation unless the explicit diagnostic policy is selected", async () => {
     const offlineRequired = createValidationHarness({
-      activeExternalDefaultRoutes: 1,
-      connectedExternalProfiles: 1,
+      routes: [
+        {
+          AddressFamily: "IPv4",
+          DestinationPrefix: "0.0.0.0/0",
+          InterfaceAlias: "Ethernet",
+          NextHop: "10.0.0.1",
+          State: "Alive",
+        },
+      ],
+      profiles: [
+        {
+          InterfaceAlias: "Ethernet",
+          IPv4Connectivity: "Internet",
+          IPv6Connectivity: "NoTraffic",
+        },
+      ],
     });
     await expect(
       offlineRequired.adapters.validate(showCommand()),
     ).rejects.toThrow(/offline|required|network/i);
 
     const diagnostic = createValidationHarness({
-      activeExternalDefaultRoutes: 1,
-      connectedExternalProfiles: 1,
+      routes: [
+        {
+          AddressFamily: "IPv6",
+          DestinationPrefix: "::/0",
+          InterfaceAlias: "任意本地化名称",
+          NextHop: "fe80::1",
+          State: "Alive",
+        },
+      ],
+      profiles: [
+        {
+          InterfaceAlias: "任意本地化名称",
+          IPv4Connectivity: "NoTraffic",
+          IPv6Connectivity: "Internet",
+        },
+      ],
     });
     await expect(
       diagnostic.adapters.validate({
@@ -2262,6 +2529,32 @@ describe("real Task 9 show runtime adapters", () => {
         networkPolicy: "DiagnosticConnected",
       }),
     ).resolves.toBeUndefined();
+  });
+
+  it("keeps DiagnosticConnected evidence explicitly non-accepting", async () => {
+    const harness = createStartupHarness();
+    const coordinator = harness.adapters.createCoordinator({
+      ...showCommand("Show"),
+      networkPolicy: "DiagnosticConnected",
+    });
+    const dependencies = (
+      coordinator as unknown as { dependencies: ShowRunCoordinatorDependencies }
+    ).dependencies;
+    await dependencies.validate();
+
+    await expect(
+      dependencies.finalizeEvidence(
+        { ok: true, reason: "operator-stop" },
+        coordinator.diagnostics(),
+        new AbortController().signal,
+      ),
+    ).resolves.toBe("diagnostic");
+    expect(harness.evidenceWrites).toHaveLength(1);
+    expect(harness.evidenceWrites[0]).toMatchObject({
+      value: {
+        aggregate: { acceptanceOutcome: "diagnostic" },
+      },
+    });
   });
 
   it("rejects a changed local entry and non-loopback bridge before runtime I/O", () => {

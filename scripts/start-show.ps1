@@ -1692,7 +1692,7 @@ $routes = @(
         ForEach-Object {
             [pscustomobject]@{
                 State = [string]$_.State
-                InterfaceAlias = [string]$_.InterfaceAlias
+                DestinationPrefix = [string]$_.DestinationPrefix
             }
         }
 )
@@ -1703,7 +1703,8 @@ $activeExternalRoute = @(
     $routes |
         Where-Object {
             $_.State -ceq 'Alive' -and
-                $_.InterfaceAlias -cnotmatch '^Loopback Pseudo-Interface [0-9]+$'
+                ($_.DestinationPrefix -ceq '0.0.0.0/0' -or
+                    $_.DestinationPrefix -ceq '::/0')
         } |
         Select-Object -First 1
 ).Count

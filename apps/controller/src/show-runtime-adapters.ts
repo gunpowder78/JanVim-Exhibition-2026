@@ -123,9 +123,13 @@ const LOOP_ID_MAX_BYTES = 64;
 const LOOP_ID_HASH_CHARACTERS = 12;
 const NETWORK_SNAPSHOT_SCRIPT = [
   "$ErrorActionPreference='Stop'",
-  "$routes=@(Get-NetRoute -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' | Where-Object { $_.InterfaceAlias -notmatch '^Loopback' })",
-  "$profiles=@(Get-NetConnectionProfile | Where-Object { $_.IPv4Connectivity -ne 'Disconnected' -and $_.IPv4Connectivity -ne 'NoTraffic' })",
-  "[ordered]@{schema=1;activeExternalDefaultRoutes=$routes.Count;connectedExternalProfiles=$profiles.Count}|ConvertTo-Json -Compress",
+  "$routes=@(Get-NetRoute -ErrorAction Stop|Select-Object -First 1025|ForEach-Object{[pscustomobject]@{State=[string]$_.State;DestinationPrefix=[string]$_.DestinationPrefix}})",
+  "if($routes.Count -gt 1024){throw 'network-route-cap-exceeded'}",
+  "$activeExternalRoutes=@($routes|Where-Object{$_.State -ceq 'Alive' -and ($_.DestinationPrefix -ceq '0.0.0.0/0' -or $_.DestinationPrefix -ceq '::/0')}).Count",
+  "$profiles=@(Get-NetConnectionProfile -ErrorAction Stop|Select-Object -First 257|ForEach-Object{[pscustomobject]@{IPv4Connectivity=[string]$_.IPv4Connectivity;IPv6Connectivity=[string]$_.IPv6Connectivity}})",
+  "if($profiles.Count -gt 256){throw 'network-profile-cap-exceeded'}",
+  "$connectedExternalProfiles=@($profiles|Where-Object{$_.IPv4Connectivity -cin @('Subnet','LocalNetwork','Internet') -or $_.IPv6Connectivity -cin @('Subnet','LocalNetwork','Internet')}).Count",
+  "[ordered]@{schema=1;activeExternalDefaultRoutes=$activeExternalRoutes;connectedExternalProfiles=$connectedExternalProfiles}|ConvertTo-Json -Compress",
 ].join(";");
 const PROCESS_SAMPLE_SCRIPT = [
   "& { param([int]$ProcessId)",
