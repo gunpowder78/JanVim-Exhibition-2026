@@ -19,17 +19,444 @@ const adapterPaths = [
 ];
 const maximumGraphModules = 256;
 const maximumEmittedModuleBytes = 16 * 1024 * 1024;
+const maximumLexerNesting = 128;
 const emittedExtensions = new Set([".js", ".mjs", ".cjs"]);
 const TypeScriptSourceExtension = /\.(?:ts|tsx|mts|cts)(?:[?#].*)?$/iu;
-const staticImport =
-  /(?:^|[;\n\r])\s*(?:import|export)\s+(?:(?:[^"'`;]|\r?\n)*?\s+from\s+)?["']([^"']+)["']/gu;
-const dynamicImport = /\bimport\s*\(\s*["']([^"']+)["']\s*\)/gu;
+const identifierStart = /[A-Z_a-z$]/u;
+const identifierContinue = /[\dA-Z_a-z$]/u;
+const regexPrefixKeywords = new Set([
+  "await",
+  "case",
+  "delete",
+  "do",
+  "else",
+  "in",
+  "instanceof",
+  "new",
+  "of",
+  "return",
+  "throw",
+  "typeof",
+  "void",
+  "yield",
+]);
+const controlHeaderKeywords = new Set(["catch", "for", "if", "switch", "while", "with"]);
+const punctuators = [
+  ">>>=",
+  "===",
+  "!==",
+  ">>>",
+  "**=",
+  "&&=",
+  "||=",
+  "??=",
+  "...",
+  "=>",
+  "==",
+  "!=",
+  "<=",
+  ">=",
+  "++",
+  "--",
+  "<<",
+  ">>",
+  "**",
+  "&&",
+  "||",
+  "??",
+  "+=",
+  "-=",
+  "*=",
+  "/=",
+  "%=",
+  "&=",
+  "|=",
+  "^=",
+  "?.",
+];
 
-function importedSpecifiers(source) {
-  return [
-    ...Array.from(source.matchAll(staticImport), (match) => match[1]),
-    ...Array.from(source.matchAll(dynamicImport), (match) => match[1]),
-  ];
+function malformedJavaScript(modulePath, detail) {
+  throw new Error(`Malformed emitted JavaScript: ${modulePath}: ${detail}`);
+}
+
+function regexCanStartAfter(token) {
+  if (token === undefined) return true;
+  if (token.type === "identifier") return regexPrefixKeywords.has(token.value);
+  if (["number", "regex", "string", "template"].includes(token.type)) return false;
+  if (["]", "}", "++", "--"].includes(token.value)) return false;
+  if (token.value === ")") return token.allowsRegexAfter === true;
+  return true;
+}
+
+function* lexJavaScript(source, modulePath) {
+  let index = 0;
+  let templateNesting = 0;
+
+  function readString(quote) {
+    const start = index;
+    index += 1;
+    const contentStart = index;
+    let escaped = false;
+    while (index < source.length) {
+      const character = source[index];
+      if (character === quote) {
+        const value = escaped ? undefined : source.slice(contentStart, index);
+        index += 1;
+        return { type: "string", value, escaped, start };
+      }
+      if (character === "\\") {
+        escaped = true;
+        index += 1;
+        if (index >= source.length) {
+          malformedJavaScript(modulePath, "unterminated string literal");
+        }
+        if (source[index] === "\r" && source[index + 1] === "\n") index += 1;
+        index += 1;
+        continue;
+      }
+      if (character === "\r" || character === "\n") {
+        malformedJavaScript(modulePath, "newline in string literal");
+      }
+      index += 1;
+    }
+    malformedJavaScript(modulePath, "unterminated string literal");
+  }
+
+  function readRegex() {
+    const start = index;
+    index += 1;
+    let inCharacterClass = false;
+    while (index < source.length) {
+      const character = source[index];
+      if (character === "\\") {
+        index += 2;
+        continue;
+      }
+      if (character === "\r" || character === "\n") {
+        malformedJavaScript(modulePath, "unterminated regular expression literal");
+      }
+      if (character === "[") {
+        inCharacterClass = true;
+        index += 1;
+        continue;
+      }
+      if (character === "]" && inCharacterClass) {
+        inCharacterClass = false;
+        index += 1;
+        continue;
+      }
+      if (character === "/" && !inCharacterClass) {
+        index += 1;
+        while (index < source.length && identifierContinue.test(source[index])) index += 1;
+        return { type: "regex", value: "regex", start };
+      }
+      index += 1;
+    }
+    malformedJavaScript(modulePath, "unterminated regular expression literal");
+  }
+
+  function* readTemplate() {
+    const start = index;
+    index += 1;
+    templateNesting += 1;
+    if (templateNesting > maximumLexerNesting) {
+      malformedJavaScript(modulePath, "template nesting limit exceeded");
+    }
+    try {
+      while (index < source.length) {
+        const character = source[index];
+        if (character === "\\") {
+          index += 2;
+          continue;
+        }
+        if (character === "`") {
+          index += 1;
+          return { type: "template", value: "template", start };
+        }
+        if (character === "$" && source[index + 1] === "{") {
+          index += 2;
+          yield* scanCode(true);
+          continue;
+        }
+        index += 1;
+      }
+      malformedJavaScript(modulePath, "unterminated template literal");
+    } finally {
+      templateNesting -= 1;
+    }
+  }
+
+  function* scanCode(stopAtTemplateExpression) {
+    const delimiters = [];
+    let previousToken;
+    while (index < source.length) {
+      const character = source[index];
+      if (/\s/u.test(character)) {
+        index += 1;
+        continue;
+      }
+      if (index === 0 && character === "#" && source[index + 1] === "!") {
+        const lineEnd = source.indexOf("\n", index + 2);
+        index = lineEnd < 0 ? source.length : lineEnd + 1;
+        continue;
+      }
+      if (character === "/" && source[index + 1] === "/") {
+        const lineEnd = source.indexOf("\n", index + 2);
+        index = lineEnd < 0 ? source.length : lineEnd + 1;
+        continue;
+      }
+      if (character === "/" && source[index + 1] === "*") {
+        const commentEnd = source.indexOf("*/", index + 2);
+        if (commentEnd < 0) malformedJavaScript(modulePath, "unterminated block comment");
+        index = commentEnd + 2;
+        continue;
+      }
+      if (character === '"' || character === "'") {
+        const token = readString(character);
+        token.precededByMemberAccess = false;
+        previousToken = token;
+        yield token;
+        continue;
+      }
+      if (character === "`") {
+        const token = yield* readTemplate();
+        token.precededByMemberAccess = false;
+        previousToken = token;
+        yield token;
+        continue;
+      }
+      if (character === "/" && regexCanStartAfter(previousToken)) {
+        const token = readRegex();
+        token.precededByMemberAccess = false;
+        previousToken = token;
+        yield token;
+        continue;
+      }
+      if (identifierStart.test(character)) {
+        const start = index;
+        index += 1;
+        while (index < source.length && identifierContinue.test(source[index])) index += 1;
+        const token = {
+          type: "identifier",
+          value: source.slice(start, index),
+          start,
+          precededByMemberAccess:
+            previousToken?.type === "punctuator" &&
+            (previousToken.value === "." || previousToken.value === "?."),
+        };
+        previousToken = token;
+        yield token;
+        continue;
+      }
+      if (/\d/u.test(character)) {
+        const start = index;
+        index += 1;
+        while (index < source.length && /[\dA-Z_a-z.]/u.test(source[index])) index += 1;
+        const token = { type: "number", value: source.slice(start, index), start };
+        previousToken = token;
+        yield token;
+        continue;
+      }
+
+      let value = punctuators.find((candidate) => source.startsWith(candidate, index));
+      if (value === undefined) value = character;
+      const start = index;
+      index += value.length;
+      if (["(", "[", "{"].includes(value)) {
+        if (delimiters.length >= maximumLexerNesting) {
+          malformedJavaScript(modulePath, "delimiter nesting limit exceeded");
+        }
+        delimiters.push({
+          value,
+          allowsRegexAfter:
+            value === "(" &&
+            previousToken?.type === "identifier" &&
+            controlHeaderKeywords.has(previousToken.value),
+        });
+      } else if ([")", "]", "}"].includes(value)) {
+        if (value === "}" && stopAtTemplateExpression && delimiters.length === 0) {
+          return;
+        }
+        const expectedOpening = { ")": "(", "]": "[", "}": "{" }[value];
+        const opening = delimiters.pop();
+        if (opening?.value !== expectedOpening) {
+          malformedJavaScript(modulePath, `unmatched ${value}`);
+        }
+        const token = {
+          type: "punctuator",
+          value,
+          start,
+          allowsRegexAfter: value === ")" && opening.allowsRegexAfter,
+        };
+        previousToken = token;
+        yield token;
+        continue;
+      }
+      const token = { type: "punctuator", value, start };
+      previousToken = token;
+      yield token;
+    }
+    if (stopAtTemplateExpression) {
+      malformedJavaScript(modulePath, "unterminated template expression");
+    }
+    if (delimiters.length > 0) {
+      malformedJavaScript(modulePath, "unterminated delimiter");
+    }
+  }
+
+  yield* scanCode(false);
+}
+
+function createTokenCursor(tokens) {
+  let lookahead;
+  return {
+    peek() {
+      if (lookahead === undefined) lookahead = tokens.next();
+      return lookahead.done ? undefined : lookahead.value;
+    },
+    take() {
+      const token = this.peek();
+      lookahead = undefined;
+      return token;
+    },
+  };
+}
+
+function requireToken(cursor, type, value, modulePath, syntax) {
+  const token = cursor.take();
+  if (token?.type !== type || (value !== undefined && token.value !== value)) {
+    malformedJavaScript(modulePath, syntax);
+  }
+  return token;
+}
+
+function moduleSpecifierFrom(token, modulePath) {
+  if (token?.type !== "string") {
+    malformedJavaScript(modulePath, "module specifier is not a string literal");
+  }
+  if (token.escaped) {
+    throw new Error(`Unsupported escaped module specifier: ${modulePath}`);
+  }
+  return token.value;
+}
+
+function consumeDelimited(cursor, opening, closing, modulePath, syntax) {
+  requireToken(cursor, "punctuator", opening, modulePath, syntax);
+  let depth = 1;
+  while (depth > 0) {
+    const token = cursor.take();
+    if (token === undefined) malformedJavaScript(modulePath, syntax);
+    if (token.type !== "punctuator") continue;
+    if (token.value === opening) depth += 1;
+    if (token.value === closing) depth -= 1;
+  }
+}
+
+function parseNamespaceImport(cursor, modulePath) {
+  requireToken(cursor, "punctuator", "*", modulePath, "invalid namespace import");
+  requireToken(cursor, "identifier", "as", modulePath, "invalid namespace import");
+  requireToken(cursor, "identifier", undefined, modulePath, "invalid namespace import");
+}
+
+function parseStaticImport(cursor, firstToken, modulePath) {
+  if (firstToken === undefined) {
+    malformedJavaScript(modulePath, "incomplete static import declaration");
+  }
+  if (firstToken.type === "punctuator" && firstToken.value === "*") {
+    parseNamespaceImport(cursor, modulePath);
+  } else if (firstToken.type === "punctuator" && firstToken.value === "{") {
+    consumeDelimited(cursor, "{", "}", modulePath, "invalid named import");
+  } else if (firstToken.type === "identifier") {
+    cursor.take();
+    if (cursor.peek()?.type === "punctuator" && cursor.peek().value === ",") {
+      cursor.take();
+      const secondary = cursor.peek();
+      if (secondary?.type === "punctuator" && secondary.value === "*") {
+        parseNamespaceImport(cursor, modulePath);
+      } else if (secondary?.type === "punctuator" && secondary.value === "{") {
+        consumeDelimited(cursor, "{", "}", modulePath, "invalid named import");
+      } else {
+        malformedJavaScript(modulePath, "invalid secondary import binding");
+      }
+    }
+  } else {
+    malformedJavaScript(modulePath, "invalid static import declaration");
+  }
+  requireToken(cursor, "identifier", "from", modulePath, "static import lacks from");
+  return moduleSpecifierFrom(cursor.take(), modulePath);
+}
+
+function parseLiteralCall(cursor, modulePath, kind) {
+  requireToken(cursor, "punctuator", "(", modulePath, `invalid ${kind} call`);
+  const token = cursor.take();
+  if (token?.type !== "string") {
+    throw new Error(`Unsupported ambiguous ${kind}: ${modulePath}`);
+  }
+  const specifier = moduleSpecifierFrom(token, modulePath);
+  const closing = cursor.take();
+  if (closing?.type !== "punctuator" || closing.value !== ")") {
+    throw new Error(`Unsupported ambiguous ${kind}: ${modulePath}`);
+  }
+  return specifier;
+}
+
+function discoverModuleSpecifiers(source, modulePath) {
+  const cursor = createTokenCursor(lexJavaScript(source, modulePath));
+  const specifiers = [];
+  while (cursor.peek() !== undefined) {
+    const token = cursor.take();
+    if (
+      token.type === "identifier" &&
+      token.value === "import" &&
+      !token.precededByMemberAccess
+    ) {
+      const next = cursor.peek();
+      if (next?.type === "punctuator" && next.value === ".") {
+        cursor.take();
+        requireToken(cursor, "identifier", "meta", modulePath, "invalid import.meta");
+      } else if (next?.type === "punctuator" && next.value === "(") {
+        specifiers.push(parseLiteralCall(cursor, modulePath, "dynamic import"));
+      } else if (next?.type === "string") {
+        specifiers.push(moduleSpecifierFrom(cursor.take(), modulePath));
+      } else {
+        specifiers.push(parseStaticImport(cursor, next, modulePath));
+      }
+      continue;
+    }
+    if (
+      token.type === "identifier" &&
+      token.value === "export" &&
+      !token.precededByMemberAccess
+    ) {
+      const next = cursor.peek();
+      if (next?.type === "punctuator" && next.value === "*") {
+        cursor.take();
+        if (cursor.peek()?.type === "identifier" && cursor.peek().value === "as") {
+          cursor.take();
+          requireToken(cursor, "identifier", undefined, modulePath, "invalid export namespace");
+        }
+        requireToken(cursor, "identifier", "from", modulePath, "export lacks from");
+        specifiers.push(moduleSpecifierFrom(cursor.take(), modulePath));
+      } else if (next?.type === "punctuator" && next.value === "{") {
+        consumeDelimited(cursor, "{", "}", modulePath, "invalid named export");
+        if (cursor.peek()?.type === "identifier" && cursor.peek().value === "from") {
+          cursor.take();
+          specifiers.push(moduleSpecifierFrom(cursor.take(), modulePath));
+        }
+      }
+      continue;
+    }
+    if (
+      token.type === "identifier" &&
+      token.value === "require" &&
+      !token.precededByMemberAccess &&
+      cursor.peek()?.type === "punctuator" &&
+      cursor.peek().value === "("
+    ) {
+      specifiers.push(parseLiteralCall(cursor, modulePath, "require"));
+    }
+  }
+  return specifiers;
 }
 
 function assertInsideRoot(path, root) {
@@ -114,7 +541,7 @@ function verifyEmittedGraph(entryPath) {
       bytes: bytes.byteLength,
       sha256: createHash("sha256").update(bytes).digest("hex"),
     });
-    for (const specifier of importedSpecifiers(source)) {
+    for (const specifier of discoverModuleSpecifiers(source, modulePath)) {
       if (TypeScriptSourceExtension.test(specifier)) {
         throw new Error(
           `TypeScript source extension remains in emitted import: ${modulePath} -> ${specifier}`,

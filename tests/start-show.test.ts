@@ -89,15 +89,31 @@ public static class JanVimShowFakeNode
                     sha256 = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant()
                 };
             }
+            string graphOutput = JsonSerializer.Serialize(new {
+                schema = 1,
+                status = "compiled-electron-main-graph-verified",
+                files
+            });
+            string graphOutputOverride = Environment.GetEnvironmentVariable("SHOW_TEST_GRAPH_OUTPUT_OVERRIDE");
+            if (!String.IsNullOrWhiteSpace(graphOutputOverride)) {
+                graphOutput = File.ReadAllText(graphOutputOverride);
+            }
             string sequenceLog = Environment.GetEnvironmentVariable("SHOW_TEST_SEQUENCE_LOG");
             if (!String.IsNullOrWhiteSpace(sequenceLog)) {
                 File.AppendAllText(sequenceLog, "graph-verify" + Environment.NewLine);
             }
-            Console.Out.WriteLine(JsonSerializer.Serialize(new {
-                schema = 1,
-                status = "compiled-electron-main-graph-verified",
-                files
-            }));
+            Console.Out.WriteLine(graphOutput);
+            Console.Out.Flush();
+            if (Environment.GetEnvironmentVariable("SHOW_TEST_GRAPH_MUTATION") == "same-size-after-output") {
+                string mutationTarget = Environment.GetEnvironmentVariable("SHOW_TEST_GRAPH_MUTATION_TARGET");
+                byte[] changedBytes = File.ReadAllBytes(mutationTarget);
+                if (changedBytes.Length < 1) return 92;
+                changedBytes[0] ^= 0xff;
+                File.WriteAllBytes(mutationTarget, changedBytes);
+                if (!String.IsNullOrWhiteSpace(sequenceLog)) {
+                    File.AppendAllText(sequenceLog, "graph-mutated" + Environment.NewLine);
+                }
+            }
             return 0;
         }
         if (arguments[0] != "--version") return 91;
@@ -245,6 +261,8 @@ interface RunOptions {
     | "runtime-verifier"
     | "close-helper"
     | "runtime-core";
+  graphOutput?: string;
+  graphMutation?: "none" | "same-size-after-output";
   nodeVersion?: string;
   nodeBehavior?: "normal" | "noisy" | "hang";
   verifyExit?: number;
@@ -1079,6 +1097,10 @@ function runLauncher(
     "close-helper": fixture.closeHelper,
     "runtime-core": fixture.janvimExecutable,
   }[launchMutation];
+  const graphOutputOverride = join(fixture.root, "graph-output-override.json");
+  if (options.graphOutput !== undefined) {
+    writeText(graphOutputOverride, options.graphOutput);
+  }
   return spawnSync(
     "pwsh",
     ["-NoProfile", "-NonInteractive", "-File", fixture.script, ...args],
@@ -1107,6 +1129,10 @@ function runLauncher(
           "scripts",
           "attempt-launch-mutation.ps1",
         ),
+        SHOW_TEST_GRAPH_OUTPUT_OVERRIDE:
+          options.graphOutput === undefined ? "" : graphOutputOverride,
+        SHOW_TEST_GRAPH_MUTATION: options.graphMutation ?? "none",
+        SHOW_TEST_GRAPH_MUTATION_TARGET: fixture.transitiveModule,
         SHOW_TEST_CONTROLLER_EXIT: String(options.controllerExit ?? 9),
         SHOW_TEST_CONTROLLER_OUTPUT_BYTES: String(
           options.controllerOutputBytes ?? 0,
@@ -1173,6 +1199,368 @@ function flag(arguments_: readonly string[], name: string): string {
 function output(result: SpawnSyncReturns<string>): string {
   return `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
 }
+
+interface GraphFileRecord {
+  relativePath: string;
+  bytes: number;
+  sha256: string;
+}
+
+interface GraphManifest {
+  schema: number;
+  status: string;
+  files: GraphFileRecord[];
+}
+
+function graphFileRecord(path: string, relativePath: string): GraphFileRecord {
+  return {
+    relativePath,
+    bytes: statSync(path).size,
+    sha256: sha256(path),
+  };
+}
+
+function validGraphManifest(fixture: LauncherFixture): GraphManifest {
+  return {
+    schema: 1,
+    status: "compiled-electron-main-graph-verified",
+    files: [
+      graphFileRecord(
+        fixture.compiledEntry,
+        "apps/controller/dist/src/electron-main.js",
+      ),
+      graphFileRecord(
+        fixture.transitiveModule,
+        "apps/controller/dist/src/runtime-adapter-common.js",
+      ),
+      graphFileRecord(
+        fixture.showAdapterEntry,
+        "apps/controller/dist/src/show-runtime-adapters.js",
+      ),
+    ],
+  };
+}
+
+function changedGraphOutput(
+  fixture: LauncherFixture,
+  change: (manifest: GraphManifest) => unknown,
+): string {
+  return JSON.stringify(change(validGraphManifest(fixture)));
+}
+
+interface InvalidGraphOutputCase {
+  label: string;
+  reason: "electron-module-graph-invalid" | "frozen-input-claim-failed";
+  output(fixture: LauncherFixture): string;
+}
+
+const invalidGraphOutputCases: readonly InvalidGraphOutputCase[] = [
+  {
+    label: "malformed JSON",
+    reason: "electron-module-graph-invalid",
+    output: () => '{"schema":',
+  },
+  {
+    label: "non-object top level",
+    reason: "electron-module-graph-invalid",
+    output: () => "[]",
+  },
+  {
+    label: "missing top-level field",
+    reason: "electron-module-graph-invalid",
+    output: (fixture) =>
+      changedGraphOutput(fixture, ({ schema: _schema, ...manifest }) => manifest),
+  },
+  {
+    label: "extra top-level field",
+    reason: "electron-module-graph-invalid",
+    output: (fixture) =>
+      changedGraphOutput(fixture, (manifest) => ({ ...manifest, extra: true })),
+  },
+  {
+    label: "string schema",
+    reason: "electron-module-graph-invalid",
+    output: (fixture) =>
+      changedGraphOutput(fixture, (manifest) => ({ ...manifest, schema: "1" })),
+  },
+  {
+    label: "wrong schema",
+    reason: "electron-module-graph-invalid",
+    output: (fixture) =>
+      changedGraphOutput(fixture, (manifest) => ({ ...manifest, schema: 2 })),
+  },
+  {
+    label: "non-string status",
+    reason: "electron-module-graph-invalid",
+    output: (fixture) =>
+      changedGraphOutput(fixture, (manifest) => ({ ...manifest, status: 1 })),
+  },
+  {
+    label: "wrong status",
+    reason: "electron-module-graph-invalid",
+    output: (fixture) =>
+      changedGraphOutput(fixture, (manifest) => ({ ...manifest, status: "wrong" })),
+  },
+  {
+    label: "non-array files",
+    reason: "electron-module-graph-invalid",
+    output: (fixture) =>
+      changedGraphOutput(fixture, (manifest) => ({
+        ...manifest,
+        files: manifest.files[0],
+      })),
+  },
+  {
+    label: "non-object file",
+    reason: "electron-module-graph-invalid",
+    output: (fixture) =>
+      changedGraphOutput(fixture, (manifest) => ({ ...manifest, files: [1] })),
+  },
+  {
+    label: "missing file field",
+    reason: "electron-module-graph-invalid",
+    output: (fixture) =>
+      changedGraphOutput(fixture, (manifest) => {
+        const { sha256: _sha256, ...file } = manifest.files[0]!;
+        return { ...manifest, files: [file, ...manifest.files.slice(1)] };
+      }),
+  },
+  {
+    label: "extra file field",
+    reason: "electron-module-graph-invalid",
+    output: (fixture) =>
+      changedGraphOutput(fixture, (manifest) => ({
+        ...manifest,
+        files: [{ ...manifest.files[0]!, extra: true }, ...manifest.files.slice(1)],
+      })),
+  },
+  {
+    label: "non-string relative path",
+    reason: "electron-module-graph-invalid",
+    output: (fixture) =>
+      changedGraphOutput(fixture, (manifest) => ({
+        ...manifest,
+        files: [
+          { ...manifest.files[0]!, relativePath: 1 },
+          ...manifest.files.slice(1),
+        ],
+      })),
+  },
+  {
+    label: "path escape",
+    reason: "electron-module-graph-invalid",
+    output: (fixture) => {
+      const escaped = join(fixture.root, "escaped.js");
+      writeText(escaped, "export const escaped = true;\n");
+      return changedGraphOutput(fixture, (manifest) => ({
+        ...manifest,
+        files: [
+          graphFileRecord(
+            escaped,
+            "apps/controller/dist/src/../../../../escaped.js",
+          ),
+          ...manifest.files,
+        ],
+      }));
+    },
+  },
+  {
+    label: "non-canonical relative spelling",
+    reason: "electron-module-graph-invalid",
+    output: (fixture) =>
+      changedGraphOutput(fixture, (manifest) => ({
+        ...manifest,
+        files: [
+          {
+            ...manifest.files[0]!,
+            relativePath: "apps/controller/dist/src/./electron-main.js",
+          },
+          ...manifest.files.slice(1),
+        ],
+      })),
+  },
+  {
+    label: "unsupported local extension",
+    reason: "electron-module-graph-invalid",
+    output: (fixture) => {
+      const unsupported = join(
+        fixture.root,
+        "apps",
+        "controller",
+        "dist",
+        "src",
+        "unsupported.ts",
+      );
+      writeText(unsupported, "export const unsupported = true;\n");
+      return changedGraphOutput(fixture, (manifest) => ({
+        ...manifest,
+        files: [
+          manifest.files[0]!,
+          manifest.files[2]!,
+          graphFileRecord(
+            unsupported,
+            "apps/controller/dist/src/unsupported.ts",
+          ),
+        ],
+      }));
+    },
+  },
+  {
+    label: "missing local file",
+    reason: "electron-module-graph-invalid",
+    output: (fixture) =>
+      changedGraphOutput(fixture, (manifest) => ({
+        ...manifest,
+        files: [
+          manifest.files[0]!,
+          {
+            relativePath: "apps/controller/dist/src/missing.js",
+            bytes: 1,
+            sha256: "a".repeat(64),
+          },
+          manifest.files[2]!,
+        ],
+      })),
+  },
+  {
+    label: "unsorted files",
+    reason: "electron-module-graph-invalid",
+    output: (fixture) =>
+      changedGraphOutput(fixture, (manifest) => ({
+        ...manifest,
+        files: [manifest.files[1]!, manifest.files[0]!, manifest.files[2]!],
+      })),
+  },
+  {
+    label: "duplicate path",
+    reason: "electron-module-graph-invalid",
+    output: (fixture) =>
+      changedGraphOutput(fixture, (manifest) => ({
+        ...manifest,
+        files: [manifest.files[0]!, manifest.files[0]!, manifest.files[2]!],
+      })),
+  },
+  {
+    label: "zero files",
+    reason: "electron-module-graph-invalid",
+    output: (fixture) =>
+      changedGraphOutput(fixture, (manifest) => ({ ...manifest, files: [] })),
+  },
+  {
+    label: "257 files",
+    reason: "electron-module-graph-invalid",
+    output: (fixture) =>
+      changedGraphOutput(fixture, (manifest) => ({
+        ...manifest,
+        files: Array.from({ length: 257 }, () => manifest.files[0]!),
+      })),
+  },
+  {
+    label: "string bytes",
+    reason: "electron-module-graph-invalid",
+    output: (fixture) =>
+      changedGraphOutput(fixture, (manifest) => ({
+        ...manifest,
+        files: [
+          { ...manifest.files[0]!, bytes: String(manifest.files[0]!.bytes) },
+          ...manifest.files.slice(1),
+        ],
+      })),
+  },
+  {
+    label: "zero bytes",
+    reason: "electron-module-graph-invalid",
+    output: (fixture) =>
+      changedGraphOutput(fixture, (manifest) => ({
+        ...manifest,
+        files: [{ ...manifest.files[0]!, bytes: 0 }, ...manifest.files.slice(1)],
+      })),
+  },
+  {
+    label: "fractional bytes",
+    reason: "electron-module-graph-invalid",
+    output: (fixture) =>
+      changedGraphOutput(fixture, (manifest) => ({
+        ...manifest,
+        files: [{ ...manifest.files[0]!, bytes: 1.5 }, ...manifest.files.slice(1)],
+      })),
+  },
+  {
+    label: "oversized bytes",
+    reason: "electron-module-graph-invalid",
+    output: (fixture) =>
+      changedGraphOutput(fixture, (manifest) => ({
+        ...manifest,
+        files: [
+          { ...manifest.files[0]!, bytes: 16 * 1024 * 1024 + 1 },
+          ...manifest.files.slice(1),
+        ],
+      })),
+  },
+  {
+    label: "non-string hash",
+    reason: "electron-module-graph-invalid",
+    output: (fixture) =>
+      changedGraphOutput(fixture, (manifest) => ({
+        ...manifest,
+        files: [{ ...manifest.files[0]!, sha256: 1 }, ...manifest.files.slice(1)],
+      })),
+  },
+  {
+    label: "uppercase hash",
+    reason: "electron-module-graph-invalid",
+    output: (fixture) =>
+      changedGraphOutput(fixture, (manifest) => ({
+        ...manifest,
+        files: [
+          { ...manifest.files[0]!, sha256: manifest.files[0]!.sha256.toUpperCase() },
+          ...manifest.files.slice(1),
+        ],
+      })),
+  },
+  {
+    label: "wrong byte count",
+    reason: "frozen-input-claim-failed",
+    output: (fixture) =>
+      changedGraphOutput(fixture, (manifest) => ({
+        ...manifest,
+        files: [
+          { ...manifest.files[0]!, bytes: manifest.files[0]!.bytes + 1 },
+          ...manifest.files.slice(1),
+        ],
+      })),
+  },
+  {
+    label: "wrong hash",
+    reason: "frozen-input-claim-failed",
+    output: (fixture) =>
+      changedGraphOutput(fixture, (manifest) => ({
+        ...manifest,
+        files: [
+          { ...manifest.files[0]!, sha256: "0".repeat(64) },
+          ...manifest.files.slice(1),
+        ],
+      })),
+  },
+  {
+    label: "missing electron entry",
+    reason: "electron-module-graph-invalid",
+    output: (fixture) =>
+      changedGraphOutput(fixture, (manifest) => ({
+        ...manifest,
+        files: manifest.files.slice(1),
+      })),
+  },
+  {
+    label: "missing show adapter",
+    reason: "electron-module-graph-invalid",
+    output: (fixture) =>
+      changedGraphOutput(fixture, (manifest) => ({
+        ...manifest,
+        files: manifest.files.slice(0, 2),
+      })),
+  },
+];
 
 function waitForExit(child: ChildProcess, timeoutMs: number): Promise<boolean> {
   if (child.exitCode !== null || child.signalCode !== null) {
@@ -1315,6 +1703,67 @@ describe("offline show launcher and external watchdog", () => {
       );
       expect(sequence.indexOf("electron")).toBeGreaterThan(sequence.indexOf("verify"));
       expect(sequence).not.toContain("electron-wrapper");
+    } finally {
+      fixture.cleanup();
+    }
+  }, 15_000);
+
+  it.each(invalidGraphOutputCases)(
+    "rejects graph verifier output before Electron: $label",
+    ({ output: graphOutput, reason }) => {
+      const fixture = makeLauncherFixture();
+      try {
+        const result = runLauncher(
+          fixture,
+          launcherArguments(fixture, "ValidateOnly"),
+          {
+            behavior: "matching-success",
+            graphOutput: graphOutput(fixture),
+          },
+        );
+        const diagnostic = output(result);
+        const sequence = existsSync(fixture.sequenceLog)
+          ? readFileSync(fixture.sequenceLog, "utf8").trim().split(/\r?\n/u)
+          : [];
+
+        expect(result.status, diagnostic).not.toBe(0);
+        expect(diagnostic).toContain(reason);
+        expect(invocations(fixture)).toHaveLength(0);
+        expect(sequence).not.toContain("electron");
+      } finally {
+        fixture.cleanup();
+      }
+    },
+    15_000,
+  );
+
+  it("rejects a same-size graph file mutation after verifier output before claim opening", () => {
+    const fixture = makeLauncherFixture();
+    const originalSize = statSync(fixture.transitiveModule).size;
+    const originalSha256 = sha256(fixture.transitiveModule);
+    try {
+      const result = runLauncher(
+        fixture,
+        launcherArguments(fixture, "ValidateOnly"),
+        {
+          behavior: "matching-success",
+          graphMutation: "same-size-after-output",
+        },
+      );
+      const diagnostic = output(result);
+      const sequence = existsSync(fixture.sequenceLog)
+        ? readFileSync(fixture.sequenceLog, "utf8").trim().split(/\r?\n/u)
+        : [];
+
+      expect(result.status, diagnostic).not.toBe(0);
+      expect(diagnostic).toContain("frozen-input-claim-failed");
+      expect(invocations(fixture)).toHaveLength(0);
+      expect(sequence).toContain("graph-verify");
+      expect(sequence).toContain("graph-mutated");
+      expect(sequence).not.toContain("verify");
+      expect(sequence).not.toContain("electron");
+      expect(statSync(fixture.transitiveModule).size).toBe(originalSize);
+      expect(sha256(fixture.transitiveModule)).not.toBe(originalSha256);
     } finally {
       fixture.cleanup();
     }

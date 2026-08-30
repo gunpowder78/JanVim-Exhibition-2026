@@ -65,6 +65,13 @@ function createVerifierFixture(
   return { root, dist };
 }
 
+function manifestPaths(stdout: string): string[] {
+  const output = JSON.parse(stdout) as {
+    files: Array<{ relativePath: string }>;
+  };
+  return output.files.map((file) => file.relativePath);
+}
+
 describe("compiled Electron module graph", () => {
   it("emits the bounded canonical sorted and hashed real electron-main graph", () => {
     const result = runVerifier(repositoryRoot);
@@ -119,6 +126,125 @@ describe("compiled Electron module graph", () => {
 
     expect(result.status).not.toBe(0);
     expect(result.stderr).toContain("TypeScript source extension");
+  });
+
+  it("discovers a comment-separated side-effect import", () => {
+    const fixture = createVerifierFixture({
+      "electron-main.js": 'import/* bounded comment */"./comment-child.js";\n',
+      "comment-child.js": "export const commentChild = true;\n",
+    });
+
+    const result = runVerifier(fixture.root);
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(manifestPaths(result.stdout)).toEqual([
+      "apps/controller/dist/src/comment-child.js",
+      "apps/controller/dist/src/electron-main.js",
+    ]);
+  });
+
+  it("discovers a compact export-from edge", () => {
+    const fixture = createVerifierFixture({
+      "electron-main.js": 'export{value}from"./export-child.js";\n',
+      "export-child.js": "export const value = true;\n",
+    });
+
+    const result = runVerifier(fixture.root);
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(manifestPaths(result.stdout)).toEqual([
+      "apps/controller/dist/src/electron-main.js",
+      "apps/controller/dist/src/export-child.js",
+    ]);
+  });
+
+  it("discovers a literal local require in a reachable cjs module", () => {
+    const fixture = createVerifierFixture({
+      "electron-main.js": 'import "./parent.cjs";\n',
+      "parent.cjs": 'module.exports = require("./required-child.cjs");\n',
+      "required-child.cjs": "module.exports = true;\n",
+    });
+
+    const result = runVerifier(fixture.root);
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(manifestPaths(result.stdout)).toEqual([
+      "apps/controller/dist/src/electron-main.js",
+      "apps/controller/dist/src/parent.cjs",
+      "apps/controller/dist/src/required-child.cjs",
+    ]);
+  });
+
+  it("ignores import-like text in comments, strings, regexes, and template raw text", () => {
+    const fixture = createVerifierFixture({
+      "electron-main.js": [
+        'import "./real-child.js";',
+        '// import("./line-comment-child.js");',
+        '/* export { value } from "./block-comment-child.js"; */',
+        'const text = \'require("./string-child.cjs") import("./string-dynamic.js")\';',
+        'const pattern = /import\\(["\']\\.\\/regex-child\\.js["\']\\)/u;',
+        'const template = `export * from "./template-export.js"; import("./template-child.js")`;',
+        "void text; void pattern; void template;",
+        "",
+      ].join("\n"),
+      "real-child.js": "export const real = true;\n",
+    });
+
+    const result = runVerifier(fixture.root);
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(manifestPaths(result.stdout)).toEqual([
+      "apps/controller/dist/src/electron-main.js",
+      "apps/controller/dist/src/real-child.js",
+    ]);
+  });
+
+  it("discovers literal dynamic imports inside executable template expressions", () => {
+    const fixture = createVerifierFixture({
+      "electron-main.js":
+        'const value = `loaded:${await import("./template-expression-child.js")}`;\nvoid value;\n',
+      "template-expression-child.js": "export const child = true;\n",
+    });
+
+    const result = runVerifier(fixture.root);
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(manifestPaths(result.stdout)).toEqual([
+      "apps/controller/dist/src/electron-main.js",
+      "apps/controller/dist/src/template-expression-child.js",
+    ]);
+  });
+
+  it.each([
+    [
+      "computed dynamic import",
+      {
+        "electron-main.js":
+          'const child = "./computed-child.js";\nawait import(child);\n',
+      },
+      "Unsupported ambiguous dynamic import",
+    ],
+    [
+      "computed cjs require",
+      {
+        "electron-main.js": 'import "./computed-parent.cjs";\n',
+        "computed-parent.cjs":
+          'const child = "./computed-child.cjs";\nmodule.exports = require(child);\n',
+      },
+      "Unsupported ambiguous require",
+    ],
+    [
+      "unterminated block comment",
+      { "electron-main.js": "/* import-like text never closes" },
+      "Malformed emitted JavaScript",
+    ],
+  ] as const)("fails closed on %s", (_label, files, reason) => {
+    const fixture = createVerifierFixture(files);
+
+    const result = runVerifier(fixture.root);
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain(reason);
   });
 
   it("rejects a local import that escapes the canonical controller dist root", () => {

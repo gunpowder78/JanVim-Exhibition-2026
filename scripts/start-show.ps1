@@ -757,7 +757,7 @@ function Read-StrictElectronModuleGraph {
     catch {
         throw 'electron-module-graph-invalid'
     }
-    if ($manifest -isnot [pscustomobject]) {
+    if ($null -eq $manifest -or $manifest -isnot [pscustomobject]) {
         throw 'electron-module-graph-invalid'
     }
     Assert-ExactPropertySet `
