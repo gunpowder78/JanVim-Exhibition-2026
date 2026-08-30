@@ -16,6 +16,7 @@ const MAX_PENDING_COMMANDS = 32;
 const MAX_DUPLICATE_WAITERS = 4;
 const MAX_ACKNOWLEDGEMENTS = 512;
 const MAX_READY_WAITERS = 8;
+const MAX_AGENT_DISCONNECT_LISTENERS = 8;
 const TOKEN_PATTERN = /^[A-Za-z0-9._-]{16,}$/;
 const decoder = new TextDecoder("utf-8", { fatal: true });
 
@@ -38,6 +39,7 @@ export interface BridgeDiagnostics {
   pendingTimers: number;
   sessionListeners: number;
   readyWaiters: number;
+  agentDisconnectListeners: number;
 }
 
 type TrackedTimer = ReturnType<typeof setTimeout>;
@@ -75,6 +77,7 @@ export class BridgeServer {
   private readonly acknowledgements = new Map<string, AgentAck>();
   private readonly timers = new Set<TrackedTimer>();
   private readonly readyWaiters = new Set<ReadyWaiter>();
+  private readonly agentDisconnectListeners = new Set<() => void>();
   private agentSocket?: Socket;
   private closing = false;
 
@@ -216,6 +219,20 @@ export class BridgeServer {
     return promise;
   }
 
+  public onAgentDisconnected(listener: () => void): () => void {
+    if (this.closing) throw new Error("Bridge server is closing");
+    if (this.agentDisconnectListeners.size >= MAX_AGENT_DISCONNECT_LISTENERS) {
+      throw new Error("Bridge agent disconnect listener capacity reached");
+    }
+    this.agentDisconnectListeners.add(listener);
+    let disposed = false;
+    return () => {
+      if (disposed) return;
+      disposed = true;
+      this.agentDisconnectListeners.delete(listener);
+    };
+  }
+
   public diagnostics(): BridgeDiagnostics {
     let authenticatedConnections = 0;
     let sessionListeners = 0;
@@ -233,12 +250,14 @@ export class BridgeServer {
       pendingTimers: this.timers.size,
       sessionListeners,
       readyWaiters: this.readyWaiters.size,
+      agentDisconnectListeners: this.agentDisconnectListeners.size,
     };
   }
 
   public async close(): Promise<void> {
     if (this.closing && !this.server.listening) return;
     this.closing = true;
+    this.agentDisconnectListeners.clear();
     this.rejectReadyWaiters(new Error("Bridge server closed"));
     this.rejectAllPending(new Error("Bridge server closed"));
 
@@ -360,6 +379,13 @@ export class BridgeServer {
     if (this.agentSocket === socket) {
       this.agentSocket = undefined;
       this.rejectAllPending(reason);
+      for (const listener of [...this.agentDisconnectListeners]) {
+        try {
+          listener();
+        } catch {
+          // One observer cannot suppress delivery to the bounded snapshot.
+        }
+      }
     }
   }
 

@@ -278,6 +278,87 @@ describe("loopback bridge server", () => {
       pendingTimers: 0,
       sessionListeners: 0,
       readyWaiters: 0,
+      agentDisconnectListeners: 0,
+    });
+  });
+
+  it("notifies an idle authenticated disconnect exactly once without retaining resources", async () => {
+    const server = await startServer();
+    const notifications: Array<ReturnType<BridgeServer["diagnostics"]>> = [];
+    server.onAgentDisconnected(() => {
+      notifications.push(server.diagnostics());
+    });
+    const { socket } = await connectAgent(server);
+
+    const closed = once(socket, "close");
+    socket.destroy();
+    await closed;
+
+    expect(notifications).toEqual([
+      expect.objectContaining({
+        authenticatedConnections: 0,
+        pendingCommands: 0,
+        pendingTimers: 0,
+        sessionListeners: 0,
+      }),
+    ]);
+    expect(server.diagnostics()).toMatchObject({
+      activeConnections: 0,
+      authenticatedConnections: 0,
+      pendingCommands: 0,
+      pendingTimers: 0,
+      sessionListeners: 0,
+      readyWaiters: 0,
+      agentDisconnectListeners: 1,
+    });
+
+    await server.close();
+    expect(notifications).toHaveLength(1);
+    expect(server.diagnostics().agentDisconnectListeners).toBe(0);
+  });
+
+  it("bounds disconnect listeners, disposes registrations, and rejects pending work first", async () => {
+    const server = await startServer();
+    const deliveries: number[] = [];
+    const disposers = Array.from({ length: 8 }, (_value, index) =>
+      server.onAgentDisconnected(() => {
+        expect(server.diagnostics().pendingCommands).toBe(0);
+        deliveries.push(index);
+      }),
+    );
+
+    expect(server.diagnostics().agentDisconnectListeners).toBe(8);
+    expect(() => server.onAgentDisconnected(() => undefined)).toThrow(
+      /disconnect listener limit|capacity/i,
+    );
+    expect(server.diagnostics().agentDisconnectListeners).toBe(8);
+    disposers[3]!();
+    expect(server.diagnostics().agentDisconnectListeners).toBe(7);
+
+    const unauthenticated = await connectRaw(server);
+    const unauthenticatedClosed = once(unauthenticated, "close");
+    unauthenticated.destroy();
+    await unauthenticatedClosed;
+    expect(deliveries).toEqual([]);
+
+    const { socket, reader } = await connectAgent(server);
+    const pending = server.dispatch(statusCommand("cue-disconnect-order"));
+    await reader.read(1);
+    const closed = once(socket, "close");
+    socket.destroy();
+    await closed;
+    await expect(pending).rejects.toThrow(/agent connection closed/i);
+
+    expect(deliveries).toEqual([0, 1, 2, 4, 5, 6, 7]);
+    await server.close();
+    expect(deliveries).toHaveLength(7);
+    expect(server.diagnostics()).toMatchObject({
+      activeConnections: 0,
+      pendingCommands: 0,
+      pendingTimers: 0,
+      sessionListeners: 0,
+      readyWaiters: 0,
+      agentDisconnectListeners: 0,
     });
   });
 });

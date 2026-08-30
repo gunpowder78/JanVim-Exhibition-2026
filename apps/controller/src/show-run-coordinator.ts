@@ -95,7 +95,7 @@ export interface ShowSecondarySurface {
 export interface ShowRunSession {
   readonly sessionId: string;
   currentGenerationId(): number;
-  rebindGeneration(generationId: number): void;
+  rebindGeneration(generationId: number, signal: AbortSignal): Promise<void>;
   // Aborting must prevent a phase from publishing a late bridge, child, HWND, or lease.
   startBridge(signal: AbortSignal): Promise<void>;
   launchJanVim(signal: AbortSignal): Promise<void>;
@@ -230,7 +230,7 @@ const ALLOWED_TRANSITIONS: Readonly<
   Record<ShowCoordinatorState, ReadonlySet<ShowCoordinatorState>>
 > = {
   booting: new Set(["ready", "safe-ready", "shutting-down"]),
-  ready: new Set(["running", "shutting-down"]),
+  ready: new Set(["running", "black-recovering", "shutting-down"]),
   running: new Set([
     "safe-cruise",
     "black-recovering",
@@ -273,6 +273,7 @@ type HeldCleanupSequence = {
 
 type RecoveryPhase =
   | "open-secondary"
+  | "rebind-generation"
   | "reset-original"
   | "start-bridge"
   | "launch-janvim"
@@ -290,6 +291,7 @@ export class ShowRunCoordinator {
   private operatorArmed = false;
   private surface: ShowSecondarySurface | undefined;
   private session: ShowRunSession | undefined;
+  private pendingSession: ShowRunSession | undefined;
   private driver: MultiLoopDriver | undefined;
   private activeLoop: ActiveLoop | undefined;
   private pendingNextLoop:
@@ -441,6 +443,9 @@ export class ShowRunCoordinator {
       return { ready: true };
     } catch {
       if (this.state === "shutting-down" || this.state === "stopped") {
+        return { ready: false, reason: "controller-stopping" };
+      }
+      if (!this.isBootGeneration(capturedGeneration)) {
         return { ready: false, reason: "controller-stopping" };
       }
       return await this.holdStartupFailure("startup-failed", this.session);
@@ -623,14 +628,39 @@ export class ShowRunCoordinator {
     reason: string,
     session: ShowRunSession | undefined,
   ): Promise<{ ready: false; reason: string }> {
-    if (this.state === "booting") this.transition("safe-ready", reason);
-    this.operatorArmed = true;
-    this.sendStatus();
+    const generationId = this.generationId;
+    this.operatorArmed = false;
     this.log({ type: "startup-cleanup", reason });
+    let cleanup: SessionCleanupResult = { childSettled: true, leaseRemoved: true };
     if (session !== undefined) {
-      this.priorSessionSettlement = await this.cleanupHeldSession(session);
+      if (this.session === session) this.session = undefined;
+      this.disposeSessionListeners();
+      cleanup = await this.cleanupHeldSession(session);
+      this.priorSessionSettlement = cleanup;
+    }
+    if (this.canContinueRecovery(generationId, "booting")) {
+      this.transition("safe-ready", reason);
+      this.operatorArmed = cleanup.childSettled && cleanup.leaseRemoved;
+      if (this.operatorArmed) this.sendStatus();
     }
     return { ready: false, reason };
+  }
+
+  private async holdInvalidatedStartup(
+    session: ShowRunSession | undefined,
+    generationId: number,
+    reason: string,
+  ): Promise<void> {
+    const cleanup =
+      session === undefined
+        ? { childSettled: true, leaseRemoved: true }
+        : await this.cleanupHeldSession(session);
+    if (!this.canContinueRecovery(generationId, "booting")) return;
+    this.priorSessionSettlement = cleanup;
+    this.transition("safe-ready", reason);
+    this.operatorArmed = cleanup.childSettled && cleanup.leaseRemoved;
+    this.recoveryInFlight = false;
+    if (this.operatorArmed) this.sendStatus();
   }
 
   private async cleanupHeldSession(
@@ -685,6 +715,7 @@ export class ShowRunCoordinator {
       );
       if (!this.isHeldCleanupSequenceCurrent(sequence)) return cancelledCleanup();
       if (this.session === session) this.session = undefined;
+      if (this.pendingSession === session) this.pendingSession = undefined;
       return { childSettled, leaseRemoved };
     } finally {
       if (this.heldCleanupSequence === sequence) {
@@ -1379,63 +1410,213 @@ export class ShowRunCoordinator {
   }
 
   private handleSecondaryDestroyed(): void {
-    if (this.state === "running") {
-      const session = this.session;
-      const oldSurface = this.surface;
-      this.transition("safe-cruise", "secondary-destroyed");
-      const { generationId, driverStopFailed } =
-        this.invalidateActiveLoopForRecovery();
-      if (session === undefined || session.diagnostics().connections !== 1) {
-        this.startRecovery(() =>
-          this.holdAfterSecondaryLoss(oldSurface, generationId),
-        );
-      } else if (
-        driverStopFailed ||
-        session.diagnostics().editorCommandPending
-      ) {
-        this.transition("black-recovering", "secondary-editor-pending");
-        bestEffortSync(() => oldSurface?.close());
-        if (this.surface === oldSurface) this.surface = undefined;
-        this.startRecovery(() =>
-          this.recoverFullSession(session, generationId, true),
-        );
-      } else {
-        this.startRecovery(() =>
-          this.recoverSecondary(session, oldSurface, generationId),
-        );
-      }
-    } else {
+    const failedState = this.state;
+    if (
+      failedState !== "booting" &&
+      failedState !== "ready" &&
+      failedState !== "running" &&
+      failedState !== "safe-cruise" &&
+      failedState !== "black-recovering"
+    ) {
       this.ignore("secondary-destroyed-out-of-context");
+      return;
     }
+
+    const oldSurface = this.surface;
+    const session = this.session ?? this.pendingSession;
+    const diagnostics = bestEffortSyncResult(
+      () => session?.diagnostics(),
+      undefined,
+    );
+    const canRetainSession =
+      session !== undefined &&
+      diagnostics?.connections === 1 &&
+      diagnostics.editorCommandPending === false;
+
+    if (failedState === "running") {
+      this.transition("safe-cruise", "secondary-destroyed");
+    } else if (failedState === "ready") {
+      this.transition("black-recovering", "secondary-destroyed");
+    } else if (failedState === "safe-cruise") {
+      this.transition("black-recovering", "secondary-destroyed-during-recovery");
+    } else if (failedState === "black-recovering") {
+      this.stateReason = "secondary-destroyed-during-recovery";
+    }
+
+    const requiresFullReplacement =
+      failedState === "booting" ||
+      failedState === "safe-cruise" ||
+      failedState === "black-recovering" ||
+      !canRetainSession;
+    const invalidation = this.invalidateCurrentResources({
+      failedSurface: oldSurface,
+      ...(requiresFullReplacement ? { failedSession: session } : {}),
+    });
+    if (requiresFullReplacement && session !== undefined) {
+      this.pendingSession = session;
+    } else if (session !== undefined && !invalidation.driverStopFailed) {
+      this.bindSession(session, invalidation.generationId);
+    }
+    const runAfterSupersededRecovery = async (
+      operation: () => Promise<void>,
+    ): Promise<void> => {
+      if (invalidation.supersededRecovery !== undefined) {
+        await bestEffort(() => invalidation.supersededRecovery!);
+      }
+      if (!this.isCurrentGeneration(invalidation.generationId)) return;
+      await operation();
+    };
+
+    if (failedState === "booting") {
+      this.startRecovery(() =>
+        runAfterSupersededRecovery(() =>
+          this.holdInvalidatedStartup(
+            session,
+            invalidation.generationId,
+            "secondary-destroyed",
+          ),
+        ),
+      );
+      return;
+    }
+    if (
+      session !== undefined &&
+      diagnostics?.connections !== 1 &&
+      diagnostics?.editorCommandPending === false
+    ) {
+      this.startRecovery(() =>
+        runAfterSupersededRecovery(async () => {
+          const cleanup = await this.cleanupHeldSession(session);
+          if (!this.isCurrentGeneration(invalidation.generationId)) return;
+          this.priorSessionSettlement = cleanup;
+          await this.holdAfterSecondaryLoss(
+            oldSurface,
+            invalidation.generationId,
+            failedState === "running" ? "safe-cruise" : "black-recovering",
+          );
+        }),
+      );
+      return;
+    }
+    if (session === undefined) {
+      this.startRecovery(() =>
+        runAfterSupersededRecovery(() =>
+          this.holdAfterSecondaryLoss(
+            oldSurface,
+            invalidation.generationId,
+            failedState === "running" ? "safe-cruise" : "black-recovering",
+          ),
+        ),
+      );
+      return;
+    }
+    if (requiresFullReplacement || invalidation.driverStopFailed) {
+      if (this.state !== "black-recovering") {
+        this.transition("black-recovering", "secondary-editor-pending");
+      }
+      this.startRecovery(() =>
+        runAfterSupersededRecovery(() =>
+          this.recoverFullSession(
+            session,
+            invalidation.generationId,
+            true,
+            failedState !== "ready",
+          ),
+        ),
+      );
+      return;
+    }
+    this.startRecovery(() =>
+      runAfterSupersededRecovery(() =>
+        this.recoverSecondary(
+          session,
+          oldSurface,
+          invalidation.generationId,
+          failedState !== "ready",
+          failedState === "running" ? "safe-cruise" : "black-recovering",
+        ),
+      ),
+    );
   }
 
   private handleSessionFault(
     fault: "agent-disconnected" | "critical-ack-failed" | "janvim-exited",
   ): void {
-    if (this.state === "running") {
-      const oldSession = this.session;
-      this.transition("black-recovering", fault);
-      const { generationId } = this.invalidateActiveLoopForRecovery();
-      this.rebindRetainedSurface(this.surface, generationId);
-      this.sendStatus();
-      if (oldSession === undefined) {
-        this.enterSafeReady("recovery-session-missing");
-      } else {
-        this.startRecovery(() =>
-          this.recoverFullSession(oldSession, generationId),
-        );
-      }
-    } else {
+    const failedState = this.state;
+    if (
+      failedState !== "booting" &&
+      failedState !== "ready" &&
+      failedState !== "running" &&
+      failedState !== "safe-cruise" &&
+      failedState !== "black-recovering"
+    ) {
       this.ignore("session-fault-out-of-context");
+      return;
     }
+
+    const oldSession = this.session ?? this.pendingSession;
+    if (failedState === "ready" || failedState === "running") {
+      this.transition("black-recovering", fault);
+    } else if (failedState === "safe-cruise") {
+      this.transition("black-recovering", fault);
+    } else if (failedState === "black-recovering") {
+      this.stateReason = fault;
+    }
+    const invalidation = this.invalidateCurrentResources({
+      failedSession: oldSession,
+      ...(failedState === "booting" ? { failedSurface: this.surface } : {}),
+    });
+    if (oldSession !== undefined) this.pendingSession = oldSession;
+
+    if (failedState === "booting") {
+      this.startRecovery(async () => {
+        if (invalidation.supersededRecovery !== undefined) {
+          await bestEffort(() => invalidation.supersededRecovery!);
+        }
+        await this.holdInvalidatedStartup(
+          oldSession,
+          invalidation.generationId,
+          fault,
+        );
+      });
+      return;
+    }
+
+    this.rebindRetainedSurface(this.surface, invalidation.generationId);
+    this.sendStatus();
+    if (oldSession === undefined) {
+      this.enterSafeReady("recovery-session-missing", false);
+      return;
+    }
+    this.startRecovery(async () => {
+      if (invalidation.supersededRecovery !== undefined) {
+        await bestEffort(() => invalidation.supersededRecovery!);
+      }
+      if (!this.isCurrentGeneration(invalidation.generationId)) return;
+      await this.recoverFullSession(
+        oldSession,
+        invalidation.generationId,
+        false,
+        failedState !== "ready",
+      );
+    });
   }
 
-  private invalidateActiveLoopForRecovery(): {
+  private invalidateCurrentResources(options: {
+    failedSurface?: ShowSecondarySurface;
+    failedSession?: ShowRunSession;
+  }): {
     generationId: number;
     driverStopFailed: boolean;
+    supersededRecovery: Promise<void> | undefined;
   } {
+    const supersededRecovery = this.recoveryOperation;
+    if (supersededRecovery !== undefined) this.recoveryOperation = undefined;
     this.incrementGeneration();
     this.revokeBoundaryOperation();
+    this.revokeHeldCleanupSequence();
+    this.cancelBoundedPhases();
+    this.cancelRecoveryDelays();
     this.log({
       type: "generation-invalidate",
       generationId: this.generationId,
@@ -1455,14 +1636,40 @@ export class ShowRunCoordinator {
     this.driver = undefined;
     this.disposeSurfaceListeners();
     this.disposeSessionListeners();
+    if (
+      options.failedSurface !== undefined &&
+      this.surface === options.failedSurface
+    ) {
+      this.surface = undefined;
+    }
+    if (options.failedSurface !== undefined) {
+      bestEffortSync(() => options.failedSurface!.close());
+    }
+    if (
+      options.failedSession !== undefined &&
+      this.session === options.failedSession
+    ) {
+      this.session = undefined;
+    }
+    if (
+      options.failedSession !== undefined &&
+      this.pendingSession === options.failedSession
+    ) {
+      this.pendingSession = undefined;
+    }
     const sampler = this.activeLoop?.sampler;
     this.activeLoop = undefined;
     this.pendingNextLoop = undefined;
     this.currentLoopId = null;
     this.stopQueued = false;
     this.operatorArmed = false;
+    this.recoveryInFlight = false;
     if (sampler !== undefined) void bestEffort(() => sampler.finish());
-    return { generationId: this.generationId, driverStopFailed };
+    return {
+      generationId: this.generationId,
+      driverStopFailed,
+      supersededRecovery,
+    };
   }
 
   private revokeBoundaryOperation(): void {
@@ -1474,18 +1681,20 @@ export class ShowRunCoordinator {
 
   private startRecovery(operation: () => Promise<void>): void {
     if (this.recoveryOperation !== undefined) return;
+    const generationId = this.generationId;
     const recovery = Promise.resolve()
       .then(operation)
       .catch(() => {
         if (
-          this.state === "safe-cruise" ||
-          this.state === "black-recovering"
+          this.isCurrentGeneration(generationId) &&
+          (this.state === "safe-cruise" || this.state === "black-recovering")
         ) {
-          this.enterSafeReady("recovery-operation-failed");
+          this.enterSafeReady("recovery-operation-failed", false);
         }
       })
       .finally(() => {
-        if (this.recoveryOperation === recovery) this.recoveryOperation = undefined;
+        if (this.recoveryOperation !== recovery) return;
+        this.recoveryOperation = undefined;
         const terminalFailure = this.pendingRecoveryTerminalFailure;
         this.pendingRecoveryTerminalFailure = undefined;
         if (
@@ -1503,9 +1712,12 @@ export class ShowRunCoordinator {
     session: ShowRunSession,
     oldSurface: ShowSecondarySurface | undefined,
     generationId: number,
+    resumeRun: boolean,
+    initialState: "safe-cruise" | "black-recovering",
   ): Promise<void> {
     await Promise.resolve();
-    if (!this.canContinueRecovery(generationId, "safe-cruise")) return;
+    if (!this.canContinueRecovery(generationId, initialState)) return;
+    if (this.surface === oldSurface) this.surface = undefined;
     const decision = this.secondaryRestartBudget.reserve(
       this.dependencies.nowMs(),
     );
@@ -1514,9 +1726,9 @@ export class ShowRunCoordinator {
       this.enterSafeReady("secondary-restart-limit");
       return;
     }
-    this.transition("black-recovering", "secondary-recovery");
-    bestEffortSync(() => oldSurface?.close());
-    if (this.surface === oldSurface) this.surface = undefined;
+    if (this.state !== "black-recovering") {
+      this.transition("black-recovering", "secondary-recovery");
+    }
     if (!(await this.waitForRecoveryDelay("secondary", decision.delayMs))) return;
     if (!this.canContinueRecovery(generationId, "black-recovering")) return;
 
@@ -1533,7 +1745,10 @@ export class ShowRunCoordinator {
       }
       this.surface = surface;
       this.bindSurface(surface, generationId);
-      session.rebindGeneration(generationId);
+      await this.waitForRecoveryPhase("rebind-generation", (signal) =>
+        session.rebindGeneration(generationId, signal),
+      );
+      if (!this.canContinueRecovery(generationId, "black-recovering")) return;
       this.bindSession(session, generationId);
       const reset = await this.waitForRecoveryPhase(
         "reset-original",
@@ -1551,11 +1766,23 @@ export class ShowRunCoordinator {
           reason: "reset-hash-mismatch",
         });
         recoveryRecorded = true;
-        await this.recoverFullSession(session, generationId);
+        await this.recoverFullSession(session, generationId, false, resumeRun);
         return;
       }
       this.operatorArmed = true;
-      if (this.startRun(true)) {
+      if (!resumeRun) {
+        this.transition("ready", "secondary-recovered");
+        this.sendStatus();
+        this.recordRecovery({
+          generationId,
+          domain: "secondary",
+          attempt: decision.attempt,
+          delayMs: decision.delayMs,
+          outcome: "recovered",
+          reason: "secondary-recovered",
+        });
+        recoveryRecorded = true;
+      } else if (this.startRun(true)) {
         this.recordRecovery({
           generationId,
           domain: "secondary",
@@ -1599,10 +1826,10 @@ export class ShowRunCoordinator {
   private async holdAfterSecondaryLoss(
     oldSurface: ShowSecondarySurface | undefined,
     generationId: number,
+    state: "safe-cruise" | "black-recovering",
   ): Promise<void> {
     await Promise.resolve();
-    if (!this.canContinueRecovery(generationId, "safe-cruise")) return;
-    bestEffortSync(() => oldSurface?.close());
+    if (!this.canContinueRecovery(generationId, state)) return;
     if (this.surface === oldSurface) this.surface = undefined;
     try {
       const surface = await this.waitForRecoveryPhase(
@@ -1610,7 +1837,7 @@ export class ShowRunCoordinator {
         (signal) => this.dependencies.openSecondary(generationId, signal),
         (lateSurface) => lateSurface.close(),
       );
-      if (!this.canContinueRecovery(generationId, "safe-cruise")) {
+      if (!this.canContinueRecovery(generationId, state)) {
         bestEffortSync(() => surface.close());
         return;
       }
@@ -1619,8 +1846,13 @@ export class ShowRunCoordinator {
     } catch {
       // A missing control surface still remains a fail-closed safe-ready hold.
     }
-    if (this.canContinueRecovery(generationId, "safe-cruise")) {
-      this.enterSafeReady("secondary-session-unhealthy");
+    if (this.canContinueRecovery(generationId, state)) {
+      const settlement = this.priorSessionSettlement;
+      this.enterSafeReady(
+        "secondary-session-unhealthy",
+        settlement === undefined ||
+          (settlement.childSettled && settlement.leaseRemoved),
+      );
     }
   }
 
@@ -1628,6 +1860,7 @@ export class ShowRunCoordinator {
     oldSession: ShowRunSession,
     generationId: number,
     replaceSecondary = false,
+    resumeRun = true,
   ): Promise<void> {
     await Promise.resolve();
     if (!this.canContinueRecovery(generationId, "black-recovering")) return;
@@ -1648,7 +1881,7 @@ export class ShowRunCoordinator {
           reason: "old-session-unsettled",
         });
       }
-      this.enterSafeReady("recovery-old-session-unsettled");
+      this.enterSafeReady("recovery-old-session-unsettled", false);
       return;
     }
     if (!decision.allowed) {
@@ -1660,6 +1893,7 @@ export class ShowRunCoordinator {
     if (!this.canContinueRecovery(generationId, "black-recovering")) return;
 
     let session: ShowRunSession | undefined;
+    let replacementCleanup: SessionCleanupResult | undefined;
     try {
       if (replaceSecondary) {
         const surface = await this.waitForRecoveryPhase(
@@ -1675,8 +1909,7 @@ export class ShowRunCoordinator {
         this.bindSurface(surface, generationId);
       }
       session = this.dependencies.createSession(generationId);
-      this.session = session;
-      this.priorSessionSettlement = undefined;
+      this.pendingSession = session;
       this.bindSession(session, generationId);
       await this.waitForRecoveryPhase("start-bridge", (signal) =>
         session!.startBridge(signal),
@@ -1703,10 +1936,22 @@ export class ShowRunCoordinator {
         throw new Error("replacement prepare hash mismatch");
       }
 
+      this.session = session;
+      this.pendingSession = undefined;
+      this.priorSessionSettlement = undefined;
       this.operatorArmed = true;
       this.transition("ready", "session-recovered");
       this.sendStatus();
-      if (this.startRun(true)) {
+      if (!resumeRun) {
+        this.recordRecovery({
+          generationId,
+          domain: "janvim",
+          attempt: decision.attempt,
+          delayMs: decision.delayMs,
+          outcome: "recovered",
+          reason: "session-recovered",
+        });
+      } else if (this.startRun(true)) {
         this.recordRecovery({
           generationId,
           domain: "janvim",
@@ -1731,10 +1976,11 @@ export class ShowRunCoordinator {
     } catch {
       if (
         session !== undefined &&
-        this.session === session &&
+        (this.session === session || this.pendingSession === session) &&
         this.canContinueRecovery(generationId, "black-recovering")
       ) {
         const cleanup = await this.cleanupHeldSession(session);
+        replacementCleanup = cleanup;
         if (this.canContinueRecovery(generationId, "black-recovering")) {
           this.priorSessionSettlement = cleanup;
         }
@@ -1748,7 +1994,11 @@ export class ShowRunCoordinator {
           outcome: "failed",
           reason: "session-recovery-failed",
         });
-        this.enterSafeReady("session-recovery-failed");
+        this.enterSafeReady(
+          "session-recovery-failed",
+          replacementCleanup?.childSettled === true &&
+            replacementCleanup.leaseRemoved,
+        );
       }
     }
   }
@@ -1777,9 +2027,8 @@ export class ShowRunCoordinator {
       if (!cleanup.childSettled || !cleanup.leaseRemoved) {
         if (this.canContinueRecovery(generationId, "safe-ready")) {
           this.stateReason = "recovery-old-session-unsettled";
-          this.operatorArmed = true;
+          this.operatorArmed = false;
           this.recoveryInFlight = false;
-          this.sendStatus();
         }
         return;
       }
@@ -1802,8 +2051,7 @@ export class ShowRunCoordinator {
         this.bindSurface(surface, generationId);
       }
       session = this.dependencies.createSession(generationId);
-      this.session = session;
-      this.priorSessionSettlement = undefined;
+      this.pendingSession = session;
       this.bindSession(session, generationId);
       await this.waitForRecoveryPhase("start-bridge", (signal) =>
         session!.startBridge(signal),
@@ -1830,6 +2078,9 @@ export class ShowRunCoordinator {
         throw new Error("operator restart prepare hash mismatch");
       }
 
+      this.session = session;
+      this.pendingSession = undefined;
+      this.priorSessionSettlement = undefined;
       this.operatorArmed = true;
       this.recoveryInFlight = false;
       this.transition("ready", "operator-restart");
@@ -1843,7 +2094,7 @@ export class ShowRunCoordinator {
     } catch {
       if (
         session !== undefined &&
-        this.session === session &&
+        (this.session === session || this.pendingSession === session) &&
         this.canContinueRecovery(generationId, "safe-ready")
       ) {
         const cleanup = await this.cleanupHeldSession(session);
@@ -1853,9 +2104,11 @@ export class ShowRunCoordinator {
       }
       if (this.canContinueRecovery(generationId, "safe-ready")) {
         this.stateReason = "operator-restart-failed";
-        this.operatorArmed = true;
+        this.operatorArmed =
+          this.priorSessionSettlement?.childSettled === true &&
+          this.priorSessionSettlement.leaseRemoved;
         this.recoveryInFlight = false;
-        this.sendStatus();
+        if (this.operatorArmed) this.sendStatus();
       }
     }
   }
@@ -1945,12 +2198,12 @@ export class ShowRunCoordinator {
     );
   }
 
-  private enterSafeReady(reason: string): void {
+  private enterSafeReady(reason: string, actionable = true): void {
     if (this.state !== "safe-ready") this.transition("safe-ready", reason);
     this.stateReason = reason;
-    this.operatorArmed = true;
+    this.operatorArmed = actionable;
     this.recoveryInFlight = false;
-    this.sendStatus();
+    if (actionable) this.sendStatus();
   }
 
   private beginShutdown(result: ShowRunResult): Promise<void> {
@@ -2002,7 +2255,7 @@ export class ShowRunCoordinator {
         );
       }
 
-      const session = this.session;
+      const session = this.session ?? this.pendingSession;
       const surface = this.surface;
       if (session !== undefined) {
         await this.runShutdownPhase(
@@ -2069,6 +2322,7 @@ export class ShowRunCoordinator {
         }
       }
       this.session = undefined;
+      this.pendingSession = undefined;
       if (activeSampler !== undefined) {
         await this.runShutdownPhase(
           "resource-finish-failed",

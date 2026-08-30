@@ -414,7 +414,10 @@ class FakeSession implements ShowRunSession {
     return this.generationId;
   }
 
-  public rebindGeneration(generationId: number): void {
+  public async rebindGeneration(
+    generationId: number,
+    _signal: AbortSignal,
+  ): Promise<void> {
     this.generationId = generationId;
     this.trace.push(`rebind-generation:${generationId}`);
   }
@@ -1199,6 +1202,16 @@ function activeCoordinatorPhases(coordinator: ShowRunCoordinator): string[] {
 function priorSessionSettlement(coordinator: ShowRunCoordinator): unknown {
   return (coordinator as unknown as { priorSessionSettlement: unknown })
     .priorSessionSettlement;
+}
+
+function activeCoordinatorResources(coordinator: ShowRunCoordinator): {
+  surface: ShowSecondarySurface | undefined;
+  session: ShowRunSession | undefined;
+} {
+  return coordinator as unknown as {
+    surface: ShowSecondarySurface | undefined;
+    session: ShowRunSession | undefined;
+  };
 }
 
 async function completeResetBoundary(
@@ -2542,6 +2555,201 @@ describe("show run coordinator", () => {
 
       await harness.coordinator.requestEmergencyStop("sigint");
     }
+  });
+
+  it("invalidates and detaches a booting session fault before later startup phases", async () => {
+    const startupGate = deferred();
+    const cleanupGate = deferred();
+    const harness = createHarness({
+      mode: "Show",
+      phaseDeferrals: new Map([["start-bridge", startupGate]]),
+      firstHeldCleanupGate: cleanupGate,
+    });
+    const boot = harness.coordinator.boot();
+    await settle();
+    const failedSession = harness.sessions[0]!;
+
+    failedSession.emitFault("agent-disconnected");
+    const faultState = harness.coordinator.diagnostics();
+    const faultResources = { ...activeCoordinatorResources(harness.coordinator) };
+
+    startupGate.resolve();
+    cleanupGate.resolve();
+    await boot;
+    await settle();
+    await harness.coordinator.requestEmergencyStop("sigint");
+
+    expect(faultState).toMatchObject({ state: "booting", generationId: 2 });
+    expect(faultResources.session).toBeUndefined();
+    expect(harness.trace).not.toContain("launch-janvim:1");
+  });
+
+  it("detaches a failed ready secondary before Start can reuse it", async () => {
+    const harness = createHarness({ mode: "Show" });
+    await bootReady(harness);
+    const failedSurface = harness.surfaces[0]!;
+    const session = harness.sessions[0]!;
+
+    failedSurface.destroy();
+    const faultState = harness.coordinator.diagnostics();
+    const faultResources = { ...activeCoordinatorResources(harness.coordinator) };
+    const startAccepted = harness.coordinator.handleRendererEvent(startEvent());
+    const loopSurface = session.loopSurface;
+
+    await harness.coordinator.requestEmergencyStop("sigint");
+    expect(faultState.generationId).toBe(2);
+    expect(faultResources.surface).toBeUndefined();
+    expect(startAccepted).toBe(false);
+    expect(loopSurface).not.toBe(failedSurface);
+  });
+
+  it("observes a retained-session fault while safe-cruise invalidation is current", async () => {
+    const harness = createHarness({ mode: "Show" });
+    await startRunning(harness);
+    const retainedSession = harness.sessions[0]!;
+
+    harness.surfaces[0]!.destroy();
+    expect(harness.coordinator.diagnostics()).toMatchObject({
+      state: "safe-cruise",
+      generationId: 2,
+    });
+    retainedSession.emitFault("janvim-exited");
+    const faultState = harness.coordinator.diagnostics();
+    const faultResources = { ...activeCoordinatorResources(harness.coordinator) };
+
+    await harness.coordinator.requestEmergencyStop("sigint");
+    expect(faultState).toMatchObject({
+      state: "black-recovering",
+      generationId: 3,
+    });
+    expect(faultResources.session).toBeUndefined();
+  });
+
+  it("invalidates a current secondary fault during black recovery and rejects late phase publication", async () => {
+    const startupGate = deferred();
+    const harness = createHarness({
+      mode: "Show",
+      recoverySessionGate: startupGate,
+    });
+    await startRunning(harness);
+    const retainedSurface = harness.surfaces[0]!;
+
+    harness.sessions[0]!.emitFault("agent-disconnected");
+    await settle();
+    await harness.timers.fireTimeout(1_000);
+    await settle();
+    expect(harness.coordinator.diagnostics()).toMatchObject({
+      state: "black-recovering",
+      generationId: 2,
+    });
+
+    retainedSurface.destroy();
+    const faultState = harness.coordinator.diagnostics();
+    const faultResources = { ...activeCoordinatorResources(harness.coordinator) };
+    startupGate.resolve();
+    await settle();
+    const afterLatePhase = harness.coordinator.diagnostics();
+
+    await harness.coordinator.requestEmergencyStop("sigint");
+    expect(faultState).toMatchObject({
+      state: "black-recovering",
+      generationId: 3,
+      currentLoopId: null,
+    });
+    expect(faultResources.surface).toBeUndefined();
+    expect(faultResources.session).not.toBe(harness.sessions[1]);
+    expect(afterLatePhase.generationId).toBe(3);
+    expect(afterLatePhase.state).not.toBe("running");
+    expect(harness.sessions[1]!.loopId).toBeUndefined();
+  });
+
+  it("keeps safe-ready and Restart Loop unavailable until held cleanup settles", async () => {
+    const heldGate = deferred();
+    const held = createHarness({
+      mode: "Show",
+      prepareHash: WRONG_POEM_SHA256,
+      firstHeldCleanupGate: heldGate,
+    });
+    const heldBoot = held.coordinator.boot();
+    await settle();
+    const statusBeforeCleanup = held.surfaces[0]!.sent.filter(
+      (event) => event.type === "run-status" && event.state === "safe-ready",
+    );
+    const restartBeforeCleanup = held.coordinator.handleRendererEvent({
+      schema: 1,
+      type: "operator-action",
+      action: "restart-loop",
+    });
+    const shutdown = held.coordinator.requestEmergencyStop("sigint");
+    heldGate.resolve();
+    await heldBoot;
+    await shutdown;
+
+    expect(statusBeforeCleanup).toEqual([]);
+    expect(restartBeforeCleanup).toBe(false);
+
+    const cleanedGate = deferred();
+    const cleaned = createHarness({
+      mode: "Show",
+      prepareHash: WRONG_POEM_SHA256,
+      firstHeldCleanupGate: cleanedGate,
+    });
+    const cleanedBoot = cleaned.coordinator.boot();
+    await settle();
+    cleanedGate.resolve();
+    await expect(cleanedBoot).resolves.toEqual({
+      ready: false,
+      reason: "original-poem-hash-mismatch",
+    });
+    expect(cleaned.coordinator.diagnostics().state).toBe("safe-ready");
+    expect(
+      cleaned.coordinator.handleRendererEvent({
+        schema: 1,
+        type: "operator-action",
+        action: "restart-loop",
+      }),
+    ).toBe(true);
+    await cleaned.coordinator.requestEmergencyStop("sigint");
+  });
+
+  it("clears the fourth destroyed secondary before an operator opens a fresh surface", async () => {
+    const harness = createHarness({ mode: "Show" });
+    await startRunning(harness);
+
+    for (const delayMs of [1_000, 2_000, 4_000] as const) {
+      harness.surfaces.at(-1)!.destroy();
+      await settle();
+      await harness.timers.fireTimeout(delayMs);
+      await settle();
+      expect(harness.coordinator.diagnostics().state).toBe("running");
+    }
+
+    const exhaustedSurface = harness.surfaces.at(-1)!;
+    exhaustedSurface.destroy();
+    await settle();
+    const exhaustedState = harness.coordinator.diagnostics();
+    const exhaustedResources = {
+      ...activeCoordinatorResources(harness.coordinator),
+    };
+    const surfaceCount = harness.surfaces.length;
+    const restartAccepted = harness.coordinator.handleRendererEvent({
+      schema: 1,
+      type: "operator-action",
+      action: "restart-loop",
+    });
+    await settle();
+    const replacementSurface = harness.surfaces.at(-1);
+
+    await harness.coordinator.requestEmergencyStop("sigint");
+    expect(exhaustedState).toMatchObject({
+      state: "safe-ready",
+      reason: "secondary-restart-limit",
+    });
+    expect(exhaustedSurface.closeCalls).toBe(1);
+    expect(exhaustedResources.surface).toBeUndefined();
+    expect(restartAccepted).toBe(true);
+    expect(harness.surfaces).toHaveLength(surfaceCount + 1);
+    expect(replacementSurface).not.toBe(exhaustedSurface);
   });
 
   it("bounds every late callback from an invalidated generation without state mutation", async () => {

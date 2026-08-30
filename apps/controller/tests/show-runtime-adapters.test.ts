@@ -9,6 +9,7 @@ import type { AgentAck, AgentCommand } from "@janvim-exhibition/show-schema";
 
 import type { LogStorage } from "../src/bounded-log.ts";
 import type {
+  OneLoopRuntime,
   OneLoopTimerAdapter,
   OneLoopTimerHandle,
 } from "../src/one-loop-driver.ts";
@@ -214,6 +215,14 @@ function publicationGate(): {
   return { promise, resolve };
 }
 
+type DeferredHostOperation =
+  | "bridge-listen"
+  | "artifact-verification"
+  | "placement"
+  | "lease-write"
+  | "prepare"
+  | "lease-generation-replace";
+
 async function settlePromises(): Promise<void> {
   for (let index = 0; index < 32; index += 1) await Promise.resolve();
   await new Promise<void>((resolve) => setImmediate(resolve));
@@ -413,6 +422,13 @@ function createStartupHarness(options: {
   missingChildStream?: "stdout" | "stderr";
   deferLaunchArtifactVerification?: boolean;
   deferInitialIdentityInspection?: boolean;
+  deferLoopPrepare?: boolean;
+  deferredHostOperation?: {
+    name: DeferredHostOperation;
+    invocation: number;
+    gate: ReturnType<typeof publicationGate>;
+  };
+  removeRunLeaseResult?: boolean;
   closeChildAfterSecondIdentityInspection?: boolean;
   cleanupFailures?: readonly (
     | "close-listener"
@@ -436,6 +452,21 @@ function createStartupHarness(options: {
   ) => Promise<void>;
 } = {}) {
   const trace: string[] = [];
+  const hostOperationCalls = new Map<DeferredHostOperation, number>();
+  const waitForHostOperation = async (
+    name: DeferredHostOperation,
+  ): Promise<void> => {
+    const invocation = (hostOperationCalls.get(name) ?? 0) + 1;
+    hostOperationCalls.set(name, invocation);
+    trace.push(`${name}:${invocation}:start`);
+    if (
+      options.deferredHostOperation?.name === name &&
+      options.deferredHostOperation.invocation === invocation
+    ) {
+      await options.deferredHostOperation.gate.promise;
+    }
+    trace.push(`${name}:${invocation}:complete`);
+  };
   const files = new Map<string, Buffer>([
     [win32.join(repositoryRoot, "janvim-artifact.lock.json"), artifactLock],
     [win32.join(repositoryRoot, "show", "janvim-show.toml"), showConfig],
@@ -468,20 +499,37 @@ function createStartupHarness(options: {
   const initialIdentityInspectionGate = new Promise<void>((resolve) => {
     releaseInitialIdentityInspection = resolve;
   });
-  const child = new (class extends EventEmitter {
-    public readonly pid = 8003;
+  const loopPrepareGate = publicationGate();
+  const activeChildPids = new Set<number>();
+  let maxActiveChildren = 0;
+  class FakeChild extends EventEmitter {
     public readonly stdout =
       options.missingChildStream === "stdout" ? null : new PassThrough();
     public readonly stderr =
       options.missingChildStream === "stderr" ? null : new PassThrough();
+
+    public constructor(public readonly pid: number) {
+      super();
+      this.once("close", () => activeChildPids.delete(this.pid));
+    }
+
     public readonly kill = vi.fn(() => {
       trace.push("kill-janvim");
       childKilled = true;
       queueMicrotask(() => this.emit("close", 1));
       return true;
     });
-  })();
+  }
+  const child = new FakeChild(8003);
+  const children = [child];
   const leases: Array<{ path: string; lease: RunLease }> = [];
+  const activeLeases = new Set<RunLease>();
+  let maxActiveLeases = 0;
+  const activeHwndPids = new Set<number>();
+  let maxActiveHwnds = 0;
+  let activeBridges = 0;
+  let maxActiveBridges = 0;
+  const bridgeDisconnectListeners: Array<Set<() => void>> = [];
   const sent: Array<{ channel: string; payload: unknown }> = [];
   const sampledPids: number[] = [];
   const evidenceAttempts: Array<{ path: string; value: unknown }> = [];
@@ -536,10 +584,16 @@ function createStartupHarness(options: {
     | undefined;
   let processIdentityInspection = 0;
   let artifactVerification = 0;
+  let prepareDispatches = 0;
+  let spawnCount = 0;
   let timeoutFiveSecondOperations = false;
   const rejectedEditorCueIds = new Set<string>();
 
   class FakeWebContents extends EventEmitter {
+    public constructor(private readonly rendererPid: number) {
+      super();
+    }
+
     public readonly session = {
       webRequest: {
         onBeforeRequest: (
@@ -596,7 +650,7 @@ function createStartupHarness(options: {
         windowOpenHandler = handler;
       },
     );
-    public readonly getOSProcessId = vi.fn(() => 8002);
+    public readonly getOSProcessId = vi.fn(() => this.rendererPid);
 
     public override removeListener(
       eventName: string | symbol,
@@ -616,12 +670,16 @@ function createStartupHarness(options: {
     }
   }
 
+  const webContentsHistory: FakeWebContents[] = [];
+
   class FakeBrowserWindow extends EventEmitter {
-    public readonly webContents = new FakeWebContents();
+    public readonly webContents: FakeWebContents;
     private destroyed = false;
 
     public constructor(options: Record<string, unknown>) {
       super();
+      this.webContents = new FakeWebContents(8002 + webContentsHistory.length);
+      webContentsHistory.push(this.webContents);
       trace.push("browser-window");
       browserOptions = options;
       lastWindow = this;
@@ -769,6 +827,7 @@ function createStartupHarness(options: {
       }
       if (args.some((argument) => argument.endsWith("place-janvim-window.ps1"))) {
         expect(limits).toMatchObject({ timeoutMs: 12_000 });
+        await waitForHostOperation("placement");
         placement = {
           pid: valueAfter(args, "-ChildProcessId"),
           bounds: {
@@ -778,6 +837,8 @@ function createStartupHarness(options: {
             height: valueAfter(args, "-Height"),
           },
         };
+        activeHwndPids.add(placement.pid);
+        maxActiveHwnds = Math.max(maxActiveHwnds, activeHwndPids.size);
         trace.push("place-window");
         return {
           exitCode: 0,
@@ -798,8 +859,10 @@ function createStartupHarness(options: {
         trace.push("close-window");
         const pid = valueAfter(args, "-ChildProcessId");
         const hwnd = args[args.indexOf("-Hwnd") + 1];
+        activeHwndPids.delete(pid);
         if (options.closeChildOnWindowClose !== false) {
-          queueMicrotask(() => child.emit("close", 0));
+          const matchingChild = children.find((candidate) => candidate.pid === pid);
+          queueMicrotask(() => matchingChild?.emit("close", 0));
         }
         return {
           exitCode: 0,
@@ -819,6 +882,7 @@ function createStartupHarness(options: {
     verifyArtifact: async () => {
       trace.push("verify-artifact");
       artifactVerification += 1;
+      await waitForHostOperation("artifact-verification");
       if (
         options.deferLaunchArtifactVerification === true &&
         artifactVerification === 2
@@ -841,10 +905,16 @@ function createStartupHarness(options: {
     ) => {
       trace.push("spawn-janvim");
       spawnCall = { file, args, options };
-      return child;
+      const spawnedChild =
+        spawnCount === 0 ? child : new FakeChild(8003 + children.length);
+      spawnCount += 1;
+      if (!children.includes(spawnedChild)) children.push(spawnedChild);
+      activeChildPids.add(spawnedChild.pid);
+      maxActiveChildren = Math.max(maxActiveChildren, activeChildPids.size);
+      return spawnedChild;
     },
     inspectProcessStartedAtUtc: async (pid: number) => {
-      expect(pid).toBe(8003);
+      expect(children.some((candidate) => candidate.pid === pid)).toBe(true);
       trace.push("inspect-janvim-start");
       const startedAtUtc =
         options.processStartTimes?.[processIdentityInspection] ??
@@ -865,53 +935,85 @@ function createStartupHarness(options: {
       return startedAtUtc;
     },
     randomBytes: () => Buffer.from("ab".repeat(24), "hex"),
-    createBridge: (token: string) => ({
-      listen: async () => {
-        expect(token).toBe("ab".repeat(24));
-        trace.push("bridge-listen");
-        return { host: "127.0.0.1" as const, port: 32123, family: "IPv4" };
-      },
-      waitForAgent: async (timeoutMs: number) => {
-        expect(timeoutMs).toBe(10_000);
-        trace.push("await-agent");
-        if (options.failAwaitAgent === true) {
-          throw new Error("injected agent-ready failure");
-        }
-      },
-      dispatch: async (command: AgentCommand): Promise<AgentAck> => {
-        trace.push(`agent:${command.action.type}`);
-        if (
-          command.cueId === options.rejectFirstEditorCueId &&
-          !rejectedEditorCueIds.has(command.cueId)
-        ) {
-          rejectedEditorCueIds.add(command.cueId);
-          throw new Error("injected editor dispatch rejection");
-        }
-        return {
-          schema: 1,
-          loopId: command.loopId,
-          cueId: command.cueId,
-          outcome: "applied",
-          mode: "n",
-          cursor: { row: 0, col: 0 },
-          bufferSha256:
-            command.action.type === "prepare"
-              ? command.action.expectedSha256
-              : "b699de273f5bbaedb08241495f52ce863d3e8e1851275ce3b6251484d75190a8",
-        };
-      },
-      close: async () => {
-        trace.push("bridge-close");
-      },
-      diagnostics: () => ({
-        activeConnections: 1,
-        authenticatedConnections: 1,
-        pendingCommands: 0,
-        pendingTimers: 0,
-        sessionListeners: 3,
-        readyWaiters: 0,
-      }),
-    }),
+    createBridge: (token: string) => {
+      const bridgeIndex = bridgeDisconnectListeners.length;
+      const disconnectListeners = new Set<() => void>();
+      bridgeDisconnectListeners.push(disconnectListeners);
+      let listening = false;
+      let closed = false;
+      return {
+        listen: async () => {
+          expect(token).toBe("ab".repeat(24));
+          trace.push(`bridge-listen:${bridgeIndex + 1}:start`);
+          await waitForHostOperation("bridge-listen");
+          listening = true;
+          activeBridges += 1;
+          maxActiveBridges = Math.max(maxActiveBridges, activeBridges);
+          trace.push("bridge-listen");
+          trace.push(`bridge-listen:${bridgeIndex + 1}:complete`);
+          return {
+            host: "127.0.0.1" as const,
+            port: 32123 + bridgeIndex,
+            family: "IPv4",
+          };
+        },
+        waitForAgent: async (timeoutMs: number) => {
+          expect(timeoutMs).toBe(10_000);
+          trace.push("await-agent");
+          if (options.failAwaitAgent === true) {
+            throw new Error("injected agent-ready failure");
+          }
+        },
+        dispatch: async (command: AgentCommand): Promise<AgentAck> => {
+          trace.push(`agent:${command.action.type}`);
+          if (command.action.type === "prepare") {
+            prepareDispatches += 1;
+            await waitForHostOperation("prepare");
+            if (options.deferLoopPrepare === true && prepareDispatches === 2) {
+              trace.push("loop-prepare-deferred");
+              await loopPrepareGate.promise;
+            }
+          }
+          if (
+            command.cueId === options.rejectFirstEditorCueId &&
+            !rejectedEditorCueIds.has(command.cueId)
+          ) {
+            rejectedEditorCueIds.add(command.cueId);
+            throw new Error("injected editor dispatch rejection");
+          }
+          return {
+            schema: 1,
+            loopId: command.loopId,
+            cueId: command.cueId,
+            outcome: "applied",
+            mode: "n",
+            cursor: { row: 0, col: 0 },
+            bufferSha256:
+              command.action.type === "prepare"
+                ? command.action.expectedSha256
+                : "b699de273f5bbaedb08241495f52ce863d3e8e1851275ce3b6251484d75190a8",
+          };
+        },
+        onAgentDisconnected: (listener: () => void) => {
+          disconnectListeners.add(listener);
+          return () => disconnectListeners.delete(listener);
+        },
+        close: async () => {
+          trace.push("bridge-close");
+          if (!closed && listening) activeBridges -= 1;
+          closed = true;
+          disconnectListeners.clear();
+        },
+        diagnostics: () => ({
+          activeConnections: closed ? 0 : 1,
+          authenticatedConnections: closed ? 0 : 1,
+          pendingCommands: 0,
+          pendingTimers: 0,
+          sessionListeners: closed ? 0 : 3,
+          readyWaiters: 0,
+        }),
+      };
+    },
     runWithDeadline: async <T>(
       timeoutMs: number,
       operation: () => Promise<T>,
@@ -936,16 +1038,29 @@ function createStartupHarness(options: {
       return { rssBytes: pid * 10, handleCount: pid };
     },
     writeRunLease: async (path: string, lease: RunLease) => {
+      await waitForHostOperation("lease-write");
       trace.push("write-lease");
       leases.push({ path, lease });
+      activeLeases.add(lease);
+      maxActiveLeases = Math.max(maxActiveLeases, activeLeases.size);
     },
     replaceRunLease: async (
-      _path: string,
+      path: string,
       lease: RunLease,
       nextGenerationId: number,
-    ) => ({ ...lease, generationId: nextGenerationId }),
-    removeRunLease: async () => {
+    ) => {
+      trace.push("replace-lease-generation:start");
+      await waitForHostOperation("lease-generation-replace");
+      const replacement = { ...lease, generationId: nextGenerationId };
+      activeLeases.delete(lease);
+      activeLeases.add(replacement);
+      trace.push("replace-lease-generation:complete");
+      return replacement;
+    },
+    removeRunLease: async (_path: string, lease: RunLease) => {
       trace.push("remove-lease");
+      if (options.removeRunLeaseResult === false) return false;
+      activeLeases.delete(lease);
       return true;
     },
     writeShowEvidence:
@@ -979,6 +1094,8 @@ function createStartupHarness(options: {
     ipcListeners,
     cleanupAttempts,
     child,
+    children,
+    webContentsHistory,
     get browserOptions() {
       return browserOptions;
     },
@@ -1021,12 +1138,61 @@ function createStartupHarness(options: {
     emitWindowClose: () => {
       lastWindow?.emit("close");
     },
+    destroySecondary: () => {
+      lastWindow?.destroy();
+    },
+    emitAgentDisconnect: (bridgeIndex = bridgeDisconnectListeners.length - 1) => {
+      const listeners = bridgeDisconnectListeners[bridgeIndex];
+      if (listeners === undefined) throw new Error("bridge disconnect fixture is missing");
+      for (const listener of [...listeners]) listener();
+    },
+    bridgeDisconnectListenerCount: (
+      bridgeIndex = bridgeDisconnectListeners.length - 1,
+    ) => bridgeDisconnectListeners[bridgeIndex]?.size ?? 0,
+    emitJanVimExit: (childIndex = children.length - 1) => {
+      const target = children[childIndex];
+      if (target === undefined) throw new Error("JanVim child fixture is missing");
+      target.emit("close", 1);
+    },
+    activeResourceCounts: () => ({
+      bridges: activeBridges,
+      children: activeChildPids.size,
+      hwnds: activeHwndPids.size,
+      leases: activeLeases.size,
+    }),
+    maxActiveResourceCounts: () => ({
+      bridges: maxActiveBridges,
+      children: maxActiveChildren,
+      hwnds: maxActiveHwnds,
+      leases: maxActiveLeases,
+    }),
+    hostOperationInvocationCount: (name: DeferredHostOperation) =>
+      hostOperationCalls.get(name) ?? 0,
+    spawnInvocationCount: () => spawnCount,
     enableFiveSecondTimeouts: () => {
       timeoutFiveSecondOperations = true;
     },
     releaseLaunchArtifactVerification,
     releaseInitialIdentityInspection,
+    releaseLoopPrepare: loopPrepareGate.resolve,
   };
+}
+
+async function bootAndStartRuntimeHarness(
+  harness: ReturnType<typeof createStartupHarness>,
+) {
+  const coordinator = harness.adapters.createCoordinator(showCommand("Show"));
+  await expect(coordinator.boot()).resolves.toEqual({ ready: true });
+  expect(
+    coordinator.handleRendererEvent({
+      schema: 1,
+      type: "operator-action",
+      action: "start",
+    }),
+  ).toBe(true);
+  await settlePromises();
+  expect(coordinator.diagnostics().state).toBe("running");
+  return coordinator;
 }
 
 describe("real Task 9 show runtime adapters", () => {
@@ -1490,6 +1656,235 @@ describe("real Task 9 show runtime adapters", () => {
       /generation|g1/i,
     );
   });
+
+  it("does not revive a stopped runtime when deferred loop preparation settles", async () => {
+    const harness = createStartupHarness({ deferLoopPrepare: true });
+    const coordinator = harness.adapters.createCoordinator(showCommand("Show"));
+    await expect(coordinator.boot()).resolves.toEqual({ ready: true });
+
+    expect(
+      coordinator.handleRendererEvent({
+        schema: 1,
+        type: "operator-action",
+        action: "start",
+      }),
+    ).toBe(true);
+    await settlePromises();
+    expect(harness.trace).toContain("loop-prepare-deferred");
+
+    const driver = (
+      coordinator as unknown as {
+        driver?: {
+          options: {
+            runtime: OneLoopRuntime & { runtime: OneLoopRuntime };
+          };
+        };
+      }
+    ).driver;
+    if (driver === undefined) throw new Error("active driver fixture is missing");
+    const preparedRuntime = driver.options.runtime;
+    const deterministicRuntime = preparedRuntime.runtime;
+    const runtimeStart = vi.spyOn(deterministicRuntime, "start");
+
+    await coordinator.requestEmergencyStop("sigint");
+    await expect(coordinator.completion).resolves.toEqual({
+      ok: false,
+      reason: "emergency-sigint",
+    });
+    expect(preparedRuntime.state).toBe("stopped");
+    expect(deterministicRuntime.state).toBe("stopped");
+
+    harness.releaseLoopPrepare();
+    await settlePromises();
+    expect(preparedRuntime.state).toBe("stopped");
+    expect(deterministicRuntime.state).toBe("stopped");
+    expect(runtimeStart).not.toHaveBeenCalled();
+  });
+
+  it("opens a distinct secondary and awaits retained-lease generation CAS before reset and publication", async () => {
+    const generationGate = publicationGate();
+    const harness = createStartupHarness({
+      deferredHostOperation: {
+        name: "lease-generation-replace",
+        invocation: 1,
+        gate: generationGate,
+      },
+    });
+    const coordinator = await bootAndStartRuntimeHarness(harness);
+    const oldWebContents = harness.webContentsHistory[0]!;
+    const oldRendererPid = oldWebContents.getOSProcessId();
+
+    try {
+      harness.destroySecondary();
+      await settlePromises();
+      expect(coordinator.diagnostics()).toMatchObject({
+        state: "black-recovering",
+        generationId: 2,
+      });
+      expect(harness.timers.activeTimeouts(1_000)).toBe(1);
+
+      await harness.timers.fireTimeout(1_000);
+      await settlePromises();
+      const newWebContents = harness.webContentsHistory[1]!;
+      expect(newWebContents).not.toBe(oldWebContents);
+      expect(newWebContents.getOSProcessId()).not.toBe(oldRendererPid);
+      expect(harness.trace).not.toContain("agent:reset");
+      expect(coordinator.diagnostics()).toMatchObject({
+        state: "black-recovering",
+        generationId: 2,
+        currentLoopId: null,
+      });
+
+      generationGate.resolve();
+      await settlePromises();
+      const casComplete = harness.trace.indexOf("replace-lease-generation:complete");
+      const reset = harness.trace.indexOf("agent:reset");
+      expect(casComplete).toBeGreaterThan(-1);
+      expect(casComplete).toBeLessThan(reset);
+      expect(coordinator.diagnostics()).toMatchObject({
+        state: "running",
+        generationId: 2,
+      });
+    } finally {
+      generationGate.resolve();
+      await settlePromises();
+      await coordinator.requestEmergencyStop("sigint");
+    }
+  });
+
+  it("settles the exact old session before publishing a non-overlapping full replacement", async () => {
+    const harness = createStartupHarness();
+    const coordinator = await bootAndStartRuntimeHarness(harness);
+    const oldChild = harness.children[0]!;
+    const oldLease = harness.leases[0]!.lease;
+
+    harness.emitJanVimExit(0);
+    await settlePromises();
+    expect(coordinator.diagnostics()).toMatchObject({
+      state: "black-recovering",
+      generationId: 2,
+    });
+    await harness.timers.fireTimeout(1_000);
+    await settlePromises();
+
+    const newChild = harness.children[1]!;
+    expect(newChild).not.toBe(oldChild);
+    expect(newChild.pid).not.toBe(oldChild.pid);
+    const removeOldLease = harness.trace.indexOf("remove-lease");
+    const newBridgeListen = harness.trace.indexOf("bridge-listen:2:start");
+    const newSpawn = harness.trace.indexOf("spawn-janvim", newBridgeListen);
+    const newPlacement = harness.trace.indexOf("place-window", newSpawn);
+    const newLease = harness.trace.indexOf("write-lease", newPlacement);
+    const newPrepare = harness.trace.indexOf("agent:prepare", newLease);
+    expect(removeOldLease).toBeGreaterThan(-1);
+    expect(removeOldLease).toBeLessThan(newBridgeListen);
+    expect(newBridgeListen).toBeLessThan(newSpawn);
+    expect(newSpawn).toBeLessThan(newPlacement);
+    expect(newPlacement).toBeLessThan(newLease);
+    expect(newLease).toBeLessThan(newPrepare);
+    expect(harness.leases[0]!.lease).toBe(oldLease);
+    expect(harness.maxActiveResourceCounts()).toEqual({
+      bridges: 1,
+      children: 1,
+      hwnds: 1,
+      leases: 1,
+    });
+    expect(harness.activeResourceCounts()).toEqual({
+      bridges: 1,
+      children: 1,
+      hwnds: 1,
+      leases: 1,
+    });
+    expect(coordinator.diagnostics()).toMatchObject({
+      state: "running",
+      generationId: 2,
+    });
+
+    await coordinator.requestEmergencyStop("sigint");
+  });
+
+  it("routes an idle authenticated bridge disconnect into immediate session invalidation", async () => {
+    const harness = createStartupHarness();
+    const coordinator = harness.adapters.createCoordinator(showCommand("Show"));
+    await expect(coordinator.boot()).resolves.toEqual({ ready: true });
+    expect(harness.bridgeDisconnectListenerCount()).toBe(1);
+
+    harness.emitAgentDisconnect();
+    expect(coordinator.diagnostics()).toMatchObject({
+      state: "black-recovering",
+      generationId: 2,
+      currentLoopId: null,
+    });
+
+    await coordinator.requestEmergencyStop("sigint");
+    expect(harness.bridgeDisconnectListenerCount()).toBe(0);
+  });
+
+  it("does not launch a replacement when exact old-lease removal is unproven", async () => {
+    const harness = createStartupHarness({ removeRunLeaseResult: false });
+    const coordinator = await bootAndStartRuntimeHarness(harness);
+
+    harness.emitJanVimExit(0);
+    await settlePromises();
+
+    expect(coordinator.diagnostics()).toMatchObject({
+      state: "safe-ready",
+      generationId: 2,
+      reason: "recovery-old-session-unsettled",
+    });
+    expect(harness.trace.filter((entry) => entry === "bridge-listen")).toHaveLength(1);
+    expect(harness.spawnInvocationCount()).toBe(1);
+    expect(harness.activeResourceCounts()).toEqual({
+      bridges: 0,
+      children: 0,
+      hwnds: 0,
+      leases: 1,
+    });
+
+    await coordinator.requestEmergencyStop("sigint");
+    expect(harness.activeResourceCounts().leases).toBe(1);
+  });
+
+  it.each([
+    ["bridge listen", "bridge-listen", 1],
+    ["artifact verification", "artifact-verification", 2],
+    ["placement", "placement", 1],
+    ["lease write", "lease-write", 1],
+    ["prepare", "prepare", 1],
+  ] as const)(
+    "compensates a late %s publication after lifecycle abort",
+    async (_label, name, invocation) => {
+      const gate = publicationGate();
+      const harness = createStartupHarness({
+        deferredHostOperation: { name, invocation, gate },
+      });
+      const coordinator = harness.adapters.createCoordinator(showCommand("Show"));
+      const boot = coordinator.boot();
+      await settlePromises();
+      expect(harness.hostOperationInvocationCount(name)).toBe(invocation);
+
+      harness.enableFiveSecondTimeouts();
+      const shutdown = coordinator.requestEmergencyStop("sigint");
+      await expect(boot).resolves.toEqual({
+        ready: false,
+        reason: "controller-stopping",
+      });
+      await shutdown;
+      const stopped = coordinator.diagnostics();
+
+      gate.resolve();
+      await settlePromises();
+
+      expect(coordinator.diagnostics()).toEqual(stopped);
+      expect(coordinator.diagnostics().state).toBe("stopped");
+      expect(harness.activeResourceCounts()).toEqual({
+        bridges: 0,
+        children: 0,
+        hwnds: 0,
+        leases: 0,
+      });
+    },
+  );
 
   it("writes strictly parseable Soak3 evidence with the three bounded P1 skips", async () => {
     const harness = createStartupHarness();

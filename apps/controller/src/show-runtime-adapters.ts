@@ -1035,6 +1035,7 @@ type ShowBrowserWindowAdapter = Omit<
 };
 
 interface ShowBridgeAdapter extends G2BridgeServerAdapter {
+  onAgentDisconnected(listener: () => void): () => void;
   diagnostics?(): {
     activeConnections: number;
     authenticatedConnections: number;
@@ -1042,6 +1043,7 @@ interface ShowBridgeAdapter extends G2BridgeServerAdapter {
     pendingTimers: number;
     sessionListeners: number;
     readyWaiters: number;
+    agentDisconnectListeners?: number;
   };
 }
 
@@ -1333,13 +1335,13 @@ async function openShowSecondary(input: {
     if (hasCleanupError) throw cleanupError;
   };
   const onClosed = (): void => {
+    const listeners = intentionalClose ? [] : [...destroyedListeners];
     try {
       dispose();
     } catch {
       // A closed surface cannot retain guards even if one host cleanup hook fails.
     }
-    for (const listener of [...destroyedListeners]) listener();
-    destroyedListeners.clear();
+    for (const listener of listeners) listener();
   };
   window.once("closed", onClosed);
 
@@ -1405,6 +1407,7 @@ class RuntimeShowSession implements ShowRunSession {
   private lease: RunLease | undefined;
   private leaseRemoved = false;
   private disposed = false;
+  private lifecycleEpoch = 0;
   private shutdownRequested = false;
   private childClosed = false;
   private resolveChildExit!: () => void;
@@ -1418,6 +1421,7 @@ class RuntimeShowSession implements ShowRunSession {
   >();
   private detachChildStreams: (() => void) | undefined;
   private finishChildStreams: (() => void) | undefined;
+  private disposeBridgeDisconnect: (() => void) | undefined;
 
   public constructor(
     private readonly options: {
@@ -1441,27 +1445,42 @@ class RuntimeShowSession implements ShowRunSession {
     return this.generationId;
   }
 
-  public rebindGeneration(generationId: number): void {
+  public async rebindGeneration(
+    generationId: number,
+    signal: AbortSignal,
+  ): Promise<void> {
+    const epoch = this.captureLifecycle(signal, "session-rebind-aborted");
     if (!Number.isSafeInteger(generationId) || generationId <= this.generationId) {
       throw new Error("session-generation-must-increase");
     }
-    this.generationId = generationId;
     const lease = this.lease;
     if (lease !== undefined) {
-      this.leaseOperation = this.leaseOperation.then(async () => {
+      const operation = this.leaseOperation.then(async () => {
         const replacement = await this.options.host.replaceRunLease(
           this.options.paths.runLease,
           lease,
           generationId,
         );
+        if (!this.isCurrentLifecycle(epoch, signal)) {
+          const removed = await this.options.host.removeRunLease(
+            this.options.paths.runLease,
+            replacement,
+          );
+          if (!removed) this.lease = replacement;
+          this.leaseRemoved = removed;
+          throw new Error("session-rebind-aborted");
+        }
         this.lease = replacement;
       });
+      this.leaseOperation = operation;
+      await operation;
     }
+    this.requireCurrentLifecycle(epoch, signal, "session-rebind-aborted");
+    this.generationId = generationId;
   }
 
   public async startBridge(signal: AbortSignal): Promise<void> {
-    this.requireActive();
-    if (signal.aborted) throw new Error("bridge-start-aborted");
+    const epoch = this.captureLifecycle(signal, "bridge-start-aborted");
     if (this.bridge !== undefined) throw new Error("bridge-already-started");
     const token = this.options.host.randomBytes(24).toString("hex");
     const bridge = this.options.host.createBridge(token);
@@ -1472,21 +1491,40 @@ class RuntimeShowSession implements ShowRunSession {
       await bridge.close().catch(() => undefined);
       throw error;
     }
-    if (address.host !== "127.0.0.1" || signal.aborted) {
+    if (address.host !== "127.0.0.1" || !this.isCurrentLifecycle(epoch, signal)) {
       await bridge.close().catch(() => undefined);
       throw new Error(
-        signal.aborted ? "bridge-start-aborted" : "bridge-not-ipv4-loopback",
+        !this.isCurrentLifecycle(epoch, signal)
+          ? "bridge-start-aborted"
+          : "bridge-not-ipv4-loopback",
       );
     }
+    let disposeDisconnect: () => void;
+    try {
+      disposeDisconnect = bridge.onAgentDisconnected(() => {
+        if (this.bridge !== bridge || !this.isCurrentLifecycle(epoch)) return;
+        for (const listener of [...this.faultListeners]) {
+          listener("agent-disconnected");
+        }
+      });
+    } catch (error) {
+      await bridge.close().catch(() => undefined);
+      throw error;
+    }
+    if (!this.isCurrentLifecycle(epoch, signal)) {
+      disposeDisconnect();
+      await bridge.close().catch(() => undefined);
+      throw new Error("bridge-start-aborted");
+    }
     this.bridge = bridge;
+    this.disposeBridgeDisconnect = disposeDisconnect;
     this.bridgeToken = token;
     this.bridgePort = address.port;
     this.options.logger.addSecret(token);
   }
 
   public async launchJanVim(signal: AbortSignal): Promise<void> {
-    this.requireActive();
-    if (signal.aborted) throw new Error("janvim-launch-aborted");
+    const epoch = this.captureLifecycle(signal, "janvim-launch-aborted");
     const token = this.bridgeToken;
     const port = this.bridgePort;
     if (token === undefined || port === undefined) {
@@ -1517,6 +1555,10 @@ class RuntimeShowSession implements ShowRunSession {
     );
     if (!launch.started) throw new Error(launch.reason);
     const child = launch.child as G2SpawnedChild;
+    if (!this.isCurrentLifecycle(epoch, signal)) {
+      await this.cleanupUnpublishedChild(child);
+      throw new Error("janvim-launch-aborted");
+    }
     this.child = child;
     this.options.onPid(child.pid);
     child.once("close", () => {
@@ -1531,13 +1573,11 @@ class RuntimeShowSession implements ShowRunSession {
         for (const listener of [...this.faultListeners]) listener("janvim-exited");
       }
     });
-    this.childStartedAtUtc = await this.options.host.inspectProcessStartedAtUtc(
-      child.pid,
-    );
+    this.childStartedAtUtc = await this.options.host.inspectProcessStartedAtUtc(child.pid);
     if (this.childClosed) {
       throw new Error("janvim-exited-during-identity-inspection");
     }
-    if (signal.aborted) {
+    if (!this.isCurrentLifecycle(epoch, signal)) {
       await this.terminateExactJanVim();
       throw new Error("janvim-launch-aborted");
     }
@@ -1567,15 +1607,14 @@ class RuntimeShowSession implements ShowRunSession {
       stdoutSink.finish();
       stderrSink.finish();
     };
-    if (signal.aborted) {
+    if (!this.isCurrentLifecycle(epoch, signal)) {
       await this.terminateExactJanVim();
       throw new Error("janvim-launch-aborted");
     }
   }
 
   public async placeJanVim(signal: AbortSignal): Promise<void> {
-    this.requireActive();
-    if (signal.aborted) throw new Error("janvim-placement-aborted");
+    const epoch = this.captureLifecycle(signal, "janvim-placement-aborted");
     const child = this.child;
     if (child === undefined) throw new Error("janvim-child-unavailable");
     const placement = await placeJanVimWindow({
@@ -1593,7 +1632,10 @@ class RuntimeShowSession implements ShowRunSession {
         }),
     });
     if (!placement.ok) throw new Error(placement.reason);
-    if (signal.aborted) throw new Error("janvim-placement-aborted");
+    if (!this.isCurrentLifecycle(epoch, signal)) {
+      await this.closePlacement(placement.receipt).catch(() => undefined);
+      throw new Error("janvim-placement-aborted");
+    }
     const childStartedAtUtc = this.childStartedAtUtc;
     if (childStartedAtUtc === undefined) {
       throw new Error("janvim-process-creation-time-unavailable");
@@ -1617,22 +1659,30 @@ class RuntimeShowSession implements ShowRunSession {
       },
     };
     await this.options.host.writeRunLease(this.options.paths.runLease, lease);
+    if (!this.isCurrentLifecycle(epoch, signal)) {
+      const removed = await this.options.host.removeRunLease(
+        this.options.paths.runLease,
+        lease,
+      );
+      this.leaseRemoved = removed;
+      if (!removed) this.lease = lease;
+      throw new Error("janvim-placement-aborted");
+    }
     this.lease = lease;
+    if (this.childClosed) this.beginLeaseRemoval();
   }
 
   public async awaitAgent(signal: AbortSignal): Promise<void> {
-    this.requireActive();
-    if (signal.aborted) throw new Error("agent-wait-aborted");
+    const epoch = this.captureLifecycle(signal, "agent-wait-aborted");
     const bridge = this.requireBridge();
     await bridge.waitForAgent(10_000);
-    if (signal.aborted) throw new Error("agent-wait-aborted");
+    this.requireCurrentLifecycle(epoch, signal, "agent-wait-aborted");
   }
 
   public async prepareOriginalPoem(
     signal: AbortSignal,
   ): Promise<{ bufferSha256: string }> {
-    this.requireActive();
-    if (signal.aborted) throw new Error("prepare-original-aborted");
+    const epoch = this.captureLifecycle(signal, "prepare-original-aborted");
     const acknowledgement = await this.dispatch({
       schema: 1,
       token: this.requireToken(),
@@ -1644,7 +1694,7 @@ class RuntimeShowSession implements ShowRunSession {
         expectedSha256: this.options.inputs.manifest.poemSha256,
       },
     });
-    if (signal.aborted) throw new Error("prepare-original-aborted");
+    this.requireCurrentLifecycle(epoch, signal, "prepare-original-aborted");
     if (
       acknowledgement.outcome !== "applied" &&
       acknowledgement.outcome !== "duplicate"
@@ -1782,9 +1832,9 @@ class RuntimeShowSession implements ShowRunSession {
     loopId: string,
     signal: AbortSignal,
   ): Promise<{ bufferSha256: string }> {
-    this.requireActive();
-    if (signal.aborted) throw new Error("show-reset-aborted");
+    const epoch = this.captureLifecycle(signal, "show-reset-aborted");
     await this.leaseOperation;
+    this.requireCurrentLifecycle(epoch, signal, "show-reset-aborted");
     const cueId = `${loopId}-reset`;
     const acknowledgement = await this.dispatch({
       schema: 1,
@@ -1793,7 +1843,7 @@ class RuntimeShowSession implements ShowRunSession {
       cueId,
       action: { type: "reset" },
     });
-    if (signal.aborted) throw new Error("show-reset-aborted");
+    this.requireCurrentLifecycle(epoch, signal, "show-reset-aborted");
     if (
       (acknowledgement.outcome !== "applied" &&
         acknowledgement.outcome !== "duplicate") ||
@@ -1850,24 +1900,8 @@ class RuntimeShowSession implements ShowRunSession {
   ): Promise<void> {
     const placement = this.placement;
     if (placement === undefined) throw new Error("show-window-placement-unavailable");
-    await closePlacedJanVimWindow({
-      placement,
-      helperPath: this.options.paths.windowCloseScript,
-      runHelper: async (invocation, limits) => {
-        if (
-          limits.timeoutMs !== timeoutMs ||
-          limits.maxOutputBytes !== maxOutputBytes
-        ) {
-          throw new Error("show-window-close-limits-changed");
-        }
-        return this.options.host.execFile(invocation.file, invocation.args, {
-          cwd: this.options.host.repositoryRoot,
-          timeoutMs: limits.timeoutMs,
-          maxStdoutBytes: limits.maxOutputBytes,
-          maxStderrBytes: limits.maxOutputBytes,
-        });
-      },
-    });
+    await this.closePlacement(placement, timeoutMs, maxOutputBytes);
+    if (this.placement === placement) this.placement = undefined;
   }
 
   public async waitForJanVimExit(
@@ -1915,13 +1949,18 @@ class RuntimeShowSession implements ShowRunSession {
   public async closeBridge(timeoutMs: 5_000): Promise<void> {
     const bridge = this.bridge;
     if (bridge === undefined) return;
+    this.disposeBridgeDisconnect?.();
+    this.disposeBridgeDisconnect = undefined;
     await this.options.host.runWithDeadline(timeoutMs, () => bridge.close());
-    this.bridge = undefined;
+    if (this.bridge === bridge) this.bridge = undefined;
   }
 
   public dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.lifecycleEpoch += 1;
+    this.disposeBridgeDisconnect?.();
+    this.disposeBridgeDisconnect = undefined;
     this.detachChildStreams?.();
     this.detachChildStreams = undefined;
     this.finishChildStreams?.();
@@ -1955,6 +1994,75 @@ class RuntimeShowSession implements ShowRunSession {
     if (this.disposed) throw new Error("show-session-disposed");
   }
 
+  private captureLifecycle(signal: AbortSignal, reason: string): number {
+    this.requireActive();
+    if (signal.aborted) throw new Error(reason);
+    return this.lifecycleEpoch;
+  }
+
+  private isCurrentLifecycle(epoch: number, signal?: AbortSignal): boolean {
+    return !this.disposed && this.lifecycleEpoch === epoch && signal?.aborted !== true;
+  }
+
+  private requireCurrentLifecycle(
+    epoch: number,
+    signal: AbortSignal,
+    reason: string,
+  ): void {
+    if (!this.isCurrentLifecycle(epoch, signal)) throw new Error(reason);
+  }
+
+  private async closePlacement(
+    placement: WindowPlacementReceipt,
+    timeoutMs: 2_000 = 2_000,
+    maxOutputBytes: 4_096 = 4_096,
+  ): Promise<void> {
+    await closePlacedJanVimWindow({
+      placement,
+      helperPath: this.options.paths.windowCloseScript,
+      runHelper: async (invocation, limits) => {
+        if (
+          limits.timeoutMs !== timeoutMs ||
+          limits.maxOutputBytes !== maxOutputBytes
+        ) {
+          throw new Error("show-window-close-limits-changed");
+        }
+        return this.options.host.execFile(invocation.file, invocation.args, {
+          cwd: this.options.host.repositoryRoot,
+          timeoutMs: limits.timeoutMs,
+          maxStdoutBytes: limits.maxOutputBytes,
+          maxStderrBytes: limits.maxOutputBytes,
+        });
+      },
+    });
+  }
+
+  private async cleanupUnpublishedChild(child: G2SpawnedChild): Promise<void> {
+    let closed = false;
+    let resolveExit!: () => void;
+    const exited = new Promise<void>((resolve) => {
+      resolveExit = resolve;
+    });
+    child.once("close", () => {
+      closed = true;
+      resolveExit();
+    });
+    const expectedStartedAtUtc = await this.options.host.inspectProcessStartedAtUtc(
+      child.pid,
+    );
+    const observedStartedAtUtc = await this.options.host.inspectProcessStartedAtUtc(
+      child.pid,
+    );
+    if (!closed && observedStartedAtUtc === expectedStartedAtUtc) child.kill?.();
+    if (!closed) {
+      await this.options.host.runWithDeadline(5_000, () => exited).catch(() => undefined);
+    }
+    if (closed) {
+      this.childClosed = true;
+      this.resolveChildExit();
+    }
+  }
+
   private beginLeaseRemoval(): void {
     const lease = this.lease;
     if (lease === undefined || this.leaseRemoved) return;
@@ -1971,6 +2079,7 @@ class RuntimeShowSession implements ShowRunSession {
 class PreparedRuntime implements OneLoopRuntime {
   private visibleState: DeterministicShowLoopState = "ready";
   private preparation: Promise<boolean> | undefined;
+  private lifecycleEpoch = 0;
 
   public constructor(private readonly runtime: DeterministicShowLoop) {}
 
@@ -1986,8 +2095,13 @@ class PreparedRuntime implements OneLoopRuntime {
     if (this.visibleState !== "ready" || this.preparation !== undefined) {
       return false;
     }
+    const epoch = this.lifecycleEpoch;
     this.visibleState = "running";
     this.preparation = this.runtime.prepare().then((prepared) => {
+      if (this.lifecycleEpoch !== epoch || this.visibleState === "stopped") {
+        this.runtime.stop();
+        return false;
+      }
       if (!prepared || !this.runtime.start()) {
         this.visibleState = "safe-black";
         return false;
@@ -1999,17 +2113,27 @@ class PreparedRuntime implements OneLoopRuntime {
   }
 
   public async advance(): Promise<number> {
+    const epoch = this.lifecycleEpoch;
     const prepared = await this.preparation;
+    if (this.lifecycleEpoch !== epoch) {
+      this.runtime.stop();
+      return 0;
+    }
     if (prepared !== true) {
       this.visibleState = "safe-black";
       return 0;
     }
     const advanced = await this.runtime.advance();
+    if (this.lifecycleEpoch !== epoch) {
+      this.runtime.stop();
+      return 0;
+    }
     this.visibleState = this.runtime.state;
     return advanced;
   }
 
   public stop(): void {
+    this.lifecycleEpoch += 1;
     this.runtime.stop();
     this.visibleState = "stopped";
   }

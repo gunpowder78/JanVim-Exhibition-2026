@@ -241,7 +241,10 @@ class MemorySession implements ShowRunSession {
     return this.generationId;
   }
 
-  public rebindGeneration(generationId: number): void {
+  public async rebindGeneration(
+    generationId: number,
+    _signal: AbortSignal,
+  ): Promise<void> {
     this.generationId = generationId;
   }
 
@@ -516,6 +519,7 @@ function createComposedHost(options: {
   const evidenceValues: ReturnType<typeof parseShowRunEvidence>[] = [];
   const terminalValues: unknown[] = [];
   const leases: RunLease[] = [];
+  const bridgeDisconnectListeners = new Set<() => void>();
   const networkAttempts: ExternalProtocol[] = [];
   const networkBoundaryEvents: NetworkBoundaryEvent[] = [];
   const ipcListeners = new Map<
@@ -849,7 +853,13 @@ function createComposedHost(options: {
               : fixturePoemSha256,
         };
       },
-      close: async () => undefined,
+      onAgentDisconnected: (listener: () => void) => {
+        bridgeDisconnectListeners.add(listener);
+        return () => bridgeDisconnectListeners.delete(listener);
+      },
+      close: async () => {
+        bridgeDisconnectListeners.clear();
+      },
       diagnostics: () => ({
         activeConnections: 1,
         authenticatedConnections: 1,
@@ -918,6 +928,10 @@ function createComposedHost(options: {
     },
     emitRenderer: routeRendererEvent,
     destroySecondary: () => currentWindow?.destroy(),
+    emitAgentDisconnect: () => {
+      for (const listener of [...bridgeDisconnectListeners]) listener();
+    },
+    bridgeDisconnectListenerCount: () => bridgeDisconnectListeners.size,
   };
 }
 
@@ -1271,6 +1285,23 @@ describe("Task 9 recovery operations", () => {
     ]) {
       expect(incidentTemplate).toContain(statement);
     }
+  });
+
+  it("composes an idle authenticated bridge disconnect into immediate invalidation", async () => {
+    const host = createComposedHost();
+    const coordinator = host.adapters.createCoordinator(composedCommand("Show"));
+    await expect(coordinator.boot()).resolves.toEqual({ ready: true });
+    expect(host.bridgeDisconnectListenerCount()).toBe(1);
+
+    host.emitAgentDisconnect();
+    expect(coordinator.diagnostics()).toMatchObject({
+      state: "black-recovering",
+      generationId: 2,
+      currentLoopId: null,
+    });
+
+    await coordinator.requestEmergencyStop("sigint");
+    expect(host.bridgeDisconnectListenerCount()).toBe(0);
   });
 
   it("rejects forbidden post-clear WebRequests with the accepted-run assertion", async () => {
