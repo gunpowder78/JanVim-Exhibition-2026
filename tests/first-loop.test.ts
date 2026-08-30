@@ -277,7 +277,7 @@ beforeEach(() => {
 });
 
 describe("first deterministic causal loop", () => {
-  it("runs ready → prompt → complete result → accept → same-cue write/overlay → ACK → fade → reset", async () => {
+  it("runs ready → prompt → complete result → accept → same-cue write/overlay → ACK → fade → reset ACK → reset", async () => {
     const harness = createHarness();
     await startHarness(harness);
 
@@ -292,15 +292,15 @@ describe("first deterministic causal loop", () => {
       "key-overlay",
       "editor-ack",
       "fade",
-      "reset",
       "editor-ack",
+      "reset",
       "ready",
     ]);
     expect(
       harness.events
         .filter((event) => event.cueId === "cue-reset")
         .map((event) => event.type),
-    ).toEqual(["reset", "editor-ack"]);
+    ).toEqual(["editor-ack", "reset"]);
     const editor = harness.events.find((event) => event.type === "editor-action");
     const overlay = harness.events.find((event) => event.type === "key-overlay");
     expect(editor?.cueId).toBe("cue-insert");
@@ -383,7 +383,7 @@ describe("first deterministic causal loop", () => {
     expect(harness.runtime.state).toBe("safe-black");
     expect(harness.runtime.completedLoops).toBe(0);
     expect(harness.events.filter((event) => event.type === "ready")).toHaveLength(1);
-    expect(harness.events.filter((event) => event.type === "reset")).toHaveLength(1);
+    expect(harness.events.filter((event) => event.type === "reset")).toHaveLength(0);
     expect(harness.events.at(-1)).toMatchObject({
       type: "editor-ack",
       cueId: "cue-reset",

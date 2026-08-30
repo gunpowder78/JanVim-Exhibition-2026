@@ -104,6 +104,7 @@ import {
   ShowRunCoordinator,
   type CoordinatorDiagnostics,
   type PrimaryCueCompletionEvent,
+  type PrimaryEditorDispatchEvent,
   type ShowRunResult,
   type ShowRunSession,
   type ShowSecondarySurface,
@@ -1634,10 +1635,37 @@ class RuntimeShowSession implements ShowRunSession {
     loopId: string,
     surface: ShowSecondarySurface,
     reserveNextLoopId: () => string,
+    onPrimaryEditorDispatch: (event: PrimaryEditorDispatchEvent) => void,
   ): OneLoopRuntime {
     this.requireActive();
     let currentLoopId = loopId;
     const generationId = this.generationId;
+    const editorCues = new Map(
+      this.options.inputs.manifest.cues
+        .filter(
+          (cue): cue is Extract<Cue, { kind: "editor-action" }> =>
+            cue.kind === "editor-action",
+        )
+        .map((cue) => [cue.id, cue]),
+    );
+    let reportedLoopId = loopId;
+    const reportedEditorCueIds = new Set<string>();
+    const reportPrimaryEditorDispatch = (command: AgentCommand): void => {
+      const cue = editorCues.get(command.cueId);
+      if (cue === undefined || cue.payload.action.type !== command.action.type) return;
+      if (command.loopId !== reportedLoopId) {
+        reportedLoopId = command.loopId;
+        reportedEditorCueIds.clear();
+      }
+      if (reportedEditorCueIds.has(cue.id)) return;
+      reportedEditorCueIds.add(cue.id);
+      onPrimaryEditorDispatch({
+        generationId,
+        loopId: command.loopId,
+        cueId: cue.id,
+        cue,
+      });
+    };
     const runtime = new DeterministicShowLoop({
       manifest: { ...this.options.inputs.manifest, loopId },
       poem: this.options.inputs.poem.toString("utf8"),
@@ -1661,6 +1689,7 @@ class RuntimeShowSession implements ShowRunSession {
       },
       agent: {
         dispatch: async (command) => {
+          reportPrimaryEditorDispatch(command);
           const acknowledgement = await this.dispatch(command);
           if (
             acknowledgement.outcome === "failed" ||

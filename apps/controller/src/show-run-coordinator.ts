@@ -59,6 +59,10 @@ export type PrimaryCueCompletionEvent = CueCorrelation & {
   bufferSha256: string;
 };
 
+export type PrimaryEditorDispatchEvent = CueCorrelation & {
+  cue: Extract<Cue, { kind: "editor-action" }>;
+};
+
 export interface ShowSecondarySurface {
   readonly rendererPid: number;
   send(event: RunCueEvent | RunStatusEvent): void;
@@ -82,6 +86,7 @@ export interface ShowRunSession {
     loopId: string,
     surface: ShowSecondarySurface,
     reserveNextLoopId: () => string,
+    onPrimaryEditorDispatch: (event: PrimaryEditorDispatchEvent) => void,
   ): OneLoopRuntime;
   onFault(
     listener: (
@@ -624,6 +629,7 @@ export class ShowRunCoordinator {
       active.loopId,
       telemetrySurface,
       () => this.reserveNextLoopId(generationId),
+      (event) => this.recordPrimaryEditorDispatch(event, generationId),
     );
     const driver = this.dependencies.createDriver({
       runtime,
@@ -759,7 +765,7 @@ export class ShowRunCoordinator {
     const reachesSecondary =
       event.requiresPresentationAck || cueReachesSecondary(event.cue);
     try {
-      if (reachesPrimary) {
+      if (event.cue.kind !== "editor-action" && reachesPrimary) {
         active.telemetry.recordDispatch(
           "primary",
           key,
@@ -775,16 +781,47 @@ export class ShowRunCoordinator {
           dispatchedAtMs,
         );
       }
-      if (
-        event.cue.kind === "editor-action" &&
-        event.cue.payload.action.type === "reset"
-      ) {
-        active.resetCueId = event.cue.id;
-      }
       return true;
     } catch {
       this.ignore("cue-correlation-duplicate");
       return false;
+    }
+  }
+
+  private recordPrimaryEditorDispatch(
+    event: PrimaryEditorDispatchEvent,
+    generationId: number,
+  ): void {
+    const active = this.activeLoop;
+    if (
+      this.state !== "running" ||
+      !this.isCurrentGeneration(generationId) ||
+      event.generationId !== generationId ||
+      active === undefined ||
+      event.loopId !== active.loopId ||
+      event.cueId !== event.cue.id
+    ) {
+      this.ignore("cue-correlation-invalid");
+      return;
+    }
+
+    const key: CueCorrelation = {
+      generationId,
+      loopId: active.loopId,
+      cueId: event.cueId,
+    };
+    try {
+      active.telemetry.recordDispatch(
+        "primary",
+        key,
+        event.cue,
+        this.dependencies.nowMs(),
+      );
+      if (event.cue.payload.action.type === "reset") {
+        active.resetCueId = event.cueId;
+      }
+    } catch {
+      this.ignore("cue-correlation-duplicate");
     }
   }
 

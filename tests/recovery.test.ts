@@ -504,6 +504,7 @@ type NetworkBoundaryEvent = {
 
 function createComposedHost(options: {
   resetPrimaryDelaysMs?: readonly number[];
+  resetSecondaryPresentationDelaysMs?: readonly number[];
 } = {}) {
   const clock = new FakeClock();
   const logStorage = new MemoryLogStorage();
@@ -536,6 +537,7 @@ function createComposedHost(options: {
     | undefined;
   let runtimeNetworkBoundaryStart = 0;
   let resetIndex = 0;
+  let resetSecondaryPresentationIndex = 0;
 
   const recordPotentialAttempt = (
     kind: NetworkBoundaryEvent["kind"],
@@ -610,6 +612,14 @@ function createComposedHost(options: {
         "id" in payload.cue &&
         typeof payload.cue.id === "string"
       ) {
+        if (payload.cue.id === "cue-reset") {
+          clock.advanceBy(
+            options.resetSecondaryPresentationDelaysMs?.[
+              resetSecondaryPresentationIndex
+            ] ?? 0,
+          );
+          resetSecondaryPresentationIndex += 1;
+        }
         routeRendererEvent({
           schema: 1,
           type: "presentation-ack",
@@ -1285,6 +1295,7 @@ describe("Task 9 recovery operations", () => {
   it("composes the strict dispatcher, fake-clock Soak3, telemetry, resources, and evidence threshold", async () => {
     const acceptedHost = createComposedHost({
       resetPrimaryDelaysMs: [83, 83, 83],
+      resetSecondaryPresentationDelaysMs: [83, 83, 83],
     });
     const acceptedCoordinator = await startComposedRun(acceptedHost, "Soak3");
     for (let loopNumber = 1; loopNumber <= 3; loopNumber += 1) {
@@ -1424,6 +1435,7 @@ describe("Task 9 recovery operations", () => {
 
     const rejectedHost = createComposedHost({
       resetPrimaryDelaysMs: [84, 83, 83],
+      resetSecondaryPresentationDelaysMs: [84, 83, 83],
     });
     const rejectedCoordinator = await startComposedRun(rejectedHost, "Soak3");
     for (let loopNumber = 1; loopNumber <= 3; loopNumber += 1) {

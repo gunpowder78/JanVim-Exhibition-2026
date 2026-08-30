@@ -393,6 +393,7 @@ function createStartupHarness(options: {
     action: "close-listener" | "ipc" | "web-guard";
     value: unknown;
   }[];
+  rejectFirstEditorCueId?: string;
 } = {}) {
   const trace: string[] = [];
   const files = new Map<string, Buffer>([
@@ -496,6 +497,7 @@ function createStartupHarness(options: {
   let processIdentityInspection = 0;
   let artifactVerification = 0;
   let timeoutFiveSecondOperations = false;
+  const rejectedEditorCueIds = new Set<string>();
 
   class FakeWebContents extends EventEmitter {
     public readonly session = {
@@ -838,6 +840,13 @@ function createStartupHarness(options: {
       },
       dispatch: async (command: AgentCommand): Promise<AgentAck> => {
         trace.push(`agent:${command.action.type}`);
+        if (
+          command.cueId === options.rejectFirstEditorCueId &&
+          !rejectedEditorCueIds.has(command.cueId)
+        ) {
+          rejectedEditorCueIds.add(command.cueId);
+          throw new Error("injected editor dispatch rejection");
+        }
         return {
           schema: 1,
           loopId: command.loopId,
@@ -977,6 +986,68 @@ function createStartupHarness(options: {
 }
 
 describe("real Task 9 show runtime adapters", () => {
+  it("reports one exact editor cue before bridge dispatch across a bounded retry", async () => {
+    const harness = createStartupHarness({ rejectFirstEditorCueId: "cue-insert" });
+    const coordinator = harness.adapters.createCoordinator(showCommand("Show"));
+    const dependencies = (
+      coordinator as unknown as { dependencies: ShowRunCoordinatorDependencies }
+    ).dependencies;
+    await dependencies.validate();
+    const session = dependencies.createSession(1);
+    const signal = new AbortController().signal;
+    await session.startBridge(signal);
+    await session.launchJanVim(signal);
+    await session.placeJanVim(signal);
+    await session.awaitAgent(signal);
+    const primaryDispatches: Array<{
+      generationId: number;
+      loopId: string;
+      cueId: string;
+      cue: unknown;
+    }> = [];
+    const runtime = session.createLoop(
+      "runtime-loop-1",
+      {
+        rendererPid: 8002,
+        send: () => undefined,
+        onEvent: () => () => undefined,
+        onDestroyed: () => () => undefined,
+        close: () => undefined,
+        diagnostics: () => ({ listeners: 0 }),
+      },
+      () => "runtime-loop-2",
+      (event) => {
+        primaryDispatches.push(event);
+        harness.trace.push(`primary-dispatch:${event.cueId}`);
+      },
+    );
+
+    expect(runtime.start()).toBe(true);
+    await settlePromises();
+    expect(runtime.state).toBe("running");
+    for (const deltaMs of [5_001, 7_001, 33_001, 10_001]) {
+      harness.timers.advanceBy(deltaMs);
+      await runtime.advance();
+    }
+
+    expect(primaryDispatches).toEqual([
+      expect.objectContaining({
+        generationId: 1,
+        loopId: "runtime-loop-1",
+        cueId: "cue-insert",
+        cue: expect.objectContaining({
+          id: "cue-insert",
+          kind: "editor-action",
+          payload: expect.objectContaining({ action: expect.objectContaining({ type: "insert" }) }),
+        }),
+      }),
+    ]);
+    expect(harness.trace.filter((event) => event === "agent:insert")).toHaveLength(2);
+    expect(harness.trace.indexOf("primary-dispatch:cue-insert")).toBeLessThan(
+      harness.trace.indexOf("agent:insert"),
+    );
+  });
+
   it.each([
     [["close-listener"], "injected close-listener cleanup failure"],
     [["ipc"], "injected IPC cleanup failure"],

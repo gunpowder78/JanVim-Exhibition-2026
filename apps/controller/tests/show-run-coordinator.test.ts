@@ -238,6 +238,9 @@ class FakeSession implements ShowRunSession {
   public loopSurface: ShowSecondarySurface | undefined;
   public loopId: string | undefined;
   public reserveNextLoopId: (() => string) | undefined;
+  public primaryEditorDispatch:
+    | ((event: { generationId: number; loopId: string; cueId: string; cue: Extract<Cue, { kind: "editor-action" }> }) => void)
+    | undefined;
   public editorCommandPending = false;
   public connections = 1;
   public naturalExit: "natural" | "still-running" = "natural";
@@ -366,11 +369,27 @@ class FakeSession implements ShowRunSession {
     loopId: string,
     surface: ShowSecondarySurface,
     reserveNextLoopId?: () => string,
+    primaryEditorDispatch?: (event: {
+      generationId: number;
+      loopId: string;
+      cueId: string;
+      cue: Extract<Cue, { kind: "editor-action" }>;
+    }) => void,
   ): OneLoopRuntime {
     this.loopId = loopId;
     this.loopSurface = surface;
     this.reserveNextLoopId = reserveNextLoopId;
+    this.primaryEditorDispatch = primaryEditorDispatch;
     return this.runtime;
+  }
+
+  public emitPrimaryEditorDispatch(event: {
+    generationId: number;
+    loopId: string;
+    cueId: string;
+    cue: Extract<Cue, { kind: "editor-action" }>;
+  }): void {
+    this.primaryEditorDispatch?.(event);
   }
 
   public onFault(
@@ -768,12 +787,10 @@ async function completeResetBoundary(
   const generationId = diagnostics.generationId;
   const dispatchedAtMs = loopNumber * 1_000;
   harness.timers.now = dispatchedAtMs;
-  session.loopSurface.send({
-    schema: 1,
-    type: "run-cue",
+  session.emitPrimaryEditorDispatch({
     generationId,
     loopId,
-    requiresPresentationAck: true,
+    cueId: "cue-reset",
     cue: resetCue(),
   });
 
@@ -783,6 +800,15 @@ async function completeResetBoundary(
     loopId,
     cueId: "cue-reset",
     bufferSha256: ORIGINAL_POEM_SHA256,
+  });
+
+  session.loopSurface.send({
+    schema: 1,
+    type: "run-cue",
+    generationId,
+    loopId,
+    requiresPresentationAck: true,
+    cue: resetCue(),
   });
 
   harness.timers.now = dispatchedAtMs + 5 + visibleDriftMs;
@@ -804,6 +830,62 @@ async function completeResetBoundary(
 }
 
 describe("show run coordinator", () => {
+  it("records reset primary dispatch before ACK completion and secondary reset without a duplicate primary endpoint", async () => {
+    const harness = createHarness();
+    await startRunning(harness);
+    const session = harness.sessions[0]!;
+    const loopId = harness.coordinator.diagnostics().currentLoopId!;
+    const cue = resetCue();
+
+    expect(session.primaryEditorDispatch).toBeTypeOf("function");
+
+    harness.timers.now = 100;
+    session.emitPrimaryEditorDispatch({ generationId: 1, loopId, cueId: cue.id, cue });
+    harness.timers.now = 105;
+    session.emitPrimary({
+      generationId: 1,
+      loopId,
+      cueId: cue.id,
+      bufferSha256: ORIGINAL_POEM_SHA256,
+    });
+    harness.timers.now = 105;
+    session.loopSurface?.send({
+      schema: 1,
+      type: "run-cue",
+      generationId: 1,
+      loopId,
+      requiresPresentationAck: true,
+      cue,
+    });
+    harness.timers.now = 107;
+    expect(
+      harness.coordinator.handleRendererEvent({
+        schema: 1,
+        type: "presentation-ack",
+        generationId: 1,
+        loopId,
+        cueId: cue.id,
+      }),
+    ).toBe(true);
+
+    session.runtime.completedLoops = 1;
+    session.reserveNextLoopId?.();
+    harness.timers.now = 120;
+    await harness.timers.fireInterval(16);
+    await settle();
+
+    expect(harness.coordinator.diagnostics()).toMatchObject({
+      state: "running",
+      completedLoops: 1,
+    });
+    expect(
+      harness.logs.some(
+        (event) =>
+          event.type === "ignored-event" && event.reason === "primary-correlation-missing",
+      ),
+    ).toBe(false);
+  });
+
   it("keeps startup strictly ordered and rejects Start until the final prepare ACK", async () => {
     const phases = [
       "validate",
@@ -955,15 +1037,30 @@ describe("show run coordinator", () => {
     await startRunning(harness);
     const session = harness.sessions[0]!;
     const loopId = harness.coordinator.diagnostics().currentLoopId!;
+    const cue = resetCue();
 
     harness.timers.now = 100;
+    session.emitPrimaryEditorDispatch({
+      generationId: 1,
+      loopId,
+      cueId: cue.id,
+      cue,
+    });
+
+    harness.timers.now = 120;
+    session.emitPrimary({
+      generationId: 1,
+      loopId,
+      cueId: cue.id,
+      bufferSha256: ORIGINAL_POEM_SHA256,
+    });
     session.loopSurface?.send({
       schema: 1,
       type: "run-cue",
       generationId: 1,
       loopId,
       requiresPresentationAck: true,
-      cue: resetCue(),
+      cue,
     });
     expect(harness.surfaces[0]!.sent.at(-1)).toMatchObject({
       type: "run-cue",
@@ -972,7 +1069,7 @@ describe("show run coordinator", () => {
       cue: { id: "cue-reset" },
     });
 
-    harness.timers.now = 112;
+    harness.timers.now = 132;
     expect(
       harness.coordinator.handleRendererEvent({
         schema: 1,
@@ -1004,16 +1101,9 @@ describe("show run coordinator", () => {
       }),
     ).toBe(false);
 
-    harness.timers.now = 120;
-    session.emitPrimary({
-      generationId: 1,
-      loopId,
-      cueId: "cue-reset",
-      bufferSha256: ORIGINAL_POEM_SHA256,
-    });
     session.runtime.completedLoops = 1;
     session.reserveNextLoopId?.();
-    harness.timers.now = 130;
+    harness.timers.now = 140;
     await harness.timers.fireInterval(16);
     await settle();
 
@@ -1023,7 +1113,7 @@ describe("show run coordinator", () => {
       presentedSecondaryCueCount: 1,
       primaryCompletionLatencyMs: { count: 1, p50Ms: 20, p95Ms: 20, maxMs: 20 },
       secondaryPresentLatencyMs: { count: 1, p50Ms: 12, p95Ms: 12, maxMs: 12 },
-      finalVisibleDriftMs: 8,
+      finalVisibleDriftMs: 12,
       resetBufferSha256: ORIGINAL_POEM_SHA256,
     });
   });
@@ -1168,9 +1258,9 @@ describe("show run coordinator", () => {
       cumulativeVisibleDriftMs: 100,
       secondaryPresentLatencyMs: {
         count: 100,
-        p50Ms: 6,
-        p95Ms: 6,
-        maxMs: 6,
+        p50Ms: 1,
+        p95Ms: 1,
+        maxMs: 1,
       },
       primaryCompletionLatencyMs: {
         count: 100,
