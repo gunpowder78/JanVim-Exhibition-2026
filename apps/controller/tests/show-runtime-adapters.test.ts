@@ -389,6 +389,10 @@ function createStartupHarness(options: {
     | "ipc"
     | "web-guard"
   )[];
+  cleanupThrows?: readonly {
+    action: "close-listener" | "ipc" | "web-guard";
+    value: unknown;
+  }[];
 } = {}) {
   const trace: string[] = [];
   const files = new Map<string, Buffer>([
@@ -558,6 +562,10 @@ function createStartupHarness(options: {
     ): this {
       if (eventName === "will-navigate") {
         cleanupAttempts.webGuardDisposal += 1;
+        const injected = options.cleanupThrows?.find(
+          (failure) => failure.action === "web-guard",
+        );
+        if (injected !== undefined) throw injected.value;
         if (options.cleanupFailures?.includes("web-guard") === true) {
           throw new Error("injected web-guard cleanup failure");
         }
@@ -604,6 +612,10 @@ function createStartupHarness(options: {
     ): this {
       if (eventName === "close") {
         cleanupAttempts.closeListenerRemoval += 1;
+        const injected = options.cleanupThrows?.find(
+          (failure) => failure.action === "close-listener",
+        );
+        if (injected !== undefined) throw injected.value;
         if (options.cleanupFailures?.includes("close-listener") === true) {
           throw new Error("injected close-listener cleanup failure");
         }
@@ -631,6 +643,10 @@ function createStartupHarness(options: {
       },
       removeListener: (channel: string) => {
         cleanupAttempts.ipcRemoval += 1;
+        const injected = options.cleanupThrows?.find(
+          (failure) => failure.action === "ipc",
+        );
+        if (injected !== undefined) throw injected.value;
         if (options.cleanupFailures?.includes("ipc") === true) {
           throw new Error("injected IPC cleanup failure");
         }
@@ -996,6 +1012,51 @@ describe("real Task 9 show runtime adapters", () => {
         windowClose: 1,
       });
       expect(surface.diagnostics()).toEqual({ listeners: 0 });
+    },
+  );
+
+  it.each([undefined, null] as const)(
+    "preserves a first cleanup throw of %s before a later Error",
+    async (firstThrownValue) => {
+      const harness = createStartupHarness({
+        cleanupThrows: [
+          { action: "close-listener", value: firstThrownValue },
+          { action: "ipc", value: new Error("later IPC cleanup failure") },
+        ],
+      });
+      const coordinator = harness.adapters.createCoordinator(showCommand("Show"));
+      const dependencies = (
+        coordinator as unknown as {
+          dependencies: ShowRunCoordinatorDependencies;
+        }
+      ).dependencies;
+      await dependencies.validate();
+      const surface: ShowSecondarySurface = await dependencies.openSecondary(
+        1,
+        new AbortController().signal,
+      );
+      surface.onEvent(() => undefined);
+      surface.onDestroyed(() => undefined);
+
+      let didThrow = false;
+      let caughtValue: unknown;
+      try {
+        surface.close();
+      } catch (error) {
+        didThrow = true;
+        caughtValue = error;
+      }
+
+      expect(() => surface.close()).not.toThrow();
+      expect(harness.cleanupAttempts).toEqual({
+        closeListenerRemoval: 1,
+        ipcRemoval: 1,
+        webGuardDisposal: 1,
+        windowClose: 1,
+      });
+      expect(surface.diagnostics()).toEqual({ listeners: 0 });
+      expect(didThrow).toBe(true);
+      expect(caughtValue).toBe(firstThrownValue);
     },
   );
 

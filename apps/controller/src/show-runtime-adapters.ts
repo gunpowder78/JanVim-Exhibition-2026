@@ -1280,6 +1280,7 @@ async function openShowSecondary(input: {
     disposed = true;
     intentionalClose = true;
     let cleanupError: unknown;
+    let hasCleanupError = false;
     const cleanupActions: readonly (() => void)[] = [
       () => closeEvents.removeListener("close", onWindowClose),
       disposeIpc,
@@ -1296,10 +1297,13 @@ async function openShowSecondary(input: {
       try {
         action();
       } catch (error) {
-        cleanupError ??= error;
+        if (!hasCleanupError) {
+          cleanupError = error;
+          hasCleanupError = true;
+        }
       }
     }
-    if (cleanupError !== undefined) throw cleanupError;
+    if (hasCleanupError) throw cleanupError;
   };
   const onClosed = (): void => {
     try {
