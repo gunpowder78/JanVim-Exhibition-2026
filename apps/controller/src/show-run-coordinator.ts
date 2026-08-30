@@ -45,6 +45,7 @@ const MAX_TRANSITIONS = 32;
 const MAX_IGNORED_REASON_BUCKETS = 32;
 const MAX_SHUTDOWN_FAILURES = 16;
 const MAX_COORDINATOR_PHASE_DEADLINES = 8;
+const MAX_GUARDED_ABORT_LISTENERS = 64;
 
 class BoundedPhaseTimeoutError extends Error {
   public constructor(
@@ -151,8 +152,12 @@ export interface ShowRunCoordinatorDependencies {
   finalizeEvidence(
     result: ShowRunResult,
     diagnostics: CoordinatorDiagnostics,
+    signal: AbortSignal,
   ): Promise<void>;
-  writeTerminalMarker(result: ShowRunResult): Promise<void>;
+  writeTerminalMarker(
+    result: ShowRunResult,
+    signal: AbortSignal,
+  ): Promise<void>;
   flushLogs(): Promise<void>;
   nextLoopId(generationId: number, loopNumber: number): string;
   nowMs(): number;
@@ -262,6 +267,10 @@ type SessionCleanupResult = {
   leaseRemoved: boolean;
 };
 
+type HeldCleanupSequence = {
+  revoked: boolean;
+};
+
 type RecoveryPhase =
   | "open-secondary"
   | "reset-original"
@@ -309,6 +318,7 @@ export class ShowRunCoordinator {
   private priorSessionSettlement: SessionCleanupResult | undefined;
   private boundaryOperation: Promise<void> | undefined;
   private pendingBoundaryTerminal: ShowRunResult | undefined;
+  private heldCleanupSequence: HeldCleanupSequence | undefined;
   private readonly surfaceDisposers = new Set<() => void>();
   private readonly sessionDisposers = new Set<() => void>();
   private readonly ignoredReasonBuckets = new Set<string>();
@@ -511,7 +521,7 @@ export class ShowRunCoordinator {
       let settled = false;
       let lateValueHandled = false;
       let handle: OneLoopTimerHandle | undefined;
-      const abortController = new AbortController();
+      const abortController = createGuardedAbortController();
 
       const revokeDeadline = (clearExternal: boolean): boolean => {
         const currentHandle = handle;
@@ -529,7 +539,7 @@ export class ShowRunCoordinator {
       };
 
       const abort = (): void => {
-        bestEffortSync(() => abortController.abort());
+        abortController.abort();
       };
 
       const cancel = (): void => {
@@ -560,6 +570,10 @@ export class ShowRunCoordinator {
           reject(new BoundedPhaseTimeoutError(phase, timeoutMs));
         }, timeoutMs);
         handle = allocatedHandle;
+        if (settled) {
+          revokeDeadline(true);
+          return;
+        }
         this.phaseDeadlines.set(allocatedHandle, { phase, cancel });
       } catch (error) {
         settled = true;
@@ -622,53 +636,95 @@ export class ShowRunCoordinator {
   private async cleanupHeldSession(
     session: ShowRunSession,
   ): Promise<SessionCleanupResult> {
-    await this.runCleanupPhase("held-agent-shutdown", () =>
-      session.sendAgentShutdown(2_000, 1),
-    );
-    await this.runCleanupPhase("held-hwnd-close", () =>
-      session.closePlacedWindow(2_000, 4_096),
-    );
-    const exit = await this.runCleanupPhase(
-      "held-wait-natural",
-      () => session.waitForJanVimExit(5_000),
-    );
-    let childSettled = exit === "natural";
-    if (!childSettled) {
-      await this.runCleanupPhase("held-terminate-exact", () =>
-        session.terminateExactJanVim(),
+    this.revokeHeldCleanupSequence();
+    const sequence: HeldCleanupSequence = { revoked: false };
+    this.heldCleanupSequence = sequence;
+    try {
+      await this.runCleanupPhase(sequence, "held-agent-shutdown", () =>
+        session.sendAgentShutdown(2_000, 1),
       );
-      childSettled = (await this.runCleanupPhase(
-        "held-wait-forced",
-        () => session.waitForForcedExit(5_000),
-      )) === true;
+      if (!this.isHeldCleanupSequenceCurrent(sequence)) return cancelledCleanup();
+      await this.runCleanupPhase(sequence, "held-hwnd-close", () =>
+        session.closePlacedWindow(2_000, 4_096),
+      );
+      if (!this.isHeldCleanupSequenceCurrent(sequence)) return cancelledCleanup();
+      const exit = await this.runCleanupPhase(
+        sequence,
+        "held-wait-natural",
+        () => session.waitForJanVimExit(5_000),
+      );
+      if (!this.isHeldCleanupSequenceCurrent(sequence)) return cancelledCleanup();
+      let childSettled = exit === "natural";
+      if (!childSettled) {
+        await this.runCleanupPhase(sequence, "held-terminate-exact", () =>
+          session.terminateExactJanVim(),
+        );
+        if (!this.isHeldCleanupSequenceCurrent(sequence)) {
+          return cancelledCleanup();
+        }
+        childSettled = (await this.runCleanupPhase(
+          sequence,
+          "held-wait-forced",
+          () => session.waitForForcedExit(5_000),
+        )) === true;
+        if (!this.isHeldCleanupSequenceCurrent(sequence)) {
+          return cancelledCleanup();
+        }
+      }
+      await this.runCleanupPhase(sequence, "held-bridge-close", () =>
+        session.closeBridge(5_000),
+      );
+      if (!this.isHeldCleanupSequenceCurrent(sequence)) return cancelledCleanup();
+      this.disposeSessionListeners();
+      if (!this.isHeldCleanupSequenceCurrent(sequence)) return cancelledCleanup();
+      bestEffortSync(() => session.dispose());
+      if (!this.isHeldCleanupSequenceCurrent(sequence)) return cancelledCleanup();
+      const leaseRemoved = bestEffortSyncResult(
+        () => session.diagnostics().leaseRemoved,
+        false,
+      );
+      if (!this.isHeldCleanupSequenceCurrent(sequence)) return cancelledCleanup();
+      if (this.session === session) this.session = undefined;
+      return { childSettled, leaseRemoved };
+    } finally {
+      if (this.heldCleanupSequence === sequence) {
+        this.heldCleanupSequence = undefined;
+      }
     }
-    await this.runCleanupPhase("held-bridge-close", () =>
-      session.closeBridge(5_000),
-    );
-    this.disposeSessionListeners();
-    bestEffortSync(() => session.dispose());
-    const leaseRemoved = bestEffortSyncResult(
-      () => session.diagnostics().leaseRemoved,
-      false,
-    );
-    if (this.session === session) this.session = undefined;
-    return { childSettled, leaseRemoved };
   }
 
   private async runCleanupPhase<T>(
+    sequence: HeldCleanupSequence,
     phase: string,
     action: () => Promise<T>,
   ): Promise<T | undefined> {
+    if (!this.isHeldCleanupSequenceCurrent(sequence)) return undefined;
     try {
       return await this.runBoundedPhase(
         `cleanup-${phase}`,
         CLEANUP_PHASE_TIMEOUT_MS,
-        () => action(),
+        () => {
+          if (!this.isHeldCleanupSequenceCurrent(sequence)) {
+            throw new Error("held cleanup sequence cancelled");
+          }
+          return action();
+        },
       );
     } catch {
       this.log({ type: "cleanup-phase-failed", phase });
       return undefined;
     }
+  }
+
+  private isHeldCleanupSequenceCurrent(sequence: HeldCleanupSequence): boolean {
+    return !sequence.revoked && this.heldCleanupSequence === sequence;
+  }
+
+  private revokeHeldCleanupSequence(): void {
+    const sequence = this.heldCleanupSequence;
+    if (sequence === undefined) return;
+    sequence.revoked = true;
+    this.heldCleanupSequence = undefined;
   }
 
   private bindSurface(
@@ -1213,11 +1269,16 @@ export class ShowRunCoordinator {
         "loop-boundary-finalize",
         BOUNDARY_PHASE_TIMEOUT_MS,
         async () => {
-          const [resourceSummary, networkSnapshot] = await Promise.all([
+          const [resourceResult, networkResult] = await Promise.allSettled([
             active.sampler.finish(),
             this.dependencies.sampleNetwork(),
           ]);
-          return { resourceSummary, networkSnapshot };
+          if (resourceResult.status === "rejected") throw resourceResult.reason;
+          if (networkResult.status === "rejected") throw networkResult.reason;
+          return {
+            resourceSummary: resourceResult.value,
+            networkSnapshot: networkResult.value,
+          };
         },
       )
         .then(({ resourceSummary, networkSnapshot }) => {
@@ -1877,6 +1938,7 @@ export class ShowRunCoordinator {
     this.logShutdownPhase("invalidate-generation");
     this.sendStatus();
     this.revokeBoundaryOperation();
+    this.revokeHeldCleanupSequence();
     this.cancelBoundedPhases();
     this.cancelRecoveryDelays();
     this.logShutdownPhase("stop-driver-and-queued-editor-work");
@@ -2006,14 +2068,18 @@ export class ShowRunCoordinator {
       await this.runShutdownPhase(
         "evidence-write-failed",
         FINALIZATION_PHASE_TIMEOUT_MS,
-        () =>
-          this.dependencies.finalizeEvidence(finalResult, evidenceDiagnostics),
+        (signal) =>
+          this.dependencies.finalizeEvidence(
+            finalResult,
+            evidenceDiagnostics,
+            signal,
+          ),
       );
       finalResult = this.classifyShutdownResult(result);
       await this.runShutdownPhase(
         "terminal-marker-failed",
         FINALIZATION_PHASE_TIMEOUT_MS,
-        () => this.dependencies.writeTerminalMarker(finalResult),
+        (signal) => this.dependencies.writeTerminalMarker(finalResult, signal),
       );
       finalResult = this.classifyShutdownResult(result);
       this.transition("stopped", finalResult.reason);
@@ -2035,13 +2101,13 @@ export class ShowRunCoordinator {
   private async runShutdownPhase<T>(
     classification: string,
     timeoutMs: number,
-    action: () => Promise<T>,
+    action: (signal: AbortSignal) => Promise<T>,
   ): Promise<T | undefined> {
     try {
       return await this.runBoundedPhase(
         `shutdown-${classification}`,
         timeoutMs,
-        () => action(),
+        action,
       );
     } catch {
       this.recordShutdownFailure(classification);
@@ -2242,6 +2308,159 @@ function cueReachesPrimary(cue: Cue): boolean {
     cue.target === "main" ||
     cue.target === "both"
   );
+}
+
+function cancelledCleanup(): SessionCleanupResult {
+  return { childSettled: false, leaseRemoved: false };
+}
+
+function createGuardedAbortController(): {
+  readonly signal: AbortSignal;
+  abort(reason?: unknown): void;
+} {
+  const controller = new AbortController();
+  type Registration = {
+    listener: EventListenerOrEventListenerObject;
+    wrapped: EventListener;
+    capture: boolean;
+    once: boolean;
+  };
+  const registrations: Registration[] = [];
+  let exposedSignal!: AbortSignal;
+  let onabort: ((this: AbortSignal, event: Event) => unknown) | null = null;
+
+  const captureOf = (
+    options?: boolean | AddEventListenerOptions | EventListenerOptions,
+  ): boolean =>
+    typeof options === "boolean" ? options : options?.capture === true;
+
+  const removeRegistration = (registration: Registration): void => {
+    const index = registrations.indexOf(registration);
+    if (index >= 0) registrations.splice(index, 1);
+    controller.signal.removeEventListener(
+      "abort",
+      registration.wrapped,
+      registration.capture,
+    );
+  };
+
+  const addAbortListener = (
+    listener: EventListenerOrEventListenerObject | null,
+    options?: boolean | AddEventListenerOptions,
+  ): void => {
+    if (listener === null || controller.signal.aborted) return;
+    const capture = captureOf(options);
+    if (
+      registrations.some(
+        (registration) =>
+          registration.listener === listener && registration.capture === capture,
+      )
+    ) {
+      return;
+    }
+    if (registrations.length >= MAX_GUARDED_ABORT_LISTENERS) {
+      throw new Error("coordinator abort listener capacity exceeded");
+    }
+    const registration: Registration = {
+      listener,
+      capture,
+      once: typeof options === "object" && options.once === true,
+      wrapped: () => undefined,
+    };
+    registration.wrapped = (event) => {
+      if (registration.once) removeRegistration(registration);
+      try {
+        if (typeof listener === "function") {
+          listener.call(exposedSignal, event);
+        } else {
+          listener.handleEvent(event);
+        }
+      } catch {
+        // One dependency listener cannot escape the bounded phase or skip peers.
+      }
+    };
+    registrations.push(registration);
+    controller.signal.addEventListener("abort", registration.wrapped, options);
+  };
+
+  const removeAbortListener = (
+    listener: EventListenerOrEventListenerObject | null,
+    options?: boolean | EventListenerOptions,
+  ): void => {
+    if (listener === null) return;
+    const capture = captureOf(options);
+    const registration = registrations.find(
+      (candidate) =>
+        candidate.listener === listener && candidate.capture === capture,
+    );
+    if (registration !== undefined) removeRegistration(registration);
+  };
+
+  exposedSignal = new Proxy(controller.signal, {
+    get(target, property) {
+      if (property === "addEventListener") {
+        return (
+          type: string,
+          listener: EventListenerOrEventListenerObject | null,
+          options?: boolean | AddEventListenerOptions,
+        ): void => {
+          if (listener === null) return;
+          if (type === "abort") addAbortListener(listener, options);
+          else target.addEventListener(type, listener, options);
+        };
+      }
+      if (property === "removeEventListener") {
+        return (
+          type: string,
+          listener: EventListenerOrEventListenerObject | null,
+          options?: boolean | EventListenerOptions,
+        ): void => {
+          if (listener === null) return;
+          if (type === "abort") removeAbortListener(listener, options);
+          else target.removeEventListener(type, listener, options);
+        };
+      }
+      if (property === "onabort") return onabort;
+      const value = Reflect.get(target, property, target) as unknown;
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+    set(target, property, value) {
+      if (property !== "onabort") {
+        return Reflect.set(target, property, value, target);
+      }
+      onabort = typeof value === "function" ? value : null;
+      target.onabort =
+        onabort === null
+          ? null
+          : (event) => {
+              try {
+                onabort?.call(exposedSignal, event);
+              } catch {
+                // Property listeners receive the same nonthrowing isolation.
+              }
+            };
+      return true;
+    },
+  }) as AbortSignal;
+
+  controller.signal.addEventListener(
+    "abort",
+    () => {
+      queueMicrotask(() => {
+        for (const registration of [...registrations]) {
+          removeRegistration(registration);
+        }
+        onabort = null;
+        controller.signal.onabort = null;
+      });
+    },
+    { once: true },
+  );
+
+  return {
+    signal: exposedSignal,
+    abort: (reason?: unknown) => controller.abort(reason),
+  };
 }
 
 function cueReachesSecondary(cue: Cue): boolean {

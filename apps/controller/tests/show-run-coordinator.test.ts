@@ -128,6 +128,9 @@ class FakeTimers implements OneLoopTimerAdapter {
   public onSetTimeout: ((delayMs: number) => void) | undefined;
   public rejectTimeoutSet = false;
   public rejectTimeoutClear = false;
+  public synchronousTimeoutDelayMs: number | undefined;
+  public readonly clearedTimeoutIds: number[] = [];
+  private synchronousTimeoutFired = false;
 
   public setInterval(callback: () => void, delayMs: number): number {
     const entry = { id: this.nextId++, delayMs, callback };
@@ -142,15 +145,26 @@ class FakeTimers implements OneLoopTimerAdapter {
   public setTimeout(callback: () => void, delayMs: number): number {
     if (this.rejectTimeoutSet) throw new Error("injected timer set failure");
     const entry = { id: this.nextId++, delayMs, callback };
-    this.timeouts.set(entry.id, entry);
     this.timeoutDelays.push(delayMs);
     this.onSetTimeout?.(delayMs);
+    if (
+      delayMs === this.synchronousTimeoutDelayMs &&
+      !this.synchronousTimeoutFired
+    ) {
+      this.synchronousTimeoutFired = true;
+      callback();
+    } else {
+      this.timeouts.set(entry.id, entry);
+    }
     return entry.id;
   }
 
   public clearTimeout(id: OneLoopTimerHandle): void {
     if (this.rejectTimeoutClear) throw new Error("injected timer clear failure");
-    if (typeof id === "number") this.timeouts.delete(id);
+    if (typeof id === "number") {
+      this.clearedTimeoutIds.push(id);
+      this.timeouts.delete(id);
+    }
   }
 
   public async fireInterval(delayMs: number): Promise<void> {
@@ -689,6 +703,10 @@ interface HarnessOptions {
   reserveNextLoopOnStart?: boolean;
   publicationDiagnosticsFailure?: boolean;
   observeRetainedCallbacks?: boolean;
+  synchronousTimeoutDelayMs?: number;
+  throwingAbortListenerPhase?: "open-secondary";
+  boundaryImmediateFailure?: "resource" | "network";
+  firstHeldCleanupGate?: Deferred;
 }
 
 function createHarness(options: HarnessOptions = {}) {
@@ -696,6 +714,7 @@ function createHarness(options: HarnessOptions = {}) {
   const logs: Array<Record<string, unknown>> = [];
   const logAttempts: Array<Record<string, unknown>> = [];
   const timers = new FakeTimers();
+  timers.synchronousTimeoutDelayMs = options.synchronousTimeoutDelayMs;
   if (options.traceTimerSets === true) {
     timers.onSetTimeout = (delayMs) => trace.push(`timer-set:${delayMs}`);
   }
@@ -712,7 +731,11 @@ function createHarness(options: HarnessOptions = {}) {
     result: ShowRunResult;
     diagnostics: ReturnType<ShowRunCoordinator["diagnostics"]>;
   }> = [];
+  const terminalMarkers: ShowRunResult[] = [];
+  const evidenceSignals: AbortSignal[] = [];
+  const terminalMarkerSignals: AbortSignal[] = [];
   let networkSamples = 0;
+  let firstHeldCleanupBlocked = false;
   const traceLoopConstruction =
     options.loopConstructionFailure !== undefined ||
     options.rollbackRuntimeStopFailure === true ||
@@ -734,6 +757,27 @@ function createHarness(options: HarnessOptions = {}) {
     },
     openSecondary: async (generationId, signal) => {
       trace.push(`open-secondary:${generationId}`);
+      if (
+        options.throwingAbortListenerPhase === "open-secondary" &&
+        surfaces.length === 0
+      ) {
+        const removedListener = (): void => {
+          trace.push("removed-abort-listener");
+        };
+        signal.addEventListener("abort", removedListener);
+        signal.removeEventListener("abort", removedListener);
+        signal.addEventListener("abort", () => {
+          trace.push("throwing-abort-listener");
+          throw new Error("injected abort listener failure");
+        });
+        signal.addEventListener("abort", () => {
+          trace.push("later-abort-listener");
+        });
+        signal.onabort = () => {
+          trace.push("throwing-onabort-listener");
+          throw new Error("injected onabort listener failure");
+        };
+      }
       const recoveryOpen = surfaces.length > 0;
       if (recoveryOpen && options.recoveryOpenGate !== undefined) {
         await waitForAbortable(options.recoveryOpenGate.promise, signal);
@@ -763,6 +807,15 @@ function createHarness(options: HarnessOptions = {}) {
         generationId,
         trace,
         async (phase) => {
+          if (
+            sessionIndex === 0 &&
+            phase === "agent-shutdown" &&
+            options.firstHeldCleanupGate !== undefined &&
+            !firstHeldCleanupBlocked
+          ) {
+            firstHeldCleanupBlocked = true;
+            await options.firstHeldCleanupGate.promise;
+          }
           await block(phase);
           if (
             sessionIndex > 0 &&
@@ -868,6 +921,12 @@ function createHarness(options: HarnessOptions = {}) {
           trace.push(`resource-finish-call:${samplerNumber}`);
         }
         await block(`resource-finish-${samplerNumber}`);
+        if (
+          options.boundaryImmediateFailure === "resource" &&
+          samplerNumber === 1
+        ) {
+          throw new Error("injected boundary resource failure");
+        }
         return finish();
       });
       if (traceLoopConstruction) {
@@ -910,6 +969,12 @@ function createHarness(options: HarnessOptions = {}) {
       ) {
         throw new Error("injected network snapshot failure");
       }
+      if (
+        networkSamples === 2 &&
+        options.boundaryImmediateFailure === "network"
+      ) {
+        throw new Error("injected boundary network failure");
+      }
       return {
         sampledAtMs: timers.now,
         activeExternalDefaultRoutes: 0,
@@ -917,20 +982,25 @@ function createHarness(options: HarnessOptions = {}) {
         offline: true,
       };
     },
-    finalizeEvidence: async (result, diagnostics) => {
+    finalizeEvidence: async (result, diagnostics, signal?: AbortSignal) => {
       trace.push(`finalize:${result.reason}`);
+      if (signal !== undefined) evidenceSignals.push(signal);
       await block("finalize-evidence");
+      signal?.throwIfAborted();
       if (options.shutdownFailures?.has("finalize-evidence") === true) {
         throw new Error("injected evidence failure");
       }
       evidence.push({ result, diagnostics });
     },
-    writeTerminalMarker: async (result) => {
+    writeTerminalMarker: async (result, signal?: AbortSignal) => {
       trace.push(`terminal:${result.reason}`);
+      if (signal !== undefined) terminalMarkerSignals.push(signal);
       await block("terminal-marker");
+      signal?.throwIfAborted();
       if (options.shutdownFailures?.has("terminal-marker") === true) {
         throw new Error("injected terminal marker failure");
       }
+      terminalMarkers.push(result);
     },
     flushLogs: async () => {
       trace.push("flush-logs");
@@ -981,6 +1051,9 @@ function createHarness(options: HarnessOptions = {}) {
     samplers,
     loopIds,
     evidence,
+    terminalMarkers,
+    evidenceSignals,
+    terminalMarkerSignals,
     get networkSamples() {
       return networkSamples;
     },
@@ -3001,7 +3074,7 @@ describe("show run coordinator", () => {
     }
   });
 
-  it("serializes recovery cleanup with a concurrent emergency shutdown", async () => {
+  it("hands recovery cleanup ownership to a concurrent emergency ladder", async () => {
     const harness = createHarness({ mode: "Show", blockedPhase: "agent-shutdown" });
     await startRunning(harness);
     harness.sessions[0]!.emitFault("agent-disconnected");
@@ -3014,11 +3087,13 @@ describe("show run coordinator", () => {
     await settle();
     expect(harness.trace.filter((entry) => entry.startsWith("agent-shutdown"))).toEqual([
       "agent-shutdown:2000:1",
+      "agent-shutdown:2000:1",
     ]);
 
     harness.blocker?.resolve();
     await expect(shutdown).resolves.toBeUndefined();
     expect(harness.trace.filter((entry) => entry.startsWith("agent-shutdown"))).toEqual([
+      "agent-shutdown:2000:1",
       "agent-shutdown:2000:1",
     ]);
     expect(harness.sessions).toHaveLength(1);
@@ -3629,16 +3704,20 @@ describe("show run coordinator", () => {
     expect(harness.coordinator.diagnostics()).toEqual(stopped);
   });
 
-  it("does not await captured nonsettling recovery cleanup during emergency shutdown", async () => {
+  it("revokes a nonsettling held-cleanup sequence before the emergency ladder takes ownership", async () => {
     const gate = deferred();
     const harness = createHarness({
       mode: "Show",
-      phaseDeferrals: new Map([["agent-shutdown", gate]]),
+      firstHeldCleanupGate: gate,
     });
     await startRunning(harness);
     harness.sessions[0]!.emitFault("janvim-exited");
     await settle();
     expect(harness.coordinator.diagnostics().state).toBe("black-recovering");
+    expect(harness.timers.active(PHASE_TIMEOUT_MS)).toBe(1);
+    expect(
+      harness.trace.filter((entry) => entry.startsWith("agent-shutdown")),
+    ).toHaveLength(1);
 
     const shutdown = harness.coordinator.requestEmergencyStop("sigint");
     let shutdownSettled = false;
@@ -3653,9 +3732,190 @@ describe("show run coordinator", () => {
     });
     const stopped = harness.coordinator.diagnostics();
     expect(stopped).toMatchObject({ state: "stopped", counts: { timers: 0 } });
+    expect(
+      harness.trace.filter((entry) => entry.startsWith("agent-shutdown")),
+    ).toHaveLength(2);
+    expect(
+      harness.trace.filter((entry) => entry.startsWith("close-window")),
+    ).toHaveLength(1);
+    expect(
+      harness.trace.filter((entry) => entry.startsWith("wait-natural")),
+    ).toHaveLength(1);
+    expect(
+      harness.trace.filter((entry) => entry.startsWith("close-bridge")),
+    ).toHaveLength(1);
+    expect(harness.trace.filter((entry) => entry === "session-dispose")).toHaveLength(
+      1,
+    );
+    const stoppedTrace = [...harness.trace];
 
     gate.resolve();
     await settle();
+    expect(harness.coordinator.diagnostics()).toEqual(stopped);
+    expect(harness.trace).toEqual(stoppedTrace);
+  });
+
+  it("does not register or start a phase after a synchronous reentrant deadline", async () => {
+    const gate = deferred();
+    const harness = createHarness({
+      mode: "Show",
+      synchronousTimeoutDelayMs: STARTUP_PHASE_TIMEOUT_MS,
+      phaseDeferrals: new Map([["validate", gate]]),
+    });
+
+    await expect(harness.coordinator.boot()).resolves.toEqual({
+      ready: false,
+      reason: "startup-failed",
+    });
+    expect(harness.trace).not.toContain("validate");
+    expect(harness.timers.clearedTimeoutIds).toHaveLength(1);
+    expect(harness.timers.active(STARTUP_PHASE_TIMEOUT_MS)).toBe(0);
+    expect(harness.coordinator.diagnostics()).toMatchObject({
+      state: "safe-ready",
+      counts: { timers: 0 },
+    });
+
+    expect(harness.coordinator.handleRendererEvent(stopEvent())).toBe(true);
+    await harness.coordinator.completion;
+    const stopped = harness.coordinator.diagnostics();
+    gate.resolve();
+    await settle();
+    expect(harness.coordinator.diagnostics()).toEqual(stopped);
+  });
+
+  it("contains a throwing abort listener while notifying every later listener", async () => {
+    const gate = deferred();
+    const harness = createHarness({
+      mode: "Show",
+      throwingAbortListenerPhase: "open-secondary",
+      phaseDeferrals: new Map([["open-secondary", gate]]),
+    });
+    const boot = harness.coordinator.boot();
+    await settle();
+
+    await harness.timers.fireTimeout(STARTUP_PHASE_TIMEOUT_MS);
+    await expect(boot).resolves.toEqual({
+      ready: false,
+      reason: "startup-failed",
+    });
+    expect(harness.trace).toContain("throwing-abort-listener");
+    expect(harness.trace).toContain("later-abort-listener");
+    expect(harness.trace).toContain("throwing-onabort-listener");
+    expect(harness.trace).not.toContain("removed-abort-listener");
+    expect(harness.coordinator.diagnostics()).toMatchObject({
+      state: "safe-ready",
+      counts: { timers: 0 },
+    });
+
+    gate.resolve();
+    expect(harness.coordinator.handleRendererEvent(stopEvent())).toBe(true);
+    await harness.coordinator.completion;
+  });
+
+  it.each([
+    ["resource", "network-sample-2"],
+    ["network", "resource-finish-1"],
+  ] as const)(
+    "keeps the common boundary deadline after an immediate %s rejection",
+    async (failure, hangingPeer) => {
+      const peerGate = deferred();
+      const harness = createHarness({
+        mode: "Show",
+        boundaryImmediateFailure: failure,
+        phaseDeferrals: new Map([[hangingPeer, peerGate]]),
+      });
+      await startRunning(harness);
+      await completeResetBoundary(harness, 1);
+      await settle();
+
+      let completionSettled = false;
+      void harness.coordinator.completion.then(() => {
+        completionSettled = true;
+      });
+      expect(harness.coordinator.diagnostics()).toMatchObject({
+        state: "running",
+        pendingBoundaryWork: 1,
+      });
+      expect(completionSettled).toBe(false);
+      expect(harness.timers.active(PHASE_TIMEOUT_MS)).toBe(1);
+
+      await harness.timers.fireTimeout(PHASE_TIMEOUT_MS);
+      await expect(harness.coordinator.completion).resolves.toEqual({
+        ok: false,
+        reason: "loop-boundary-finalize-failed",
+      });
+      expect(harness.evidence).toHaveLength(1);
+      expect(
+        harness.trace.filter((entry) => entry.startsWith("finalize:")),
+      ).toHaveLength(1);
+      const stopped = harness.coordinator.diagnostics();
+      expect(stopped).toMatchObject({
+        state: "stopped",
+        pendingBoundaryWork: 0,
+        counts: { timers: 0 },
+      });
+
+      peerGate.resolve();
+      await settle();
+      expect(harness.coordinator.diagnostics()).toEqual(stopped);
+    },
+  );
+
+  it("aborts a timed-out evidence commit before a late operator-stop publication", async () => {
+    const gate = deferred();
+    const harness = createHarness({
+      mode: "Show",
+      phaseDeferrals: new Map([["finalize-evidence", gate]]),
+    });
+    await bootReady(harness);
+    expect(harness.coordinator.handleRendererEvent(stopEvent())).toBe(true);
+    await settle();
+
+    expect(harness.timers.active(PHASE_TIMEOUT_MS)).toBe(1);
+    await harness.timers.fireTimeout(PHASE_TIMEOUT_MS);
+    await expect(harness.coordinator.completion).resolves.toEqual({
+      ok: false,
+      reason: "shutdown-incomplete",
+    });
+    expect(harness.evidence).toHaveLength(0);
+    expect(harness.terminalMarkers).toEqual([
+      { ok: false, reason: "shutdown-incomplete" },
+    ]);
+    expect(harness.evidenceSignals).toHaveLength(1);
+    expect(harness.evidenceSignals[0]!.aborted).toBe(true);
+    const stopped = harness.coordinator.diagnostics();
+
+    gate.resolve();
+    await settle();
+    expect(harness.evidence).toHaveLength(0);
+    expect(harness.coordinator.diagnostics()).toEqual(stopped);
+  });
+
+  it("aborts a timed-out marker commit before a late operator-stop publication", async () => {
+    const gate = deferred();
+    const harness = createHarness({
+      mode: "Show",
+      phaseDeferrals: new Map([["terminal-marker", gate]]),
+    });
+    await bootReady(harness);
+    expect(harness.coordinator.handleRendererEvent(stopEvent())).toBe(true);
+    await settle();
+
+    expect(harness.evidence).toHaveLength(1);
+    expect(harness.timers.active(PHASE_TIMEOUT_MS)).toBe(1);
+    await harness.timers.fireTimeout(PHASE_TIMEOUT_MS);
+    await expect(harness.coordinator.completion).resolves.toEqual({
+      ok: false,
+      reason: "shutdown-incomplete",
+    });
+    expect(harness.terminalMarkers).toHaveLength(0);
+    expect(harness.terminalMarkerSignals).toHaveLength(1);
+    expect(harness.terminalMarkerSignals[0]!.aborted).toBe(true);
+    const stopped = harness.coordinator.diagnostics();
+
+    gate.resolve();
+    await settle();
+    expect(harness.terminalMarkers).toHaveLength(0);
     expect(harness.coordinator.diagnostics()).toEqual(stopped);
   });
 

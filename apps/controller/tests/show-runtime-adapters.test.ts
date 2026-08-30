@@ -184,9 +184,39 @@ class ManualTimers implements OneLoopTimerAdapter {
     }
     await scheduled.callback();
   }
+
+  public async fireTimeout(delayMs: number): Promise<void> {
+    const scheduled = [...this.timeouts.values()].find(
+      (candidate) => candidate.delayMs === delayMs,
+    );
+    if (scheduled === undefined) {
+      throw new Error(`no timeout scheduled at ${delayMs} ms`);
+    }
+    this.timeouts.delete(scheduled.id);
+    await scheduled.callback();
+  }
+
+  public activeTimeouts(delayMs: number): number {
+    return [...this.timeouts.values()].filter(
+      (candidate) => candidate.delayMs === delayMs,
+    ).length;
+  }
+}
+
+function publicationGate(): {
+  promise: Promise<void>;
+  resolve(): void;
+} {
+  let resolve!: () => void;
+  const promise = new Promise<void>((settle) => {
+    resolve = settle;
+  });
+  return { promise, resolve };
 }
 
 async function settlePromises(): Promise<void> {
+  for (let index = 0; index < 32; index += 1) await Promise.resolve();
+  await new Promise<void>((resolve) => setImmediate(resolve));
   for (let index = 0; index < 32; index += 1) await Promise.resolve();
 }
 
@@ -394,6 +424,16 @@ function createStartupHarness(options: {
     value: unknown;
   }[];
   rejectFirstEditorCueId?: string;
+  writeShowEvidence?: (
+    path: string,
+    value: unknown,
+    signal?: AbortSignal,
+  ) => Promise<void>;
+  writeTerminalMarker?: (
+    path: string,
+    value: unknown,
+    signal?: AbortSignal,
+  ) => Promise<void>;
 } = {}) {
   const trace: string[] = [];
   const files = new Map<string, Buffer>([
@@ -908,15 +948,19 @@ function createStartupHarness(options: {
       trace.push("remove-lease");
       return true;
     },
-    writeShowEvidence: async (path: string, value: unknown) => {
-      trace.push("write-evidence");
-      evidenceAttempts.push({ path, value });
-      evidenceWrites.push({ path, value: parseShowRunEvidence(value) });
-    },
-    writeTerminalMarker: async (path: string, value: unknown) => {
-      trace.push("write-terminal");
-      terminalWrites.push({ path, value });
-    },
+    writeShowEvidence:
+      options.writeShowEvidence ??
+      (async (path: string, value: unknown) => {
+        trace.push("write-evidence");
+        evidenceAttempts.push({ path, value });
+        evidenceWrites.push({ path, value: parseShowRunEvidence(value) });
+      }),
+    writeTerminalMarker:
+      options.writeTerminalMarker ??
+      (async (path: string, value: unknown) => {
+        trace.push("write-terminal");
+        terminalWrites.push({ path, value });
+      }),
   } as unknown as ShowRuntimeAdapterHost;
 
   return {
@@ -1808,6 +1852,70 @@ describe("real Task 9 show runtime adapters", () => {
     });
     expect(serialized).not.toContain("ab".repeat(24));
     expect(serialized).not.toContain("C:\\Users\\operator");
+  });
+
+  it("forwards the bounded signal and prevents an aborted evidence publication", async () => {
+    const gate = publicationGate();
+    const committed: unknown[] = [];
+    let observedSignal: AbortSignal | undefined;
+    const harness = createStartupHarness({
+      writeShowEvidence: async (_path, value, signal) => {
+        observedSignal = signal;
+        await gate.promise;
+        signal?.throwIfAborted();
+        committed.push(value);
+      },
+    });
+    const coordinator = harness.adapters.createCoordinator(showCommand("Show"));
+    await expect(coordinator.boot()).resolves.toEqual({ ready: true });
+
+    void coordinator.requestEmergencyStop("sigint");
+    await settlePromises();
+    expect(harness.timers.activeTimeouts(10_000)).toBe(1);
+    await harness.timers.fireTimeout(10_000);
+    await expect(coordinator.completion).resolves.toEqual({
+      ok: false,
+      reason: "emergency-sigint",
+    });
+    expect(committed).toHaveLength(0);
+
+    gate.resolve();
+    await settlePromises();
+    expect(committed).toHaveLength(0);
+    expect(observedSignal).toBeDefined();
+    expect(observedSignal!.aborted).toBe(true);
+  });
+
+  it("forwards the bounded signal and prevents an aborted marker publication", async () => {
+    const gate = publicationGate();
+    const committed: unknown[] = [];
+    let observedSignal: AbortSignal | undefined;
+    const harness = createStartupHarness({
+      writeTerminalMarker: async (_path, value, signal) => {
+        observedSignal = signal;
+        await gate.promise;
+        signal?.throwIfAborted();
+        committed.push(value);
+      },
+    });
+    const coordinator = harness.adapters.createCoordinator(showCommand("Show"));
+    await expect(coordinator.boot()).resolves.toEqual({ ready: true });
+
+    void coordinator.requestEmergencyStop("sigint");
+    await settlePromises();
+    expect(harness.timers.activeTimeouts(10_000)).toBe(1);
+    await harness.timers.fireTimeout(10_000);
+    await expect(coordinator.completion).resolves.toEqual({
+      ok: false,
+      reason: "emergency-sigint",
+    });
+    expect(committed).toHaveLength(0);
+
+    gate.resolve();
+    await settlePromises();
+    expect(committed).toHaveLength(0);
+    expect(observedSignal).toBeDefined();
+    expect(observedSignal!.aborted).toBe(true);
   });
 
   it("keeps an early failed Soak3 out of acceptance evidence while marking terminal failure", async () => {

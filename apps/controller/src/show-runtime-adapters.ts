@@ -181,8 +181,17 @@ export interface ShowRuntimeAdapterHost
     nextGenerationId: number,
   ): Promise<RunLease>;
   removeRunLease?(path: string, lease: RunLease): Promise<boolean>;
-  writeShowEvidence?(path: string, value: unknown): Promise<void>;
-  writeTerminalMarker?(path: string, value: unknown): Promise<void>;
+  // Custom publication hosts must check the signal immediately before commit.
+  writeShowEvidence?(
+    path: string,
+    value: unknown,
+    signal: AbortSignal,
+  ): Promise<void>;
+  writeTerminalMarker?(
+    path: string,
+    value: unknown,
+    signal: AbortSignal,
+  ): Promise<void>;
   secondaryEntryUrl?: string;
   bridgeHost?: string;
   logStorage?: LogStorage;
@@ -224,8 +233,16 @@ interface NormalizedShowHost {
     pid: number,
   ) => Promise<{ rssBytes: number; handleCount: number }>;
   readonly inspectProcessStartedAtUtc: (pid: number) => Promise<string>;
-  readonly writeShowEvidence: (path: string, value: unknown) => Promise<void>;
-  readonly writeTerminalMarker: (path: string, value: unknown) => Promise<void>;
+  readonly writeShowEvidence: (
+    path: string,
+    value: unknown,
+    signal: AbortSignal,
+  ) => Promise<void>;
+  readonly writeTerminalMarker: (
+    path: string,
+    value: unknown,
+    signal: AbortSignal,
+  ) => Promise<void>;
   readonly writeRunLease: (path: string, lease: RunLease) => Promise<void>;
   readonly replaceRunLease: (
     path: string,
@@ -399,22 +416,27 @@ function createCoordinator(
       }
       return sampleNetwork(host);
     },
-    finalizeEvidence: async (result, diagnostics) => {
+    finalizeEvidence: async (result, diagnostics, signal) => {
       const current = requireInputs();
       await host.writeShowEvidence(
         paths.evidence,
         buildShowEvidence(command, current, result, diagnostics, logger),
+        signal,
       );
     },
-    writeTerminalMarker: async (result) => {
-      await host.writeTerminalMarker(paths.terminalMarker, {
-        schema: 1,
-        runId: command.runId,
-        controllerRunId: command.controllerRunId,
-        controllerPid: host.source.controllerProcess.pid,
-        outcome: result.ok ? "intentional-success" : "intentional-failure",
-        reason: result.reason,
-      });
+    writeTerminalMarker: async (result, signal) => {
+      await host.writeTerminalMarker(
+        paths.terminalMarker,
+        {
+          schema: 1,
+          runId: command.runId,
+          controllerRunId: command.controllerRunId,
+          controllerPid: host.source.controllerProcess.pid,
+          outcome: result.ok ? "intentional-success" : "intentional-failure",
+          reason: result.reason,
+        },
+        signal,
+      );
     },
     flushLogs: async () => undefined,
     nextLoopId: (generationId, loopNumber) =>
@@ -488,7 +510,11 @@ function normalizeShowHost(source: ShowRuntimeAdapterHost): NormalizedShowHost {
       source.inspectProcessStartedAtUtc ??
       ((pid) => inspectProcessStartedAtUtc(execFile, repositoryRoot, pid)),
     writeShowEvidence:
-      source.writeShowEvidence ?? writeShowRunEvidenceAtomic,
+      source.writeShowEvidence ??
+      ((path, value, signal) => {
+        signal.throwIfAborted();
+        return writeShowRunEvidenceAtomic(path, value);
+      }),
     writeTerminalMarker:
       source.writeTerminalMarker ?? writeTerminalMarkerAtomic,
     writeRunLease: source.writeRunLease ?? writeRunLeaseAtomic,
@@ -2133,7 +2159,9 @@ async function inspectProcessStartedAtUtc(
 async function writeTerminalMarkerAtomic(
   path: string,
   value: unknown,
+  signal: AbortSignal,
 ): Promise<void> {
+  signal.throwIfAborted();
   const marker = terminalMarkerSchema.parse(value);
   const serialized = `${JSON.stringify(marker, null, 2)}\n`;
   if (Buffer.byteLength(serialized, "utf8") > 4_096) {
@@ -2154,6 +2182,7 @@ async function writeTerminalMarkerAtomic(
     fsyncSync(descriptor);
     closeSync(descriptor);
     descriptor = undefined;
+    signal.throwIfAborted();
     if (existsSync(path)) {
       throw new Error("controller-terminal-marker-already-exists");
     }
