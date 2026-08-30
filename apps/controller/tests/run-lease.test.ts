@@ -372,7 +372,7 @@ describe("run lease atomic persistence", () => {
       new Error("injected atomic publication failure"),
       { code: "EPERM" },
     );
-    vi.spyOn(fs, "rename").mockRejectedValueOnce(publicationFailure);
+    vi.spyOn(fs, "link").mockRejectedValueOnce(publicationFailure);
 
     await expect(writeRunLeaseAtomic(path, validLease())).rejects.toThrow(
       /atomic publication failure/i,
@@ -399,6 +399,38 @@ describe("run lease atomic persistence", () => {
     expect(readdirSync(root)).toEqual(["run-lease.json"]);
   });
 
+  it("rejects a destination raced outside the lease lock without changing competitor bytes", async () => {
+    const root = temporaryRoot("run-lease-external-race-");
+    const path = join(root, "run-lease.json");
+    const realRename = fs.rename.bind(fs);
+    const realLink = fs.link.bind(fs);
+    let writerTemporaryPath = "";
+    const publishCompetitor = (
+      source: fs.PathLike,
+      destination: fs.PathLike,
+    ): void => {
+      writerTemporaryPath = String(source);
+      writeFileSync(destination, "competitor-bytes", "utf8");
+    };
+    vi.spyOn(fs, "rename").mockImplementation(async (source, destination) => {
+      publishCompetitor(source, destination);
+      await realRename(source, destination);
+    });
+    vi.spyOn(fs, "link").mockImplementation(async (source, destination) => {
+      publishCompetitor(source, destination);
+      await realLink(source, destination);
+    });
+
+    await expect(writeRunLeaseAtomic(path, validLease())).rejects.toThrow(
+      /already-exists|exclusive/i,
+    );
+
+    expect(writerTemporaryPath).not.toBe("");
+    expect(existsSync(writerTemporaryPath)).toBe(false);
+    expect(readFileSync(path, "utf8")).toBe("competitor-bytes");
+    expect(readdirSync(root)).toEqual(["run-lease.json"]);
+  });
+
   it("uses an OS-released interprocess lock across controller death", async () => {
     const root = temporaryRoot("run-lease-process-lock-");
     const path = join(root, "run-lease.json");
@@ -420,26 +452,8 @@ describe("run lease atomic persistence", () => {
     const root = temporaryRoot("run-lease-windows-replaceable-");
     const path = join(root, "run-lease.json");
     const expected = validLease();
-    const realLink = fs.link.bind(fs);
-    const realRename = fs.rename.bind(fs);
-    let destinationWasHardLinked = false;
-    vi.spyOn(fs, "link").mockImplementation(async (source, destination) => {
-      await realLink(source, destination);
-      destinationWasHardLinked = true;
-    });
-    vi.spyOn(fs, "rename").mockImplementation((source, destination) => {
-      if (destinationWasHardLinked) {
-        return Promise.reject(
-          Object.assign(new Error("Windows refused to replace hard-link target"), {
-            code: "EPERM",
-          }),
-        );
-      }
-      return realRename(source, destination);
-    });
-    executeTimeoutsImmediately();
-
     await writeRunLeaseAtomic(path, expected);
+    expect(readdirSync(root)).toEqual(["run-lease.json"]);
     await expect(
       replaceRunLeaseGenerationAtomic(path, expected, 2),
     ).resolves.toEqual({ ...expected, generationId: 2 });

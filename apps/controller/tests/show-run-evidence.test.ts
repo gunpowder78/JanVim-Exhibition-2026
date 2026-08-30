@@ -765,7 +765,7 @@ describe("atomic show-run evidence writer", () => {
     vi.restoreAllMocks();
   });
 
-  it("writes canonical pretty JSON through one exclusive same-directory temp, flush, close, and rename", async () => {
+  it("writes canonical pretty JSON through one exclusive same-directory temp, flush, close, and link publication", async () => {
     const root = mkdtempSync(join(tmpdir(), "show-run-evidence-"));
     try {
       const path = join(root, "show-run-001.json");
@@ -774,7 +774,7 @@ describe("atomic show-run evidence writer", () => {
       const openSpy = vi.spyOn(fs, "openSync");
       const fsyncSpy = vi.spyOn(fs, "fsyncSync");
       const closeSpy = vi.spyOn(fs, "closeSync");
-      const renameSpy = vi.spyOn(fs, "renameSync");
+      const linkSpy = vi.spyOn(fs, "linkSync");
 
       await writeShowRunEvidenceAtomic(path, input);
 
@@ -789,13 +789,13 @@ describe("atomic show-run evidence writer", () => {
       expect(mode).toBe(0o600);
       expect(fsyncSpy).toHaveBeenCalledTimes(1);
       expect(closeSpy).toHaveBeenCalledTimes(1);
-      expect(renameSpy).toHaveBeenCalledTimes(1);
-      expect(renameSpy).toHaveBeenCalledWith(temporaryPath, path);
+      expect(linkSpy).toHaveBeenCalledTimes(1);
+      expect(linkSpy).toHaveBeenCalledWith(temporaryPath, path);
       expect(fsyncSpy.mock.invocationCallOrder[0]!).toBeLessThan(
         closeSpy.mock.invocationCallOrder[0]!,
       );
       expect(closeSpy.mock.invocationCallOrder[0]!).toBeLessThan(
-        renameSpy.mock.invocationCallOrder[0]!,
+        linkSpy.mock.invocationCallOrder[0]!,
       );
       expect(readFileSync(path, "utf8")).toBe(
         `${JSON.stringify(record, null, 2)}\n`,
@@ -854,34 +854,37 @@ describe("atomic show-run evidence writer", () => {
     }
   });
 
-  it("removes only its exact temp and preserves a raced destination when rename fails", async () => {
-    const root = mkdtempSync(join(tmpdir(), "show-run-evidence-rename-"));
+  it("rejects raced publication without changing competitor bytes or retaining its temp", async () => {
+    const root = mkdtempSync(join(tmpdir(), "show-run-evidence-race-"));
     try {
       const path = join(root, "show-run-001.json");
-      const decoy = join(root, ".show-run-evidence-decoy.tmp");
-      writeFileSync(decoy, "decoy", "utf8");
+      const realRename = fs.renameSync.bind(fs);
+      const realLink = fs.linkSync.bind(fs);
       let writerTemporaryPath = "";
-      const renameSpy = vi
-        .spyOn(fs, "renameSync")
-        .mockImplementation((source, destination) => {
-          writerTemporaryPath = String(source);
-          writeFileSync(destination, "raced-destination", "utf8");
-          throw new Error("fixture-rename-failure");
-        });
+      const publishCompetitor = (
+        source: fs.PathLike,
+        destination: fs.PathLike,
+      ): void => {
+        writerTemporaryPath = String(source);
+        writeFileSync(destination, "competitor-bytes", "utf8");
+      };
+      vi.spyOn(fs, "renameSync").mockImplementation((source, destination) => {
+        publishCompetitor(source, destination);
+        realRename(source, destination);
+      });
+      vi.spyOn(fs, "linkSync").mockImplementation((source, destination) => {
+        publishCompetitor(source, destination);
+        realLink(source, destination);
+      });
 
       await expect(
         writeShowRunEvidenceAtomic(path, validEvidenceRecord()),
-      ).rejects.toThrow(/fixture-rename-failure/);
+      ).rejects.toThrow(/already-exists|exclusive/i);
 
-      expect(renameSpy).toHaveBeenCalledTimes(1);
       expect(writerTemporaryPath).not.toBe("");
       expect(existsSync(writerTemporaryPath)).toBe(false);
-      expect(readFileSync(path, "utf8")).toBe("raced-destination");
-      expect(readFileSync(decoy, "utf8")).toBe("decoy");
-      expect(readdirSync(root).sort()).toEqual([
-        ".show-run-evidence-decoy.tmp",
-        "show-run-001.json",
-      ]);
+      expect(readFileSync(path, "utf8")).toBe("competitor-bytes");
+      expect(readdirSync(root)).toEqual(["show-run-001.json"]);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

@@ -144,12 +144,27 @@ export async function writeRunLeaseAtomic(
     let ownsTemporary = true;
     try {
       await requireAbsentLeaseDestination(destinationPath);
-      await fs.rename(temporaryPath, destinationPath);
+      await publishTemporaryExclusively(temporaryPath, destinationPath);
       ownsTemporary = false;
     } finally {
       if (ownsTemporary) await fs.rm(temporaryPath, { force: true });
     }
   });
+}
+
+async function publishTemporaryExclusively(
+  temporaryPath: string,
+  destinationPath: string,
+): Promise<void> {
+  try {
+    await fs.link(temporaryPath, destinationPath);
+  } catch (error) {
+    if (hasErrorCode(error, "EEXIST")) {
+      throw new Error("run-lease-already-exists");
+    }
+    throw error;
+  }
+  await fs.rm(temporaryPath);
 }
 
 export async function replaceRunLeaseGenerationAtomic(

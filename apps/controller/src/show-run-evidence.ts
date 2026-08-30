@@ -868,12 +868,36 @@ export async function writeShowRunEvidenceAtomic(
     if (fs.existsSync(path)) {
       throw new Error("show-run-evidence-already-exists");
     }
-    fs.renameSync(temporaryPath, path);
+    publishTemporaryExclusivelySync(temporaryPath, path);
     ownsTemporary = false;
   } finally {
     if (descriptor !== undefined) fs.closeSync(descriptor);
     if (ownsTemporary) fs.rmSync(temporaryPath, { force: true });
   }
+}
+
+function publishTemporaryExclusivelySync(
+  temporaryPath: string,
+  destinationPath: string,
+): void {
+  try {
+    fs.linkSync(temporaryPath, destinationPath);
+  } catch (error) {
+    if (hasErrorCode(error, "EEXIST")) {
+      throw new Error("show-run-evidence-already-exists");
+    }
+    throw error;
+  }
+  fs.rmSync(temporaryPath);
+}
+
+function hasErrorCode(error: unknown, code: string): boolean {
+  return (
+    error !== null &&
+    typeof error === "object" &&
+    "code" in error &&
+    error.code === code
+  );
 }
 
 function sum(values: readonly number[]): number {
