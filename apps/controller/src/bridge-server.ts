@@ -43,6 +43,9 @@ export interface BridgeDiagnostics {
 }
 
 type TrackedTimer = ReturnType<typeof setTimeout>;
+type AgentDisconnectRegistration = {
+  listener: () => void;
+};
 
 interface PendingCommand {
   promise: Promise<AgentAck>;
@@ -77,7 +80,7 @@ export class BridgeServer {
   private readonly acknowledgements = new Map<string, AgentAck>();
   private readonly timers = new Set<TrackedTimer>();
   private readonly readyWaiters = new Set<ReadyWaiter>();
-  private readonly agentDisconnectListeners = new Set<() => void>();
+  private readonly agentDisconnectListeners = new Set<AgentDisconnectRegistration>();
   private agentSocket?: Socket;
   private closing = false;
 
@@ -224,12 +227,13 @@ export class BridgeServer {
     if (this.agentDisconnectListeners.size >= MAX_AGENT_DISCONNECT_LISTENERS) {
       throw new Error("Bridge agent disconnect listener capacity reached");
     }
-    this.agentDisconnectListeners.add(listener);
+    const registration: AgentDisconnectRegistration = { listener };
+    this.agentDisconnectListeners.add(registration);
     let disposed = false;
     return () => {
       if (disposed) return;
       disposed = true;
-      this.agentDisconnectListeners.delete(listener);
+      this.agentDisconnectListeners.delete(registration);
     };
   }
 
@@ -379,9 +383,9 @@ export class BridgeServer {
     if (this.agentSocket === socket) {
       this.agentSocket = undefined;
       this.rejectAllPending(reason);
-      for (const listener of [...this.agentDisconnectListeners]) {
+      for (const { listener } of [...this.agentDisconnectListeners]) {
         try {
-          listener();
+          void Promise.resolve(listener()).catch(() => undefined);
         } catch {
           // One observer cannot suppress delivery to the bounded snapshot.
         }

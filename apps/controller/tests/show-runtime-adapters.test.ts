@@ -429,6 +429,7 @@ function createStartupHarness(options: {
     gate: ReturnType<typeof publicationGate>;
   };
   removeRunLeaseResult?: boolean;
+  replaceRunLeaseFailure?: boolean;
   closeChildAfterSecondIdentityInspection?: boolean;
   cleanupFailures?: readonly (
     | "close-listener"
@@ -1051,6 +1052,10 @@ function createStartupHarness(options: {
     ) => {
       trace.push("replace-lease-generation:start");
       await waitForHostOperation("lease-generation-replace");
+      if (options.replaceRunLeaseFailure === true) {
+        trace.push("replace-lease-generation:rejected");
+        throw new Error("injected lease generation replacement failure");
+      }
       const replacement = { ...lease, generationId: nextGenerationId };
       activeLeases.delete(lease);
       activeLeases.add(replacement);
@@ -1750,6 +1755,47 @@ describe("real Task 9 show runtime adapters", () => {
       await settlePromises();
       await coordinator.requestEmergencyStop("sigint");
     }
+  });
+
+  it("removes the exact known lease after a rejected retained-generation CAS", async () => {
+    const harness = createStartupHarness({ replaceRunLeaseFailure: true });
+    const coordinator = await bootAndStartRuntimeHarness(harness);
+
+    harness.destroySecondary();
+    await settlePromises();
+    await harness.timers.fireTimeout(1_000);
+    await settlePromises();
+
+    expect(harness.trace).toEqual(
+      expect.arrayContaining([
+        "replace-lease-generation:start",
+        "replace-lease-generation:rejected",
+        "close-window",
+        "remove-lease",
+        "bridge-close",
+      ]),
+    );
+    expect(harness.activeResourceCounts()).toEqual({
+      bridges: 0,
+      children: 0,
+      hwnds: 0,
+      leases: 0,
+    });
+    expect(coordinator.diagnostics()).toMatchObject({
+      state: "safe-ready",
+      generationId: 2,
+      reason: "secondary-recovery-failed",
+    });
+
+    expect(
+      coordinator.handleRendererEvent({
+        schema: 1,
+        type: "operator-action",
+        action: "restart-loop",
+      }),
+    ).toBe(true);
+    await settlePromises();
+    await coordinator.requestEmergencyStop("sigint");
   });
 
   it("settles the exact old session before publishing a non-overlapping full replacement", async () => {

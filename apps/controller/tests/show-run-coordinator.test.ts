@@ -328,6 +328,7 @@ class FakeSession implements ShowRunSession {
   public invokeCallbacksDuringRuntimeStop = false;
   public reserveNextLoopOnStart = false;
   public failDiagnosticsAfterRuntimeStart = false;
+  public rebindGenerationFailure = false;
   public traceLoopConstruction = false;
   public readonly rollbackCallbackErrors: unknown[] = [];
   public readonly abortedPhases: string[] = [];
@@ -418,8 +419,11 @@ class FakeSession implements ShowRunSession {
     generationId: number,
     _signal: AbortSignal,
   ): Promise<void> {
-    this.generationId = generationId;
     this.trace.push(`rebind-generation:${generationId}`);
+    if (this.rebindGenerationFailure) {
+      throw new Error("injected generation rebind failure");
+    }
+    this.generationId = generationId;
   }
 
   public async startBridge(signal?: AbortSignal): Promise<void> {
@@ -713,6 +717,7 @@ interface HarnessOptions {
   boundaryImmediateFailure?: "resource" | "network";
   firstHeldCleanupGate?: Deferred;
   replacementHeldCleanupGate?: Deferred;
+  rebindGenerationFailures?: boolean[];
 }
 
 function createHarness(options: HarnessOptions = {}) {
@@ -887,6 +892,8 @@ function createHarness(options: HarnessOptions = {}) {
       session.reserveNextLoopOnStart = options.reserveNextLoopOnStart ?? false;
       session.failDiagnosticsAfterRuntimeStart =
         options.publicationDiagnosticsFailure ?? false;
+      session.rebindGenerationFailure =
+        options.rebindGenerationFailures?.[sessionIndex] ?? false;
       session.traceLoopConstruction = traceLoopConstruction;
       session.forcedExit = options.forcedExit ?? true;
       session.naturalExit = options.naturalExit ?? "natural";
@@ -2710,6 +2717,118 @@ describe("show run coordinator", () => {
       }),
     ).toBe(true);
     await cleaned.coordinator.requestEmergencyStop("sigint");
+  });
+
+  it("retains startup-session ownership when emergency shutdown revokes held cleanup", async () => {
+    const heldGate = deferred();
+    const harness = createHarness({
+      mode: "Show",
+      prepareHash: WRONG_POEM_SHA256,
+      firstHeldCleanupGate: heldGate,
+    });
+    const boot = harness.coordinator.boot();
+    await settle();
+    expect(
+      harness.trace.filter((entry) => entry === "agent-shutdown:2000:1"),
+    ).toHaveLength(1);
+
+    const shutdown = harness.coordinator.requestEmergencyStop("sigint");
+    await expect(shutdown).resolves.toBeUndefined();
+    await expect(boot).resolves.toEqual({
+      ready: false,
+      reason: "original-poem-hash-mismatch",
+    });
+
+    expect(
+      harness.trace.filter((entry) => entry === "agent-shutdown:2000:1"),
+    ).toHaveLength(2);
+    expect(harness.trace).toEqual(
+      expect.arrayContaining([
+        "close-window:2000:4096",
+        "wait-natural:5000",
+        "close-bridge:5000",
+        "session-dispose",
+      ]),
+    );
+    expect(harness.sessions[0]!.leaseRemoved).toBe(true);
+    expect(harness.coordinator.diagnostics().shutdown).toMatchObject({
+      childSettled: true,
+      leaseRemoved: true,
+    });
+
+    heldGate.resolve();
+    await settle();
+  });
+
+  it("keeps Restart Loop unavailable while a failed retained-session rebind is cleaned", async () => {
+    const cleanupGate = deferred();
+    const harness = createHarness({
+      mode: "Show",
+      firstHeldCleanupGate: cleanupGate,
+      rebindGenerationFailures: [true],
+    });
+    await startRunning(harness);
+
+    harness.surfaces[0]!.destroy();
+    await settle();
+    await harness.timers.fireTimeout(1_000);
+    await settle();
+
+    expect(harness.coordinator.diagnostics()).toMatchObject({
+      state: "black-recovering",
+      generationId: 2,
+    });
+    expect(
+      harness.coordinator.handleRendererEvent({
+        schema: 1,
+        type: "operator-action",
+        action: "restart-loop",
+      }),
+    ).toBe(false);
+
+    cleanupGate.resolve();
+    await settle();
+    expect(harness.coordinator.diagnostics()).toMatchObject({
+      state: "safe-ready",
+      reason: "secondary-recovery-failed",
+    });
+    expect(harness.sessions[0]!.leaseRemoved).toBe(true);
+    expect(
+      harness.coordinator.handleRendererEvent({
+        schema: 1,
+        type: "operator-action",
+        action: "restart-loop",
+      }),
+    ).toBe(true);
+    await harness.coordinator.requestEmergencyStop("sigint");
+  });
+
+  it("keeps a fully settled replacement failure actionable when the new secondary cannot open", async () => {
+    const harness = createHarness({
+      mode: "Show",
+      recoveryOpenFailure: true,
+      shutdownFailures: new Set(["driver-stop"]),
+    });
+    await startRunning(harness);
+
+    harness.surfaces[0]!.destroy();
+    await settle();
+    await harness.timers.fireTimeout(1_000);
+    await settle();
+
+    expect(harness.sessions[0]!.leaseRemoved).toBe(true);
+    expect(harness.coordinator.diagnostics()).toMatchObject({
+      state: "safe-ready",
+      reason: "session-recovery-failed",
+    });
+    expect(
+      harness.coordinator.handleRendererEvent({
+        schema: 1,
+        type: "operator-action",
+        action: "restart-loop",
+      }),
+    ).toBe(true);
+    await harness.coordinator.requestEmergencyStop("sigint");
   });
 
   it("clears the fourth destroyed secondary before an operator opens a fresh surface", async () => {

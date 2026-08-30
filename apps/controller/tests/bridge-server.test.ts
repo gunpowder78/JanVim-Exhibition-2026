@@ -361,4 +361,58 @@ describe("loopback bridge server", () => {
       agentDisconnectListeners: 0,
     });
   });
+
+  it("counts duplicate callback registrations independently and disposes only one", async () => {
+    const server = await startServer();
+    let deliveries = 0;
+    const callback = (): void => {
+      deliveries += 1;
+    };
+    const disposers = Array.from({ length: 8 }, () =>
+      server.onAgentDisconnected(callback),
+    );
+
+    expect(server.diagnostics().agentDisconnectListeners).toBe(8);
+    expect(() => server.onAgentDisconnected(callback)).toThrow(
+      /disconnect listener limit|capacity/i,
+    );
+    disposers[0]!();
+    expect(server.diagnostics().agentDisconnectListeners).toBe(7);
+
+    const { socket } = await connectAgent(server);
+    const closed = once(socket, "close");
+    socket.destroy();
+    await closed;
+
+    expect(deliveries).toBe(7);
+  });
+
+  it("absorbs asynchronous disconnect-listener rejection without suppressing peers", async () => {
+    const server = await startServer();
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => {
+      unhandled.push(reason);
+    };
+    process.on("unhandledRejection", onUnhandled);
+    let peerDeliveries = 0;
+
+    try {
+      server.onAgentDisconnected(async () => {
+        throw new Error("injected async disconnect listener failure");
+      });
+      server.onAgentDisconnected(() => {
+        peerDeliveries += 1;
+      });
+      const { socket } = await connectAgent(server);
+      const closed = once(socket, "close");
+      socket.destroy();
+      await closed;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      expect(peerDeliveries).toBe(1);
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+  });
 });

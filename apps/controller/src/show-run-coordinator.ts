@@ -634,6 +634,7 @@ export class ShowRunCoordinator {
     let cleanup: SessionCleanupResult = { childSettled: true, leaseRemoved: true };
     if (session !== undefined) {
       if (this.session === session) this.session = undefined;
+      this.pendingSession = session;
       this.disposeSessionListeners();
       cleanup = await this.cleanupHeldSession(session);
       this.priorSessionSettlement = cleanup;
@@ -1733,6 +1734,7 @@ export class ShowRunCoordinator {
     if (!this.canContinueRecovery(generationId, "black-recovering")) return;
 
     let recoveryRecorded = false;
+    let retainedSessionTouched = false;
     try {
       const surface = await this.waitForRecoveryPhase(
         "open-secondary",
@@ -1745,6 +1747,7 @@ export class ShowRunCoordinator {
       }
       this.surface = surface;
       this.bindSurface(surface, generationId);
+      retainedSessionTouched = true;
       await this.waitForRecoveryPhase("rebind-generation", (signal) =>
         session.rebindGeneration(generationId, signal),
       );
@@ -1818,7 +1821,17 @@ export class ShowRunCoordinator {
             reason: "secondary-recovery-failed",
           });
         }
-        this.enterSafeReady("secondary-recovery-failed");
+        if (retainedSessionTouched) {
+          const cleanup = await this.cleanupHeldSession(session);
+          if (!this.canContinueRecovery(generationId, "black-recovering")) return;
+          this.priorSessionSettlement = cleanup;
+          this.enterSafeReady(
+            "secondary-recovery-failed",
+            cleanup.childSettled && cleanup.leaseRemoved,
+          );
+        } else {
+          this.enterSafeReady("secondary-recovery-failed");
+        }
       }
     }
   }
@@ -1893,7 +1906,7 @@ export class ShowRunCoordinator {
     if (!this.canContinueRecovery(generationId, "black-recovering")) return;
 
     let session: ShowRunSession | undefined;
-    let replacementCleanup: SessionCleanupResult | undefined;
+    let replacementCleanup: SessionCleanupResult | undefined = cleanup;
     try {
       if (replaceSecondary) {
         const surface = await this.waitForRecoveryPhase(
@@ -1909,6 +1922,7 @@ export class ShowRunCoordinator {
         this.bindSurface(surface, generationId);
       }
       session = this.dependencies.createSession(generationId);
+      replacementCleanup = undefined;
       this.pendingSession = session;
       this.bindSession(session, generationId);
       await this.waitForRecoveryPhase("start-bridge", (signal) =>

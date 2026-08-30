@@ -2066,7 +2066,7 @@ class RuntimeShowSession implements ShowRunSession {
   private beginLeaseRemoval(): void {
     const lease = this.lease;
     if (lease === undefined || this.leaseRemoved) return;
-    this.leaseOperation = this.leaseOperation.then(async () => {
+    this.leaseOperation = this.leaseOperation.catch(() => undefined).then(async () => {
       if (this.leaseRemoved || this.lease === undefined) return;
       this.leaseRemoved = await this.options.host.removeRunLease(
         this.options.paths.runLease,
