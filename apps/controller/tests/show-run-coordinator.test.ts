@@ -49,6 +49,22 @@ type InjectedShutdownFailure =
   | "finalize-evidence"
   | "terminal-marker";
 
+type ListenerRegistrationFailure =
+  | "surface.onEvent"
+  | "surface.onDestroyed"
+  | "session.onFault"
+  | "session.onPrimaryCompletion";
+
+type LoopConstructionFailure =
+  | "nextLoopId"
+  | "createTelemetry"
+  | "beginLoop"
+  | "createResourceSampler"
+  | "session.createLoop"
+  | "createDriver"
+  | "driver.start-false"
+  | "driver.start-throw";
+
 type Deferred = {
   promise: Promise<void>;
   resolve(): void;
@@ -162,6 +178,7 @@ class FakeSurface implements ShowSecondarySurface {
   public closeCalls = 0;
   public rejectStatusSends = false;
   public rejectClose = false;
+  public registrationFailure: ListenerRegistrationFailure | undefined;
   private readonly eventListeners = new Set<
     (event: RendererToControllerEvent) => void
   >();
@@ -182,6 +199,9 @@ class FakeSurface implements ShowSecondarySurface {
   }
 
   public onEvent(listener: (event: RendererToControllerEvent) => void): () => void {
+    if (this.registrationFailure === "surface.onEvent") {
+      throw new Error("fixture registration failure: surface.onEvent");
+    }
     this.eventListeners.add(listener);
     this.capturedEventListeners.push(listener);
     return () => {
@@ -191,6 +211,9 @@ class FakeSurface implements ShowSecondarySurface {
   }
 
   public onDestroyed(listener: () => void): () => void {
+    if (this.registrationFailure === "surface.onDestroyed") {
+      throw new Error("fixture registration failure: surface.onDestroyed");
+    }
     this.destroyedListeners.add(listener);
     this.capturedDestroyedListeners.push(listener);
     return () => {
@@ -248,6 +271,9 @@ class FakeSession implements ShowRunSession {
   public prepareHash = ORIGINAL_POEM_SHA256;
   public resetHash = ORIGINAL_POEM_SHA256;
   public runtimeStartFailure: "return-false" | "throw" | undefined;
+  public registrationFailure: ListenerRegistrationFailure | undefined;
+  public loopConstructionFailure: LoopConstructionFailure | undefined;
+  public releaseLoopReferencesOnStop = false;
   public readonly abortedPhases: string[] = [];
   public leaseRemoved = false;
   private disposed = false;
@@ -277,6 +303,16 @@ class FakeSession implements ShowRunSession {
       state: "ready",
       completedLoops: 0,
       start: vi.fn(() => {
+        if (
+          this.loopConstructionFailure === "driver.start-false" ||
+          this.loopConstructionFailure === "driver.start-throw"
+        ) {
+          this.reserveNextLoopId?.();
+          if (this.loopConstructionFailure === "driver.start-throw") {
+            throw new Error("injected loop construction failure: driver.start");
+          }
+          return false;
+        }
         if (this.runtimeStartFailure === "throw") {
           throw new Error("injected runtime start failure");
         }
@@ -287,6 +323,15 @@ class FakeSession implements ShowRunSession {
       advance: vi.fn(async () => 0),
       stop: vi.fn(() => {
         this.trace.push("runtime-stop");
+        if (this.loopConstructionFailure !== undefined) {
+          this.trace.push("rollback:runtime.stop");
+        }
+        if (this.releaseLoopReferencesOnStop) {
+          this.loopId = undefined;
+          this.loopSurface = undefined;
+          this.reserveNextLoopId = undefined;
+          this.primaryEditorDispatch = undefined;
+        }
         if (this.failPhase("driver-stop")) {
           throw new Error("injected driver stop failure");
         }
@@ -376,6 +421,12 @@ class FakeSession implements ShowRunSession {
       cue: Extract<Cue, { kind: "editor-action" }>;
     }) => void,
   ): OneLoopRuntime {
+    if (this.loopConstructionFailure !== undefined) {
+      this.trace.push("loop-stage:session.createLoop");
+    }
+    if (this.loopConstructionFailure === "session.createLoop") {
+      throw new Error("injected loop construction failure: session.createLoop");
+    }
     this.loopId = loopId;
     this.loopSurface = surface;
     this.reserveNextLoopId = reserveNextLoopId;
@@ -397,6 +448,9 @@ class FakeSession implements ShowRunSession {
       fault: "agent-disconnected" | "critical-ack-failed" | "janvim-exited",
     ) => void,
   ): () => void {
+    if (this.registrationFailure === "session.onFault") {
+      throw new Error("fixture registration failure: session.onFault");
+    }
     this.faultListeners.add(listener);
     this.capturedFaultListeners.push(listener);
     return () => {
@@ -408,6 +462,9 @@ class FakeSession implements ShowRunSession {
   public onPrimaryCompletion(
     listener: (event: PrimaryCueCompletionEvent) => void,
   ): () => void {
+    if (this.registrationFailure === "session.onPrimaryCompletion") {
+      throw new Error("fixture registration failure: session.onPrimaryCompletion");
+    }
     this.primaryListeners.add(listener);
     this.capturedPrimaryListeners.push(listener);
     return () => {
@@ -552,6 +609,8 @@ interface HarnessOptions {
   forcedExit?: boolean;
   timerClearFailure?: boolean;
   logger?: (event: Record<string, unknown>) => void;
+  loopConstructionFailure?: LoopConstructionFailure;
+  rollbackDriverStopFailure?: boolean;
 }
 
 function createHarness(options: HarnessOptions = {}) {
@@ -627,23 +686,71 @@ function createHarness(options: HarnessOptions = {}) {
         ORIGINAL_POEM_SHA256;
       session.connections = options.sessionConnections?.[sessionIndex] ?? 1;
       session.runtimeStartFailure = options.runtimeStartFailures?.[sessionIndex];
+      session.loopConstructionFailure = options.loopConstructionFailure;
+      session.releaseLoopReferencesOnStop =
+        options.loopConstructionFailure !== undefined;
       session.forcedExit = options.forcedExit ?? true;
       sessions.push(session);
       return session;
     },
     createDriver: (driverOptionsInput) => {
+      if (options.loopConstructionFailure !== undefined) {
+        trace.push("loop-stage:createDriver");
+      }
+      if (options.loopConstructionFailure === "createDriver") {
+        throw new Error("injected loop construction failure: createDriver");
+      }
       driverOptions.push(driverOptionsInput);
       const driver = new MultiLoopDriver(driverOptionsInput);
+      if (options.loopConstructionFailure !== undefined) {
+        const start = driver.start.bind(driver);
+        vi.spyOn(driver, "start").mockImplementation(() => {
+          trace.push("loop-stage:driver.start");
+          return start();
+        });
+        const stop = driver.stop.bind(driver);
+        vi.spyOn(driver, "stop").mockImplementation(() => {
+          trace.push("rollback:driver.stop");
+          if (options.rollbackDriverStopFailure === true) {
+            throw new Error("injected rollback failure: driver.stop");
+          }
+          stop();
+        });
+      }
       drivers.push(driver);
       return driver;
     },
     timers,
     createTelemetry: () => {
+      if (options.loopConstructionFailure !== undefined) {
+        trace.push("loop-stage:createTelemetry");
+      }
+      if (options.loopConstructionFailure === "createTelemetry") {
+        throw new Error("injected loop construction failure: createTelemetry");
+      }
       const telemetry = new RunTelemetry();
+      if (options.loopConstructionFailure !== undefined) {
+        const beginLoop = telemetry.beginLoop.bind(telemetry);
+        vi.spyOn(telemetry, "beginLoop").mockImplementation((...arguments_) => {
+          trace.push("loop-stage:beginLoop");
+          if (options.loopConstructionFailure === "beginLoop") {
+            throw new Error("injected loop construction failure: beginLoop");
+          }
+          return beginLoop(...arguments_);
+        });
+      }
       telemetries.push(telemetry);
       return telemetry;
     },
     createResourceSampler: () => {
+      if (options.loopConstructionFailure !== undefined) {
+        trace.push("loop-stage:createResourceSampler");
+      }
+      if (options.loopConstructionFailure === "createResourceSampler") {
+        throw new Error(
+          "injected loop construction failure: createResourceSampler",
+        );
+      }
       const sampler = new ResourceSampler({
         adapter: {
           sample: async (pid) => ({ rssBytes: pid * 1_000, handleCount: pid }),
@@ -651,6 +758,13 @@ function createHarness(options: HarnessOptions = {}) {
         timers,
       });
       sampler.start({ controller: 11, renderer: 22, janvim: 33 });
+      if (options.loopConstructionFailure !== undefined) {
+        const finish = sampler.finish.bind(sampler);
+        vi.spyOn(sampler, "finish").mockImplementation(() => {
+          trace.push("rollback:sampler.finish");
+          return finish();
+        });
+      }
       samplers.push(sampler);
       return sampler;
     },
@@ -693,6 +807,12 @@ function createHarness(options: HarnessOptions = {}) {
       }
     },
     nextLoopId: (generationId, loopNumber) => {
+      if (options.loopConstructionFailure !== undefined) {
+        trace.push(`loop-stage:nextLoopId:${loopNumber}`);
+      }
+      if (options.loopConstructionFailure === "nextLoopId") {
+        throw new Error("injected loop construction failure: nextLoopId");
+      }
       const loopId = `g${generationId}-loop-${loopNumber}`;
       loopIds.push(loopId);
       return loopId;
@@ -776,6 +896,38 @@ async function startRunning(harness: ReturnType<typeof createHarness>): Promise<
   await bootReady(harness);
   expect(harness.coordinator.handleRendererEvent(startEvent())).toBe(true);
   expect(harness.coordinator.diagnostics().state).toBe("running");
+}
+
+function bindSurfaceForTest(
+  coordinator: ShowRunCoordinator,
+  surface: ShowSecondarySurface,
+): void {
+  const fixture = coordinator as unknown as {
+    bindSurface(value: ShowSecondarySurface, generationId: number): void;
+  };
+  fixture.bindSurface(surface, 1);
+}
+
+function bindSessionForTest(
+  coordinator: ShowRunCoordinator,
+  session: ShowRunSession,
+): void {
+  const fixture = coordinator as unknown as {
+    bindSession(value: ShowRunSession, generationId: number): void;
+  };
+  fixture.bindSession(session, 1);
+}
+
+function constructionState(coordinator: ShowRunCoordinator): {
+  activeLoop: unknown;
+  pendingNextLoop: unknown;
+  driver: unknown;
+} {
+  return coordinator as unknown as {
+    activeLoop: unknown;
+    pendingNextLoop: unknown;
+    driver: unknown;
+  };
 }
 
 async function completeResetBoundary(
@@ -928,6 +1080,231 @@ async function runLoggerSafetyScenario(
 }
 
 describe("show run coordinator", () => {
+  it("rolls back a surface listener when the second registration throws", () => {
+    const harness = createHarness();
+    const surface = new FakeSurface(harness.trace);
+    surface.registrationFailure = "surface.onDestroyed";
+
+    expect(() => bindSurfaceForTest(harness.coordinator, surface)).toThrow(
+      /fixture registration failure/i,
+    );
+
+    expect(
+      harness.trace.filter(
+        (entry) => entry === "dispose-surface-event-listener",
+      ),
+    ).toHaveLength(1);
+    expect(surface.diagnostics().listeners).toBe(0);
+    expect(harness.coordinator.diagnostics().counts.listeners).toBe(0);
+  });
+
+  it("publishes no surface disposer when the first registration throws", () => {
+    const harness = createHarness();
+    const surface = new FakeSurface(harness.trace);
+    surface.registrationFailure = "surface.onEvent";
+
+    expect(() => bindSurfaceForTest(harness.coordinator, surface)).toThrow(
+      /fixture registration failure/i,
+    );
+
+    expect(
+      harness.trace.filter((entry) => entry.startsWith("dispose-surface-")),
+    ).toHaveLength(0);
+    expect(surface.diagnostics().listeners).toBe(0);
+    expect(harness.coordinator.diagnostics().counts.listeners).toBe(0);
+  });
+
+  it("rolls back a session listener when the second registration throws", () => {
+    const harness = createHarness();
+    const session = new FakeSession(
+      1,
+      harness.trace,
+      async () => undefined,
+      () => false,
+    );
+    session.registrationFailure = "session.onPrimaryCompletion";
+
+    expect(() => bindSessionForTest(harness.coordinator, session)).toThrow(
+      /fixture registration failure/i,
+    );
+
+    expect(
+      harness.trace.filter(
+        (entry) => entry === "dispose-session-fault-listener",
+      ),
+    ).toHaveLength(1);
+    expect(harness.coordinator.diagnostics().counts.listeners).toBe(0);
+  });
+
+  it("publishes no session disposer when the first registration throws", () => {
+    const harness = createHarness();
+    const session = new FakeSession(
+      1,
+      harness.trace,
+      async () => undefined,
+      () => false,
+    );
+    session.registrationFailure = "session.onFault";
+
+    expect(() => bindSessionForTest(harness.coordinator, session)).toThrow(
+      /fixture registration failure/i,
+    );
+
+    expect(
+      harness.trace.filter((entry) => entry.startsWith("dispose-session-")),
+    ).toHaveLength(0);
+    expect(harness.coordinator.diagnostics().counts.listeners).toBe(0);
+  });
+
+  it.each([
+    {
+      failure: "nextLoopId" as const,
+      stages: ["loop-stage:nextLoopId:1"],
+      rollback: [],
+    },
+    {
+      failure: "createTelemetry" as const,
+      stages: ["loop-stage:nextLoopId:1", "loop-stage:createTelemetry"],
+      rollback: [],
+    },
+    {
+      failure: "beginLoop" as const,
+      stages: [
+        "loop-stage:nextLoopId:1",
+        "loop-stage:createTelemetry",
+        "loop-stage:beginLoop",
+      ],
+      rollback: [],
+    },
+    {
+      failure: "createResourceSampler" as const,
+      stages: [
+        "loop-stage:nextLoopId:1",
+        "loop-stage:createTelemetry",
+        "loop-stage:beginLoop",
+        "loop-stage:createResourceSampler",
+      ],
+      rollback: [],
+    },
+    {
+      failure: "session.createLoop" as const,
+      stages: [
+        "loop-stage:nextLoopId:1",
+        "loop-stage:createTelemetry",
+        "loop-stage:beginLoop",
+        "loop-stage:createResourceSampler",
+        "loop-stage:session.createLoop",
+      ],
+      rollback: ["rollback:sampler.finish"],
+    },
+    {
+      failure: "createDriver" as const,
+      stages: [
+        "loop-stage:nextLoopId:1",
+        "loop-stage:createTelemetry",
+        "loop-stage:beginLoop",
+        "loop-stage:createResourceSampler",
+        "loop-stage:session.createLoop",
+        "loop-stage:createDriver",
+      ],
+      rollback: ["rollback:runtime.stop", "rollback:sampler.finish"],
+    },
+    {
+      failure: "driver.start-false" as const,
+      stages: [
+        "loop-stage:nextLoopId:1",
+        "loop-stage:createTelemetry",
+        "loop-stage:beginLoop",
+        "loop-stage:createResourceSampler",
+        "loop-stage:session.createLoop",
+        "loop-stage:createDriver",
+        "loop-stage:driver.start",
+        "loop-stage:nextLoopId:2",
+      ],
+      rollback: [
+        "rollback:driver.stop",
+        "rollback:runtime.stop",
+        "rollback:sampler.finish",
+      ],
+      rollbackDriverStopFailure: true,
+    },
+    {
+      failure: "driver.start-throw" as const,
+      stages: [
+        "loop-stage:nextLoopId:1",
+        "loop-stage:createTelemetry",
+        "loop-stage:beginLoop",
+        "loop-stage:createResourceSampler",
+        "loop-stage:session.createLoop",
+        "loop-stage:createDriver",
+        "loop-stage:driver.start",
+        "loop-stage:nextLoopId:2",
+      ],
+      rollback: [
+        "rollback:driver.stop",
+        "rollback:runtime.stop",
+        "rollback:sampler.finish",
+      ],
+      rollbackDriverStopFailure: false,
+    },
+  ])(
+    "rolls back the $failure construction stage without publishing loop state",
+    async ({ failure, stages, rollback, rollbackDriverStopFailure }) => {
+      const harness = createHarness({
+        mode: "Show",
+        loopConstructionFailure: failure,
+        rollbackDriverStopFailure,
+      });
+      await bootReady(harness);
+
+      let accepted: boolean | undefined;
+      expect(() => {
+        accepted = harness.coordinator.handleRendererEvent(startEvent());
+      }).not.toThrow();
+      expect(accepted).toBe(false);
+      expect(
+        harness.trace.filter((entry) => entry.startsWith("loop-stage:")),
+      ).toEqual(stages);
+      expect(
+        harness.trace.filter((entry) => entry.startsWith("rollback:")),
+      ).toEqual(rollback);
+
+      const unpublished = constructionState(harness.coordinator);
+      expect(unpublished.activeLoop).toBeUndefined();
+      expect(unpublished.pendingNextLoop).toBeUndefined();
+      expect(unpublished.driver).toBeUndefined();
+      expect(harness.coordinator.diagnostics()).toMatchObject({
+        currentLoopId: null,
+        startedLoops: 0,
+        completedLoops: 0,
+        counts: { listeners: 0, timers: 0 },
+      });
+      expect(harness.timers.active()).toBe(0);
+      expect(harness.sessions[0]).toMatchObject({
+        loopId: undefined,
+        loopSurface: undefined,
+        reserveNextLoopId: undefined,
+        primaryEditorDispatch: undefined,
+      });
+
+      await expect(harness.coordinator.completion).resolves.toEqual({
+        ok: false,
+        reason: "loop-start-failed",
+      });
+      expect(harness.evidence).toHaveLength(1);
+      expect(
+        harness.trace.filter((entry) => entry === "terminal:loop-start-failed"),
+      ).toHaveLength(1);
+      expect(harness.coordinator.diagnostics()).toMatchObject({
+        state: "stopped",
+        currentLoopId: null,
+        startedLoops: 0,
+        completedLoops: 0,
+        counts: { listeners: 0, timers: 0 },
+      });
+    },
+  );
+
   it.each(LOGGER_SAFETY_SCENARIOS)(
     "keeps $name safety identical when diagnostics throw",
     async ({ name, expectedLogTypes }) => {

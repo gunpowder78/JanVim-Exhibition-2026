@@ -514,42 +514,60 @@ export class ShowRunCoordinator {
     generationId: number,
   ): void {
     this.disposeSurfaceListeners();
-    const eventDisposer = surface.onEvent((event) => {
-      if (!this.isCurrentGeneration(generationId)) {
-        this.ignore("stale-generation");
-        return;
-      }
-      this.handleCurrentRendererEvent(event);
-    });
-    const destroyedDisposer = surface.onDestroyed(() => {
-      if (!this.isCurrentGeneration(generationId)) {
-        this.ignore("stale-generation");
-        return;
-      }
-      this.handleSecondaryDestroyed();
-    });
-    this.surfaceDisposers.add(eventDisposer);
-    this.surfaceDisposers.add(destroyedDisposer);
+    const stagedDisposers: Array<() => void> = [];
+    try {
+      stagedDisposers.push(
+        surface.onEvent((event) => {
+          if (!this.isCurrentGeneration(generationId)) {
+            this.ignore("stale-generation");
+            return;
+          }
+          this.handleCurrentRendererEvent(event);
+        }),
+      );
+      stagedDisposers.push(
+        surface.onDestroyed(() => {
+          if (!this.isCurrentGeneration(generationId)) {
+            this.ignore("stale-generation");
+            return;
+          }
+          this.handleSecondaryDestroyed();
+        }),
+      );
+    } catch (error) {
+      runRollbackInReverse(stagedDisposers);
+      throw error;
+    }
+    for (const dispose of stagedDisposers) this.surfaceDisposers.add(dispose);
   }
 
   private bindSession(session: ShowRunSession, generationId: number): void {
     this.disposeSessionListeners();
-    const faultDisposer = session.onFault((fault) => {
-      if (!this.isCurrentGeneration(generationId)) {
-        this.ignore("stale-generation");
-        return;
-      }
-      this.handleSessionFault(fault);
-    });
-    const primaryDisposer = session.onPrimaryCompletion((event) => {
-      if (!this.isCurrentGeneration(generationId)) {
-        this.ignore("stale-generation");
-        return;
-      }
-      this.handlePrimaryCompletion(event);
-    });
-    this.sessionDisposers.add(faultDisposer);
-    this.sessionDisposers.add(primaryDisposer);
+    const stagedDisposers: Array<() => void> = [];
+    try {
+      stagedDisposers.push(
+        session.onFault((fault) => {
+          if (!this.isCurrentGeneration(generationId)) {
+            this.ignore("stale-generation");
+            return;
+          }
+          this.handleSessionFault(fault);
+        }),
+      );
+      stagedDisposers.push(
+        session.onPrimaryCompletion((event) => {
+          if (!this.isCurrentGeneration(generationId)) {
+            this.ignore("stale-generation");
+            return;
+          }
+          this.handlePrimaryCompletion(event);
+        }),
+      );
+    } catch (error) {
+      runRollbackInReverse(stagedDisposers);
+      throw error;
+    }
+    for (const dispose of stagedDisposers) this.sessionDisposers.add(dispose);
   }
 
   private handleCurrentRendererEvent(event: RendererToControllerEvent): boolean {
@@ -623,35 +641,104 @@ export class ShowRunCoordinator {
 
     this.operatorArmed = false;
     const generationId = this.generationId;
-    const active = this.createActiveLoop(1, generationId);
-    const telemetrySurface = this.createTelemetrySurface(surface, generationId);
-    const runtime = session.createLoop(
-      active.loopId,
-      telemetrySurface,
-      () => this.reserveNextLoopId(generationId),
-      (event) => this.recordPrimaryEditorDispatch(event, generationId),
-    );
-    const driver = this.dependencies.createDriver({
-      runtime,
-      timers: this.dependencies.timers,
-      clock: { nowMonotonic: () => this.dependencies.nowMs() },
-      loopDurationMs: SHOW_LOOP_DURATION_MS,
-      loopLimit: this.dependencies.mode === "Soak3" ? 3 : null,
-      onLoopBoundary: (boundary) =>
-        this.receiveLoopBoundary(generationId, boundary),
-      onComplete: () => this.handleDriverComplete(generationId),
-      onFailure: (reason) => this.handleDriverFailure(generationId, reason),
-    });
-    this.driver = driver;
-    this.transition("running");
-    this.sendStatus();
-    let started = false;
+    const rollback: Array<() => void> = [];
+    let stagedNextLoop:
+      | { generationId: number; loopNumber: number; loopId: string }
+      | undefined;
+    let published = false;
     try {
-      started = driver.start();
+      const loopId = this.dependencies.nextLoopId(generationId, 1);
+      const telemetry = this.dependencies.createTelemetry();
+      telemetry.beginLoop(loopId, this.dependencies.nowMs());
+      const sampler = this.dependencies.createResourceSampler();
+      rollback.push(() => {
+        // finish() clears the sampler interval synchronously before returning.
+        void sampler.finish();
+      });
+      const active: ActiveLoop = {
+        generationId,
+        loopId,
+        loopNumber: 1,
+        telemetry,
+        sampler,
+      };
+      const telemetrySurface = this.createTelemetrySurface(
+        surface,
+        generationId,
+      );
+      const reserveNextLoopId = (): string => {
+        if (published) return this.reserveNextLoopId(generationId);
+        if (!this.isCurrentGeneration(generationId) || this.state !== "ready") {
+          throw new Error(
+            "next loop ID requested outside staged loop construction",
+          );
+        }
+
+        const loopNumber = active.loopNumber + 1;
+        const terminalRotation =
+          (this.dependencies.mode === "Soak3" && loopNumber > 3) ||
+          this.stopQueued;
+        if (terminalRotation) return `${active.loopId}-terminal`;
+        if (stagedNextLoop !== undefined) return stagedNextLoop.loopId;
+
+        const reservedLoopId = this.dependencies.nextLoopId(
+          generationId,
+          loopNumber,
+        );
+        if (
+          reservedLoopId.length === 0 ||
+          reservedLoopId === active.loopId
+        ) {
+          throw new Error("next loop ID must be fresh and non-empty");
+        }
+        stagedNextLoop = {
+          generationId,
+          loopNumber,
+          loopId: reservedLoopId,
+        };
+        return reservedLoopId;
+      };
+      const runtime = session.createLoop(
+        active.loopId,
+        telemetrySurface,
+        reserveNextLoopId,
+        (event) => this.recordPrimaryEditorDispatch(event, generationId),
+      );
+      rollback.push(() => {
+        if (runtime.state !== "stopped") runtime.stop();
+      });
+      const driver = this.dependencies.createDriver({
+        runtime,
+        timers: this.dependencies.timers,
+        clock: { nowMonotonic: () => this.dependencies.nowMs() },
+        loopDurationMs: SHOW_LOOP_DURATION_MS,
+        loopLimit: this.dependencies.mode === "Soak3" ? 3 : null,
+        onLoopBoundary: (boundary) =>
+          this.receiveLoopBoundary(generationId, boundary),
+        onComplete: () => this.handleDriverComplete(generationId),
+        onFailure: (reason) => this.handleDriverFailure(generationId, reason),
+      });
+      rollback.push(() => driver.stop());
+      if (!driver.start()) throw new Error("loop driver did not start");
+
+      active.countsAtStart = this.runtimeCounts(driver, sampler);
+      this.activeLoop = active;
+      this.currentLoopId = loopId;
+      this.pendingNextLoop = stagedNextLoop;
+      this.driver = driver;
+      this.transition("running");
+      this.startedLoops += 1;
+      published = true;
+      rollback.length = 0;
+      this.sendStatus();
+      return true;
     } catch {
-      started = false;
-    }
-    if (!started) {
+      runRollbackInReverse(rollback);
+      stagedNextLoop = undefined;
+      this.activeLoop = undefined;
+      this.currentLoopId = null;
+      this.pendingNextLoop = undefined;
+      this.driver = undefined;
       if (deferTerminalFailure) {
         this.pendingRecoveryTerminalFailure = "loop-start-failed";
       } else {
@@ -659,8 +746,6 @@ export class ShowRunCoordinator {
       }
       return false;
     }
-    active.countsAtStart = this.runtimeCounts();
-    return true;
   }
 
   private createActiveLoop(
@@ -1845,10 +1930,13 @@ export class ShowRunCoordinator {
     }
   }
 
-  private runtimeCounts(): RuntimeCountEvidence {
+  private runtimeCounts(
+    driver: MultiLoopDriver | undefined = this.driver,
+    sampler: ResourceSampler | undefined = this.activeLoop?.sampler,
+  ): RuntimeCountEvidence {
     const session = this.session?.diagnostics();
-    const driverTimers = this.driver?.diagnostics().timers ?? 0;
-    const samplerTimers = this.activeLoop?.sampler.diagnostics().timerCount ?? 0;
+    const driverTimers = driver?.diagnostics().timers ?? 0;
+    const samplerTimers = sampler?.diagnostics().timerCount ?? 0;
     return {
       listeners: this.surfaceDisposers.size + this.sessionDisposers.size,
       timers:
@@ -2025,6 +2113,13 @@ function bestEffortSync(action: () => unknown): void {
   } catch {
     // Cleanup remains best effort and finite.
   }
+}
+
+function runRollbackInReverse(rollback: Array<() => void>): void {
+  for (let index = rollback.length - 1; index >= 0; index -= 1) {
+    bestEffortSync(rollback[index]!);
+  }
+  rollback.length = 0;
 }
 
 function bestEffortSyncResult<T>(action: () => T, fallback: T): T {
