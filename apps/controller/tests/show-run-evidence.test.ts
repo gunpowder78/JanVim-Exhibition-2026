@@ -864,6 +864,21 @@ describe("strict show-run evidence schema", () => {
     }
   });
 
+  it("preserves failed Soak3 evidence when the final network snapshot is missing", () => {
+    const record = cloneRecord();
+    record.offlineSnapshots.pop();
+    record.aggregate.offlineSampleCount = 4;
+
+    const acceptance = evaluateShowAcceptance(record, {
+      requestedResultOk: true,
+      diagnosticConnected: false,
+    });
+    expect(acceptance).toBe("fail");
+    record.aggregate.acceptanceOutcome = acceptance;
+
+    expect(parseShowRunEvidence(record).aggregate.acceptanceOutcome).toBe("fail");
+  });
+
   it("keeps diagnostic runs distinct and rejects incomplete Soak3 cardinality", () => {
     const diagnostic = validShowRecord();
     expect(

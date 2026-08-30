@@ -419,13 +419,13 @@ function createCoordinator(
       return sampleNetwork(host);
     },
     finalizeEvidence: async (result, diagnostics, signal) => {
-      const current = requireInputs();
       if (
         command.mode === "Soak3" &&
         diagnostics.aggregate.completedLoops < 3
       ) {
         return "fail";
       }
+      const current = requireInputs();
       const evidence = buildShowEvidence(
         command,
         current,

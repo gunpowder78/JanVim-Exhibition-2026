@@ -621,7 +621,13 @@ const showRunEvidenceSchema = z
       if (record.loops.length !== 3) {
         addIssue(["loops"], "Soak3 requires exactly three loop summaries");
       }
-      if (record.offlineSnapshots.length !== 5) {
+      if (
+        record.offlineSnapshots.length !== 5 &&
+        !(
+          record.aggregate.acceptanceOutcome === "fail" &&
+          record.offlineSnapshots.length === 4
+        )
+      ) {
         addIssue(
           ["offlineSnapshots"],
           "Soak3 requires exactly five network snapshots",

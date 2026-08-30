@@ -2198,6 +2198,33 @@ describe("show run coordinator", () => {
     expect(harness.trace).toContain("terminal:acceptance-failed");
   });
 
+  it("reports shutdown-incomplete when the acceptance-failed marker times out", async () => {
+    const markerGate = deferred();
+    const harness = createHarness({
+      mode: "Soak3",
+      evidenceAcceptance: "fail",
+      phaseDeferrals: new Map([["terminal-marker", markerGate]]),
+    });
+    await startRunning(harness);
+
+    await completeResetBoundary(harness, 1, 10);
+    await completeResetBoundary(harness, 2, 20);
+    await completeResetBoundary(harness, 3, 30);
+
+    expect(harness.trace).toContain("terminal:acceptance-failed");
+    expect(harness.timers.active(PHASE_TIMEOUT_MS)).toBe(1);
+    await harness.timers.fireTimeout(PHASE_TIMEOUT_MS);
+    await expect(harness.coordinator.completion).resolves.toEqual({
+      ok: false,
+      reason: "shutdown-incomplete",
+    });
+    expect(harness.terminalMarkers).toHaveLength(0);
+    expect(harness.terminalMarkerSignals).toHaveLength(1);
+    expect(harness.terminalMarkerSignals[0]!.aborted).toBe(true);
+
+    markerGate.resolve();
+  });
+
   it("keeps diagnostic evidence distinct from intentional command success", async () => {
     const harness = createHarness({
       mode: "Soak3",

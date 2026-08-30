@@ -420,6 +420,7 @@ function createValidationHarness(options: {
 
 function createStartupHarness(options: {
   logStorage?: MemoryLogStorage;
+  artifactLockBytes?: Buffer;
   closeChildOnWindowClose?: boolean;
   processStartTimes?: readonly string[];
   failAwaitAgent?: boolean;
@@ -473,7 +474,10 @@ function createStartupHarness(options: {
     trace.push(`${name}:${invocation}:complete`);
   };
   const files = new Map<string, Buffer>([
-    [win32.join(repositoryRoot, "janvim-artifact.lock.json"), artifactLock],
+    [
+      win32.join(repositoryRoot, "janvim-artifact.lock.json"),
+      options.artifactLockBytes ?? artifactLock,
+    ],
     [win32.join(repositoryRoot, "show", "janvim-show.toml"), showConfig],
     [
       win32.join(repositoryRoot, "content", "fixture", "show.manifest.json"),
@@ -2410,6 +2414,33 @@ describe("real Task 9 show runtime adapters", () => {
         },
       },
     ]);
+  });
+
+  it("skips incomplete Soak3 evidence when artifact validation fails before inputs exist", async () => {
+    const changedLock = Buffer.from(
+      artifactLock
+        .toString("utf8")
+        .replace('"archiveBytes": 31345595', '"archiveBytes": 31345594'),
+      "utf8",
+    );
+    const harness = createStartupHarness({ artifactLockBytes: changedLock });
+    const coordinator = harness.adapters.createCoordinator(showCommand("Soak3"));
+
+    await expect(coordinator.boot()).resolves.toEqual({
+      ready: false,
+      reason: "startup-failed",
+    });
+    await coordinator.requestEmergencyStop("electron-quit");
+    await expect(coordinator.completion).resolves.toEqual({
+      ok: false,
+      reason: "emergency-electron-quit",
+    });
+
+    expect(harness.evidenceAttempts).toHaveLength(0);
+    expect(harness.evidenceWrites).toHaveLength(0);
+    expect(coordinator.diagnostics().shutdown.failures).not.toContain(
+      "evidence-write-failed",
+    );
   });
 
   it("refuses missing-stdio cleanup after the spawned PID identity changes", async () => {

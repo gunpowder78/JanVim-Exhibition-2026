@@ -2458,7 +2458,10 @@ export class ShowRunCoordinator {
   }
 
   private classifyShutdownResult(requested: ShowRunResult): ShowRunResult {
-    if (requested.ok && this.shutdownDiagnostics.failures.length > 0) {
+    if (
+      (requested.ok || requested.reason === "acceptance-failed") &&
+      this.shutdownDiagnostics.failures.length > 0
+    ) {
       return { ok: false, reason: "shutdown-incomplete" };
     }
     return requested;
