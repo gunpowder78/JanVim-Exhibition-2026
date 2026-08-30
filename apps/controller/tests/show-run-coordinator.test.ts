@@ -791,12 +791,20 @@ function createHarness(options: HarnessOptions = {}) {
           trace.push("rejecting-async-abort-listener");
           throw new Error("injected async abort listener rejection");
         });
-        signal.addEventListener("abort", {
-          handleEvent: async () => {
+        const rejectingObjectListener: EventListenerObject = {
+          handleEvent: async function (
+            this: EventListenerObject,
+          ): Promise<void> {
             trace.push("rejecting-object-abort-listener");
+            trace.push(
+              `object-abort-listener-receiver:${String(
+                this === rejectingObjectListener,
+              )}`,
+            );
             throw new Error("injected object abort listener rejection");
           },
-        });
+        };
+        signal.addEventListener("abort", rejectingObjectListener);
         signal.addEventListener("abort", () => {
           trace.push("async-abort-peer-listener");
         });
@@ -3943,6 +3951,7 @@ describe("show run coordinator", () => {
       expect.arrayContaining([
         "rejecting-async-abort-listener",
         "rejecting-object-abort-listener",
+        "object-abort-listener-receiver:true",
         "async-abort-peer-listener",
         "rejecting-async-onabort-listener",
       ]),
