@@ -497,6 +497,10 @@ class MemoryLogStorage implements LogStorage {
 }
 
 type ExternalProtocol = "dns" | "http" | "https" | "ws" | "wss";
+type NetworkBoundaryEvent = {
+  kind: "exec-file" | "load-url" | "spawn" | "web-request";
+  value: string;
+};
 
 function createComposedHost(options: {
   resetPrimaryDelaysMs?: readonly number[];
@@ -512,6 +516,7 @@ function createComposedHost(options: {
   const terminalValues: unknown[] = [];
   const leases: RunLease[] = [];
   const networkAttempts: ExternalProtocol[] = [];
+  const networkBoundaryEvents: NetworkBoundaryEvent[] = [];
   const ipcListeners = new Map<
     string,
     (event: { senderFrame: { url: string } | null }, payload: unknown) => void
@@ -526,11 +531,14 @@ function createComposedHost(options: {
         callback: (result: { cancel: boolean }) => void,
       ) => void)
     | undefined;
-  let networkBoundaryCalls = 0;
+  let runtimeNetworkBoundaryStart = 0;
   let resetIndex = 0;
 
-  const recordPotentialAttempt = (value: string): void => {
-    networkBoundaryCalls += 1;
+  const recordPotentialAttempt = (
+    kind: NetworkBoundaryEvent["kind"],
+    value: string,
+  ): void => {
+    networkBoundaryEvents.push({ kind, value });
     for (const protocol of ["http", "https", "ws", "wss"] as const) {
       if (value.toLowerCase().includes(`${protocol}://`)) {
         networkAttempts.push(protocol);
@@ -558,13 +566,12 @@ function createComposedHost(options: {
             callback: (result: { cancel: boolean }) => void,
           ) => void,
         ) => {
-          networkBoundaryCalls += 1;
           if (_filter === null) {
             beforeRequest = undefined;
             return;
           }
           beforeRequest = (details, callback) => {
-            recordPotentialAttempt(details.url);
+            recordPotentialAttempt("web-request", details.url);
             _listener?.(details, callback);
           };
         },
@@ -620,7 +627,7 @@ function createComposedHost(options: {
     }
 
     public async loadURL(url: string): Promise<void> {
-      recordPotentialAttempt(url);
+      recordPotentialAttempt("load-url", url);
       loadedUrl = url;
       trace.push("load-secondary");
     }
@@ -724,7 +731,7 @@ function createComposedHost(options: {
       _limits: { timeoutMs: number; maxStdoutBytes: number; maxStderrBytes: number },
     ) => {
       expect(file).toBe("pwsh");
-      recordPotentialAttempt(args.join(" "));
+      recordPotentialAttempt("exec-file", args.join(" "));
       if (args.some((argument) => argument.endsWith("verify-runtime.ps1"))) {
         trace.push("verify-runtime");
         return { exitCode: 0, stdout: "verified\n", stderr: "" };
@@ -787,14 +794,16 @@ function createComposedHost(options: {
       args: readonly string[],
       spawnOptions: { env: NodeJS.ProcessEnv },
     ) => {
-      recordPotentialAttempt(`${file} ${args.join(" ")} ${JSON.stringify(spawnOptions.env)}`);
+      recordPotentialAttempt(
+        "spawn",
+        `${file} ${args.join(" ")} ${JSON.stringify(spawnOptions.env)}`,
+      );
       return child;
     },
     inspectProcessStartedAtUtc: async () => "2026-08-30T00:00:00.500Z",
     randomBytes: () => Buffer.from("ab".repeat(24), "hex"),
     createBridge: (token: string) => ({
       listen: async () => {
-        networkBoundaryCalls += 1;
         return { host: "127.0.0.1" as const, port: 32_123, family: "IPv4" };
       },
       waitForAgent: async () => undefined,
@@ -866,12 +875,12 @@ function createComposedHost(options: {
     terminalValues,
     leases,
     networkAttempts,
+    get runtimeNetworkBoundaryEvents() {
+      return networkBoundaryEvents.slice(runtimeNetworkBoundaryStart);
+    },
     ipcListeners,
     get loadedUrl() {
       return loadedUrl;
-    },
-    get networkBoundaryCalls() {
-      return networkBoundaryCalls;
     },
     probeRemoteRequest: (url: string) => {
       let result: { cancel: boolean } | undefined;
@@ -881,6 +890,9 @@ function createComposedHost(options: {
       return result;
     },
     clearNetworkAttempts: () => networkAttempts.splice(0),
+    beginRuntimeNetworkObservation: () => {
+      runtimeNetworkBoundaryStart = networkBoundaryEvents.length;
+    },
     emitRenderer: routeRendererEvent,
     destroySecondary: () => currentWindow?.destroy(),
   };
@@ -921,6 +933,7 @@ async function startComposedRun(
   }
   expect(host.networkAttempts).toEqual(["http", "https", "dns", "ws", "wss"]);
   host.clearNetworkAttempts();
+  host.beginRuntimeNetworkObservation();
   host.emitRenderer({ schema: 1, type: "operator-action", action: "start" });
   await settle();
   expect(coordinator.diagnostics().state).toBe("running");
@@ -1357,7 +1370,11 @@ describe("Task 9 recovery operations", () => {
       new Set(acceptedWriteBacks.map((command) => `${command.loopId}:${command.cueId}`))
         .size,
     ).toBe(6);
-    expect(acceptedHost.networkBoundaryCalls).toBeGreaterThan(0);
+    expect(
+      acceptedHost.runtimeNetworkBoundaryEvents.filter(
+        (event) => event.kind === "exec-file" && event.value.includes("Get-NetRoute"),
+      ),
+    ).toHaveLength(4);
     expect(acceptedHost.networkAttempts).toEqual([]);
 
     const rejectedHost = createComposedHost({
@@ -1381,6 +1398,11 @@ describe("Task 9 recovery operations", () => {
       acceptanceOutcome: "fail",
     });
     expect(rejectedHost.terminalValues).toHaveLength(1);
+    expect(
+      rejectedHost.runtimeNetworkBoundaryEvents.filter(
+        (event) => event.kind === "exec-file" && event.value.includes("Get-NetRoute"),
+      ),
+    ).toHaveLength(4);
     expect(rejectedHost.networkAttempts).toEqual([]);
   });
 
@@ -1611,7 +1633,11 @@ describe("Task 9 recovery operations", () => {
     expect(evidence.offlineSnapshots.every((snapshot) => snapshot.offline)).toBe(
       true,
     );
-    expect(host.networkBoundaryCalls).toBeGreaterThan(0);
+    expect(
+      host.runtimeNetworkBoundaryEvents.filter(
+        (event) => event.kind === "exec-file" && event.value.includes("Get-NetRoute"),
+      ),
+    ).toHaveLength(101);
     expect(host.networkAttempts).toEqual([]);
     assertRuntimeLogBounds(host.logStorage);
     assertDefaultLogBudgetBounds(new MemoryLogStorage());
