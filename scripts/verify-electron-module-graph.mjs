@@ -41,6 +41,7 @@ const regexPrefixKeywords = new Set([
   "yield",
 ]);
 const controlHeaderKeywords = new Set(["catch", "for", "if", "switch", "while", "with"]);
+const blockBeforeBraceKeywords = new Set(["catch", "do", "else", "finally", "try"]);
 const punctuators = [
   ">>>=",
   "===",
@@ -83,9 +84,29 @@ function regexCanStartAfter(token) {
   if (token === undefined) return true;
   if (token.type === "identifier") return regexPrefixKeywords.has(token.value);
   if (["number", "regex", "string", "template"].includes(token.type)) return false;
-  if (["]", "}", "++", "--"].includes(token.value)) return false;
+  if (token.value === "}") {
+    if (token.braceKind === "block") return true;
+    if (token.braceKind === "expression") return false;
+    return undefined;
+  }
+  if (["]", "++", "--"].includes(token.value)) return false;
   if (token.value === ")") return token.allowsRegexAfter === true;
   return true;
+}
+
+function classifyOpeningBrace(previousToken) {
+  if (previousToken === undefined) return "block";
+  if (previousToken.value === ")" || previousToken.value === "=>") return "block";
+  if (
+    previousToken.type === "identifier" &&
+    blockBeforeBraceKeywords.has(previousToken.value)
+  ) {
+    return "block";
+  }
+  if (previousToken.value === ":") return "ambiguous";
+  if ([";", "{", "}"].includes(previousToken.value)) return "block";
+  if (regexCanStartAfter(previousToken) === true) return "expression";
+  return "ambiguous";
 }
 
 function* lexJavaScript(source, modulePath) {
@@ -188,6 +209,7 @@ function* lexJavaScript(source, modulePath) {
 
   function* scanCode(stopAtTemplateExpression) {
     const delimiters = [];
+    const pendingClassBodyDepths = new Set();
     let previousToken;
     while (index < source.length) {
       const character = source[index];
@@ -225,12 +247,18 @@ function* lexJavaScript(source, modulePath) {
         yield token;
         continue;
       }
-      if (character === "/" && regexCanStartAfter(previousToken)) {
-        const token = readRegex();
-        token.precededByMemberAccess = false;
-        previousToken = token;
-        yield token;
-        continue;
+      if (character === "/") {
+        const regexAllowed = regexCanStartAfter(previousToken);
+        if (regexAllowed === undefined) {
+          malformedJavaScript(modulePath, "ambiguous slash after closing brace");
+        }
+        if (regexAllowed) {
+          const token = readRegex();
+          token.precededByMemberAccess = false;
+          previousToken = token;
+          yield token;
+          continue;
+        }
       }
       if (identifierStart.test(character)) {
         const start = index;
@@ -244,9 +272,18 @@ function* lexJavaScript(source, modulePath) {
             previousToken?.type === "punctuator" &&
             (previousToken.value === "." || previousToken.value === "?."),
         };
+        if (
+          token.value === "class" &&
+          !token.precededByMemberAccess
+        ) {
+          pendingClassBodyDepths.add(delimiters.length);
+        }
         previousToken = token;
         yield token;
         continue;
+      }
+      if (character === "\\") {
+        throw new Error(`Unsupported identifier escape: ${modulePath}`);
       }
       if (/\d/u.test(character)) {
         const start = index;
@@ -266,8 +303,17 @@ function* lexJavaScript(source, modulePath) {
         if (delimiters.length >= maximumLexerNesting) {
           malformedJavaScript(modulePath, "delimiter nesting limit exceeded");
         }
+        let braceKind;
+        if (value === "{") {
+          if (pendingClassBodyDepths.delete(delimiters.length)) {
+            braceKind = "block";
+          } else {
+            braceKind = classifyOpeningBrace(previousToken);
+          }
+        }
         delimiters.push({
           value,
+          braceKind,
           allowsRegexAfter:
             value === "(" &&
             previousToken?.type === "identifier" &&
@@ -282,15 +328,22 @@ function* lexJavaScript(source, modulePath) {
         if (opening?.value !== expectedOpening) {
           malformedJavaScript(modulePath, `unmatched ${value}`);
         }
+        for (const depth of pendingClassBodyDepths) {
+          if (depth > delimiters.length) pendingClassBodyDepths.delete(depth);
+        }
         const token = {
           type: "punctuator",
           value,
           start,
           allowsRegexAfter: value === ")" && opening.allowsRegexAfter,
+          braceKind: value === "}" ? opening.braceKind : undefined,
         };
         previousToken = token;
         yield token;
         continue;
+      }
+      if ([",", ":", ";"].includes(value)) {
+        pendingClassBodyDepths.delete(delimiters.length);
       }
       const token = { type: "punctuator", value, start };
       previousToken = token;
@@ -386,18 +439,113 @@ function parseStaticImport(cursor, firstToken, modulePath) {
   return moduleSpecifierFrom(cursor.take(), modulePath);
 }
 
-function parseLiteralCall(cursor, modulePath, kind) {
+function parseLiteralCall(cursor, modulePath, kind, specifiers) {
   requireToken(cursor, "punctuator", "(", modulePath, `invalid ${kind} call`);
   const token = cursor.take();
   if (token?.type !== "string") {
     throw new Error(`Unsupported ambiguous ${kind}: ${modulePath}`);
   }
   const specifier = moduleSpecifierFrom(token, modulePath);
-  const closing = cursor.take();
-  if (closing?.type !== "punctuator" || closing.value !== ")") {
-    throw new Error(`Unsupported ambiguous ${kind}: ${modulePath}`);
+  specifiers.push(specifier);
+  if (cursor.peek()?.type === "punctuator" && cursor.peek().value === ")") {
+    cursor.take();
+    return;
   }
-  return specifier;
+  if (
+    kind === "dynamic import" &&
+    cursor.peek()?.type === "punctuator" &&
+    cursor.peek().value === ","
+  ) {
+    cursor.take();
+    scanDynamicImportOptions(cursor, modulePath, specifiers);
+    return;
+  }
+  throw new Error(`Unsupported ambiguous ${kind}: ${modulePath}`);
+}
+
+function scanDynamicImportOptions(cursor, modulePath, specifiers) {
+  const delimiters = [];
+  while (true) {
+    const token = cursor.take();
+    if (token === undefined) {
+      throw new Error(`Unsupported ambiguous dynamic import: ${modulePath}`);
+    }
+    if (consumeModuleEdge(token, cursor, modulePath, specifiers)) continue;
+    if (token.type !== "punctuator") continue;
+    if (["(", "[", "{"].includes(token.value)) {
+      if (delimiters.length >= maximumLexerNesting) {
+        malformedJavaScript(modulePath, "dynamic import option nesting limit exceeded");
+      }
+      delimiters.push(token.value);
+      continue;
+    }
+    if ([")", "]", "}"].includes(token.value)) {
+      if (token.value === ")" && delimiters.length === 0) return;
+      const expectedOpening = { ")": "(", "]": "[", "}": "{" }[token.value];
+      if (delimiters.pop() !== expectedOpening) {
+        malformedJavaScript(modulePath, "invalid dynamic import options");
+      }
+      continue;
+    }
+    if (token.value === "," && delimiters.length === 0) {
+      throw new Error(`Unsupported ambiguous dynamic import: ${modulePath}`);
+    }
+  }
+}
+
+function consumeModuleEdge(token, cursor, modulePath, specifiers) {
+  if (
+    token.type === "identifier" &&
+    token.value === "import" &&
+    !token.precededByMemberAccess
+  ) {
+    const next = cursor.peek();
+    if (next?.type === "punctuator" && next.value === ".") {
+      cursor.take();
+      requireToken(cursor, "identifier", "meta", modulePath, "invalid import.meta");
+    } else if (next?.type === "punctuator" && next.value === "(") {
+      parseLiteralCall(cursor, modulePath, "dynamic import", specifiers);
+    } else if (next?.type === "string") {
+      specifiers.push(moduleSpecifierFrom(cursor.take(), modulePath));
+    } else {
+      specifiers.push(parseStaticImport(cursor, next, modulePath));
+    }
+    return true;
+  }
+  if (
+    token.type === "identifier" &&
+    token.value === "export" &&
+    !token.precededByMemberAccess
+  ) {
+    const next = cursor.peek();
+    if (next?.type === "punctuator" && next.value === "*") {
+      cursor.take();
+      if (cursor.peek()?.type === "identifier" && cursor.peek().value === "as") {
+        cursor.take();
+        requireToken(cursor, "identifier", undefined, modulePath, "invalid export namespace");
+      }
+      requireToken(cursor, "identifier", "from", modulePath, "export lacks from");
+      specifiers.push(moduleSpecifierFrom(cursor.take(), modulePath));
+    } else if (next?.type === "punctuator" && next.value === "{") {
+      consumeDelimited(cursor, "{", "}", modulePath, "invalid named export");
+      if (cursor.peek()?.type === "identifier" && cursor.peek().value === "from") {
+        cursor.take();
+        specifiers.push(moduleSpecifierFrom(cursor.take(), modulePath));
+      }
+    }
+    return true;
+  }
+  if (
+    token.type === "identifier" &&
+    token.value === "require" &&
+    !token.precededByMemberAccess &&
+    cursor.peek()?.type === "punctuator" &&
+    cursor.peek().value === "("
+  ) {
+    parseLiteralCall(cursor, modulePath, "require", specifiers);
+    return true;
+  }
+  return false;
 }
 
 function discoverModuleSpecifiers(source, modulePath) {
@@ -405,56 +553,7 @@ function discoverModuleSpecifiers(source, modulePath) {
   const specifiers = [];
   while (cursor.peek() !== undefined) {
     const token = cursor.take();
-    if (
-      token.type === "identifier" &&
-      token.value === "import" &&
-      !token.precededByMemberAccess
-    ) {
-      const next = cursor.peek();
-      if (next?.type === "punctuator" && next.value === ".") {
-        cursor.take();
-        requireToken(cursor, "identifier", "meta", modulePath, "invalid import.meta");
-      } else if (next?.type === "punctuator" && next.value === "(") {
-        specifiers.push(parseLiteralCall(cursor, modulePath, "dynamic import"));
-      } else if (next?.type === "string") {
-        specifiers.push(moduleSpecifierFrom(cursor.take(), modulePath));
-      } else {
-        specifiers.push(parseStaticImport(cursor, next, modulePath));
-      }
-      continue;
-    }
-    if (
-      token.type === "identifier" &&
-      token.value === "export" &&
-      !token.precededByMemberAccess
-    ) {
-      const next = cursor.peek();
-      if (next?.type === "punctuator" && next.value === "*") {
-        cursor.take();
-        if (cursor.peek()?.type === "identifier" && cursor.peek().value === "as") {
-          cursor.take();
-          requireToken(cursor, "identifier", undefined, modulePath, "invalid export namespace");
-        }
-        requireToken(cursor, "identifier", "from", modulePath, "export lacks from");
-        specifiers.push(moduleSpecifierFrom(cursor.take(), modulePath));
-      } else if (next?.type === "punctuator" && next.value === "{") {
-        consumeDelimited(cursor, "{", "}", modulePath, "invalid named export");
-        if (cursor.peek()?.type === "identifier" && cursor.peek().value === "from") {
-          cursor.take();
-          specifiers.push(moduleSpecifierFrom(cursor.take(), modulePath));
-        }
-      }
-      continue;
-    }
-    if (
-      token.type === "identifier" &&
-      token.value === "require" &&
-      !token.precededByMemberAccess &&
-      cursor.peek()?.type === "punctuator" &&
-      cursor.peek().value === "("
-    ) {
-      specifiers.push(parseLiteralCall(cursor, modulePath, "require"));
-    }
+    consumeModuleEdge(token, cursor, modulePath, specifiers);
   }
   return specifiers;
 }

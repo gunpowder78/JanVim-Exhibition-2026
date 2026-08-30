@@ -175,6 +175,20 @@ describe("compiled Electron module graph", () => {
     ]);
   });
 
+  it("fails closed on an escaped bare require identifier", () => {
+    const fixture = createVerifierFixture({
+      "electron-main.js": 'import "./escaped-require-parent.cjs";\n',
+      "escaped-require-parent.cjs":
+        'module.exports = requ\\u0069re("./escaped-require-child.cjs");\n',
+      "escaped-require-child.cjs": "module.exports = true;\n",
+    });
+
+    const result = runVerifier(fixture.root);
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("Unsupported identifier escape");
+  });
+
   it("ignores import-like text in comments, strings, regexes, and template raw text", () => {
     const fixture = createVerifierFixture({
       "electron-main.js": [
@@ -212,6 +226,94 @@ describe("compiled Electron module graph", () => {
     expect(manifestPaths(result.stdout)).toEqual([
       "apps/controller/dist/src/electron-main.js",
       "apps/controller/dist/src/template-expression-child.js",
+    ]);
+  });
+
+  it.each([
+    ["a control block", "if (true) {}"],
+    ["a function body", "function boundedFunction() {}"],
+    ["a class body", "class BoundedClass {}"],
+  ] as const)("treats a regex after %s as inert text", (_label, prefix) => {
+    const fixture = createVerifierFixture({
+      "electron-main.js": [
+        `${prefix} /import\\("\\.\\/regex-decoy\\.js"\\)/u.test("");`,
+        'import "./regex-real-child.js";',
+        "",
+      ].join("\n"),
+      "regex-real-child.js": "export const child = true;\n",
+    });
+
+    const result = runVerifier(fixture.root);
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(manifestPaths(result.stdout)).toEqual([
+      "apps/controller/dist/src/electron-main.js",
+      "apps/controller/dist/src/regex-real-child.js",
+    ]);
+  });
+
+  it("treats a slash after an object literal as division", () => {
+    const fixture = createVerifierFixture({
+      "electron-main.js": [
+        "const ratio = { valueOf() { return 8; } } /",
+        '  import("./division-child.js");',
+        "void ratio;",
+        "",
+      ].join("\n"),
+      "division-child.js": "export const child = true;\n",
+    });
+
+    const result = runVerifier(fixture.root);
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(manifestPaths(result.stdout)).toEqual([
+      "apps/controller/dist/src/division-child.js",
+      "apps/controller/dist/src/electron-main.js",
+    ]);
+  });
+
+  it("discovers a static import carrying attributes", () => {
+    const fixture = createVerifierFixture({
+      "electron-main.js":
+        'import value from "./attribute-child.js" with { type: "json" };\nvoid value;\n',
+      "attribute-child.js": "export default true;\n",
+    });
+
+    const result = runVerifier(fixture.root);
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(manifestPaths(result.stdout)).toEqual([
+      "apps/controller/dist/src/attribute-child.js",
+      "apps/controller/dist/src/electron-main.js",
+    ]);
+  });
+
+  it("discovers executable local edges inside bounded dynamic import options", () => {
+    const fixture = createVerifierFixture({
+      "electron-main.js": 'import "./options-parent.cjs";\n',
+      "options-parent.cjs": [
+        'void import("./options-child.js", {',
+        "  with: {",
+        '    type: (require("./nested-option.cjs"), "json"),',
+        '    mode: (import("./nested-option.js"), "bounded"),',
+        "  },",
+        "});",
+        "",
+      ].join("\n"),
+      "options-child.js": "export default true;\n",
+      "nested-option.cjs": "module.exports = true;\n",
+      "nested-option.js": "export const nested = true;\n",
+    });
+
+    const result = runVerifier(fixture.root);
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(manifestPaths(result.stdout)).toEqual([
+      "apps/controller/dist/src/electron-main.js",
+      "apps/controller/dist/src/nested-option.cjs",
+      "apps/controller/dist/src/nested-option.js",
+      "apps/controller/dist/src/options-child.js",
+      "apps/controller/dist/src/options-parent.cjs",
     ]);
   });
 
