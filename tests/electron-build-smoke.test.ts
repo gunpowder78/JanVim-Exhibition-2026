@@ -187,6 +187,24 @@ describe("compiled Electron module graph", () => {
     ]);
   });
 
+  it("discovers a Windows-backslash local require in a reachable cjs module", () => {
+    const fixture = createVerifierFixture({
+      "electron-main.js": 'import "./windows-cjs-parent.cjs";\n',
+      "windows-cjs-parent.cjs":
+        'module.exports = require(".\\\\windows-cjs-child.cjs");\n',
+      "windows-cjs-child.cjs": "module.exports = true;\n",
+    });
+
+    const result = runVerifier(fixture.root);
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(manifestPaths(result.stdout)).toEqual([
+      "apps/controller/dist/src/electron-main.js",
+      "apps/controller/dist/src/windows-cjs-child.cjs",
+      "apps/controller/dist/src/windows-cjs-parent.cjs",
+    ]);
+  });
+
   it("discovers a normalized escaped bare require identifier", () => {
     const fixture = createVerifierFixture({
       "electron-main.js": 'import "./escaped-require-parent.cjs";\n',

@@ -76,7 +76,10 @@ function discoverModuleSpecifiers(source, modulePath) {
           `Malformed emitted JavaScript: ${modulePath}: import module specifier is not a string`,
         );
       }
-      specifiers.push(node.moduleSpecifier.text);
+      specifiers.push({
+        specifier: node.moduleSpecifier.text,
+        usesCommonJsRequestSemantics: false,
+      });
     } else if (
       typescript.isExportDeclaration(node) &&
       node.moduleSpecifier !== undefined
@@ -86,19 +89,32 @@ function discoverModuleSpecifiers(source, modulePath) {
           `Malformed emitted JavaScript: ${modulePath}: export module specifier is not a string`,
         );
       }
-      specifiers.push(node.moduleSpecifier.text);
+      specifiers.push({
+        specifier: node.moduleSpecifier.text,
+        usesCommonJsRequestSemantics: false,
+      });
     } else if (typescript.isCallExpression(node)) {
       if (node.expression.kind === typescript.SyntaxKind.ImportKeyword) {
-        specifiers.push(
-          literalCallSpecifier(node.arguments[0], modulePath, "dynamic import"),
-        );
+        specifiers.push({
+          specifier: literalCallSpecifier(
+            node.arguments[0],
+            modulePath,
+            "dynamic import",
+          ),
+          usesCommonJsRequestSemantics: false,
+        });
       } else if (
         typescript.isIdentifier(node.expression) &&
         node.expression.text === "require"
       ) {
-        specifiers.push(
-          literalCallSpecifier(node.arguments[0], modulePath, "require"),
-        );
+        specifiers.push({
+          specifier: literalCallSpecifier(
+            node.arguments[0],
+            modulePath,
+            "require",
+          ),
+          usesCommonJsRequestSemantics: true,
+        });
       }
     }
 
@@ -208,13 +224,22 @@ function verifyEmittedGraph(entryPath) {
       bytes: bytes.byteLength,
       sha256: createHash("sha256").update(bytes).digest("hex"),
     });
-    for (const specifier of discoverModuleSpecifiers(source, modulePath)) {
+    for (const {
+      specifier,
+      usesCommonJsRequestSemantics,
+    } of discoverModuleSpecifiers(source, modulePath)) {
       if (TypeScriptSourceExtension.test(specifier)) {
         throw new Error(
           `TypeScript source extension remains in emitted import: ${modulePath} -> ${specifier}`,
         );
       }
-      if (!specifier.startsWith("./") && !specifier.startsWith("../")) continue;
+      const isLocalSpecifier =
+        specifier.startsWith("./") ||
+        specifier.startsWith("../") ||
+        (process.platform === "win32" &&
+          usesCommonJsRequestSemantics &&
+          (specifier.startsWith(".\\") || specifier.startsWith("..\\")));
+      if (!isLocalSpecifier) continue;
 
       const dependencyPath = resolve(dirname(modulePath), specifier);
       assertInsideRoot(dependencyPath, canonicalControllerDistRoot);

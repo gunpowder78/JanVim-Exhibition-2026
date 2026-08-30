@@ -69,6 +69,28 @@ using System.Threading;
 
 public static class JanVimShowFakeNode
 {
+    private static void AttemptParserPackageMutation()
+    {
+        if (Environment.GetEnvironmentVariable("SHOW_TEST_PARSER_PACKAGE_MUTATION") != "attempt-before-graph-verifier") {
+            return;
+        }
+        string packagePath = Environment.GetEnvironmentVariable("SHOW_TEST_PARSER_PACKAGE_MANIFEST");
+        string mutationLog = Environment.GetEnvironmentVariable("SHOW_TEST_PARSER_PACKAGE_MUTATION_LOG");
+        try {
+            string original = File.ReadAllText(packagePath);
+            string modified = original.Replace("\"type\": \"commonjs\"", "\"type\": \"module\"", StringComparison.Ordinal);
+            if (String.Equals(original, modified, StringComparison.Ordinal)) return;
+            File.WriteAllText(packagePath, modified);
+            File.AppendAllText(mutationLog, "replaced" + Environment.NewLine);
+        }
+        catch (Exception error) {
+            File.AppendAllText(
+                mutationLog,
+                "blocked:" + unchecked((uint)error.HResult).ToString("X8") + Environment.NewLine
+            );
+        }
+    }
+
     private static void AttemptParserMutation()
     {
         if (Environment.GetEnvironmentVariable("SHOW_TEST_PARSER_MUTATION") != "attempt-before-graph-verifier") {
@@ -116,6 +138,7 @@ public static class JanVimShowFakeNode
     {
         if (arguments.Length != 1) return 91;
         if (Path.GetFileName(arguments[0]).Equals("verify-electron-module-graph.mjs", StringComparison.Ordinal)) {
+            AttemptParserPackageMutation();
             AttemptParserMutation();
             int parserExit = ExecuteFakeParser();
             if (parserExit != 0) return parserExit;
@@ -253,6 +276,7 @@ interface LauncherFixture {
   inputMutationLog: string;
   launchMutationLog: string;
   parserMutationLog: string;
+  parserPackageMutationLog: string;
   parserExecutionLog: string;
   terminalMarker: string;
   leasePath: string;
@@ -265,6 +289,7 @@ interface LauncherFixture {
   transitiveModule: string;
   graphVerifier: string;
   parserImplementation: string;
+  parserPackageManifest: string;
   verifyRuntime: string;
   closeHelper: string;
   showConfig: string;
@@ -311,8 +336,10 @@ interface RunOptions {
     | "runtime-verifier"
     | "close-helper"
     | "runtime-core"
-    | "typescript-parser";
+    | "typescript-parser"
+    | "typescript-package-metadata";
   parserMutation?: "none" | "attempt-before-graph-verifier";
+  parserPackageMutation?: "none" | "attempt-before-graph-verifier";
   graphOutput?: string;
   graphMutation?: "none" | "same-size-after-output";
   nodeVersion?: string;
@@ -906,6 +933,7 @@ function makeLauncherFixture(): LauncherFixture {
   const inputMutationLog = join(root, "input-mutation.log");
   const launchMutationLog = join(root, "launch-mutation.log");
   const parserMutationLog = join(root, "parser-mutation.log");
+  const parserPackageMutationLog = join(root, "parser-package-mutation.log");
   const parserExecutionLog = join(root, "parser-execution.log");
   const terminalMarker = win32.join(externalRoot, "controller-terminal.json");
   const leasePath = win32.join(externalRoot, "run-lease.json");
@@ -944,6 +972,12 @@ function makeLauncherFixture(): LauncherFixture {
     "lib",
     "typescript.js",
   );
+  const parserPackageManifest = join(
+    root,
+    "node_modules",
+    "typescript",
+    "package.json",
+  );
   const verifyRuntime = join(root, "scripts", "verify-runtime.ps1");
   const closeHelper = join(root, "scripts", "close-janvim-window.ps1");
   const checkedInMap = join(root, "show", "display-map.json");
@@ -975,6 +1009,19 @@ function makeLauncherFixture(): LauncherFixture {
   copyFixtureFile("runtime/user-root/plugin-lab/config/init.lua", root);
   const artifactLock = copyFixtureFile("janvim-artifact.lock.json", root);
   copyFixtureFile("scripts/verify-electron-module-graph.mjs", root);
+  writeText(
+    parserPackageManifest,
+    `${JSON.stringify(
+      {
+        name: "typescript-launcher-fixture",
+        version: "6.0.3-fixture",
+        type: "commonjs",
+        fixtureIdentity: "original",
+      },
+      null,
+      2,
+    )}\n`,
+  );
   writeText(
     parserImplementation,
     [
@@ -1091,6 +1138,7 @@ function makeLauncherFixture(): LauncherFixture {
     inputMutationLog,
     launchMutationLog,
     parserMutationLog,
+    parserPackageMutationLog,
     parserExecutionLog,
     terminalMarker,
     leasePath,
@@ -1103,6 +1151,7 @@ function makeLauncherFixture(): LauncherFixture {
     transitiveModule,
     graphVerifier,
     parserImplementation,
+    parserPackageManifest,
     verifyRuntime,
     closeHelper,
     showConfig,
@@ -1171,6 +1220,7 @@ function runLauncher(
     "close-helper": fixture.closeHelper,
     "runtime-core": fixture.janvimExecutable,
     "typescript-parser": fixture.parserImplementation,
+    "typescript-package-metadata": fixture.parserPackageManifest,
   }[launchMutation];
   const graphOutputOverride = join(fixture.root, "graph-output-override.json");
   if (options.graphOutput !== undefined) {
@@ -1211,6 +1261,11 @@ function runLauncher(
         SHOW_TEST_PARSER_MUTATION: options.parserMutation ?? "none",
         SHOW_TEST_PARSER_IMPLEMENTATION: fixture.parserImplementation,
         SHOW_TEST_PARSER_MUTATION_LOG: fixture.parserMutationLog,
+        SHOW_TEST_PARSER_PACKAGE_MUTATION:
+          options.parserPackageMutation ?? "none",
+        SHOW_TEST_PARSER_PACKAGE_MANIFEST: fixture.parserPackageManifest,
+        SHOW_TEST_PARSER_PACKAGE_MUTATION_LOG:
+          fixture.parserPackageMutationLog,
         SHOW_TEST_PARSER_EXECUTION_LOG: fixture.parserExecutionLog,
         SHOW_TEST_REAL_NODE: process.execPath,
         SHOW_TEST_CONTROLLER_EXIT: String(options.controllerExit ?? 9),
@@ -1818,6 +1873,49 @@ describe("offline show launcher and external watchdog", () => {
       expect.soft(sha256(fixture.parserImplementation)).toBe(originalParserSha256);
       expect.soft(parserExecutions).toEqual(["original"]);
       expect.soft(sequence).not.toContain("parser-executed:modified");
+      expect.soft(sequence.indexOf("graph-verify")).toBeGreaterThan(
+        sequence.indexOf("parser-executed:original"),
+      );
+    } finally {
+      fixture.cleanup();
+    }
+  }, 15_000);
+
+  it("claims TypeScript package metadata before it governs graph parser execution", () => {
+    const fixture = makeLauncherFixture();
+    const originalParserSha256 = sha256(fixture.parserImplementation);
+    const originalPackageSha256 = sha256(fixture.parserPackageManifest);
+    try {
+      const result = runLauncher(
+        fixture,
+        launcherArguments(fixture, "ValidateOnly"),
+        {
+          behavior: "matching-success",
+          parserPackageMutation: "attempt-before-graph-verifier",
+        },
+      );
+      const mutationDiagnostic = existsSync(fixture.parserPackageMutationLog)
+        ? readFileSync(fixture.parserPackageMutationLog, "utf8").trim()
+        : "parser-package-mutation-log-missing";
+      const parserExecutions = existsSync(fixture.parserExecutionLog)
+        ? readFileSync(fixture.parserExecutionLog, "utf8")
+          .trim()
+          .split(/\r?\n/u)
+          .filter(Boolean)
+        : [];
+      const sequence = existsSync(fixture.sequenceLog)
+        ? readFileSync(fixture.sequenceLog, "utf8").trim().split(/\r?\n/u)
+        : [];
+
+      expect.soft(result.status, output(result)).toBe(0);
+      expect.soft(mutationDiagnostic).toMatch(/^blocked:800700(?:05|20)$/u);
+      expect.soft(sha256(fixture.parserPackageManifest)).toBe(
+        originalPackageSha256,
+      );
+      expect.soft(sha256(fixture.parserImplementation)).toBe(
+        originalParserSha256,
+      );
+      expect.soft(parserExecutions).toEqual(["original"]);
       expect.soft(sequence.indexOf("graph-verify")).toBeGreaterThan(
         sequence.indexOf("parser-executed:original"),
       );
@@ -2447,6 +2545,7 @@ describe("offline show launcher and external watchdog", () => {
     ["transitive module", "transitive-module", (fixture: LauncherFixture) => fixture.transitiveModule],
     ["graph verifier", "graph-verifier", (fixture: LauncherFixture) => fixture.graphVerifier],
     ["TypeScript parser", "typescript-parser", (fixture: LauncherFixture) => fixture.parserImplementation],
+    ["TypeScript package metadata", "typescript-package-metadata", (fixture: LauncherFixture) => fixture.parserPackageManifest],
     ["runtime verifier", "runtime-verifier", (fixture: LauncherFixture) => fixture.verifyRuntime],
     ["close helper", "close-helper", (fixture: LauncherFixture) => fixture.closeHelper],
     ["JanVim core", "runtime-core", (fixture: LauncherFixture) => fixture.janvimExecutable],
