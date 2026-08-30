@@ -1196,6 +1196,11 @@ function activeCoordinatorPhases(coordinator: ShowRunCoordinator): string[] {
     .sort();
 }
 
+function priorSessionSettlement(coordinator: ShowRunCoordinator): unknown {
+  return (coordinator as unknown as { priorSessionSettlement: unknown })
+    .priorSessionSettlement;
+}
+
 async function completeResetBoundary(
   harness: ReturnType<typeof createHarness>,
   loopNumber: number,
@@ -3870,6 +3875,123 @@ describe("show run coordinator", () => {
     const stoppedTrace = [...harness.trace];
 
     gate.resolve();
+    await settle();
+    expect(harness.coordinator.diagnostics()).toEqual(stopped);
+    expect(harness.trace).toEqual(stoppedTrace);
+  });
+
+  it("revokes a queued operator restart before it can clean a retained session", async () => {
+    const cleanupGate = deferred();
+    const harness = createHarness({
+      mode: "Show",
+      recoveryOpenFailure: true,
+      firstHeldCleanupGate: cleanupGate,
+    });
+    await startRunning(harness);
+    const retainedSession = harness.sessions[0]!;
+    harness.surfaces[0]!.destroy();
+    await settle();
+    await harness.timers.fireTimeout(1_000);
+    await settle();
+    expect(harness.coordinator.diagnostics()).toMatchObject({
+      state: "safe-ready",
+      reason: "secondary-recovery-failed",
+    });
+    expect(harness.sessions).toEqual([retainedSession]);
+
+    const acceptedGeneration = harness.coordinator.diagnostics().generationId;
+    expect(
+      harness.coordinator.handleRendererEvent({
+        schema: 1,
+        type: "operator-action",
+        action: "restart-loop",
+      }),
+    ).toBe(true);
+    const shutdown = harness.coordinator.requestEmergencyStop("sigint");
+    const emergencyGeneration = acceptedGeneration + 1;
+    expect(harness.coordinator.diagnostics()).toMatchObject({
+      state: "shutting-down",
+      generationId: emergencyGeneration,
+    });
+
+    await settle();
+    expect(harness.coordinator.diagnostics()).toMatchObject({
+      state: "shutting-down",
+      generationId: emergencyGeneration,
+    });
+    expect(activeCoordinatorPhases(harness.coordinator)).toEqual([
+      "shutdown-agent-shutdown-failed",
+    ]);
+    expect(harness.timers.active(PHASE_TIMEOUT_MS)).toBe(1);
+    expect(
+      harness.trace.filter((entry) => entry.startsWith("agent-shutdown")),
+    ).toEqual(["agent-shutdown:2000:1"]);
+
+    cleanupGate.resolve();
+    await shutdown;
+    await expect(harness.coordinator.completion).resolves.toEqual({
+      ok: false,
+      reason: "emergency-sigint",
+    });
+    const stopped = harness.coordinator.diagnostics();
+    const stoppedTrace = [...harness.trace];
+    expect(stopped).toMatchObject({
+      state: "stopped",
+      generationId: emergencyGeneration,
+      counts: { timers: 0 },
+    });
+    expect(
+      stoppedTrace.filter((entry) => entry.startsWith("agent-shutdown")),
+    ).toEqual(["agent-shutdown:2000:1"]);
+
+    await settle();
+    expect(harness.coordinator.diagnostics()).toEqual(stopped);
+    expect(harness.trace).toEqual(stoppedTrace);
+  });
+
+  it("does not publish canceled operator-restart cleanup after emergency takes ownership", async () => {
+    const cleanupGate = deferred();
+    const harness = createHarness({
+      mode: "Show",
+      recoveryOpenFailure: true,
+      firstHeldCleanupGate: cleanupGate,
+    });
+    await startRunning(harness);
+    const retainedSession = harness.sessions[0]!;
+    harness.surfaces[0]!.destroy();
+    await settle();
+    await harness.timers.fireTimeout(1_000);
+    await settle();
+    expect(harness.coordinator.diagnostics().state).toBe("safe-ready");
+    expect(harness.sessions).toEqual([retainedSession]);
+
+    expect(
+      harness.coordinator.handleRendererEvent({
+        schema: 1,
+        type: "operator-action",
+        action: "restart-loop",
+      }),
+    ).toBe(true);
+    await settle();
+    expect(activeCoordinatorPhases(harness.coordinator)).toEqual([
+      "cleanup-held-agent-shutdown",
+    ]);
+    expect(priorSessionSettlement(harness.coordinator)).toBeUndefined();
+
+    await harness.coordinator.requestEmergencyStop("sigint");
+    await expect(harness.coordinator.completion).resolves.toEqual({
+      ok: false,
+      reason: "emergency-sigint",
+    });
+    expect(priorSessionSettlement(harness.coordinator)).toBeUndefined();
+    expect(
+      harness.trace.filter((entry) => entry.startsWith("agent-shutdown")),
+    ).toHaveLength(2);
+    const stopped = harness.coordinator.diagnostics();
+    const stoppedTrace = [...harness.trace];
+    expect(stopped).toMatchObject({ state: "stopped", counts: { timers: 0 } });
+
+    cleanupGate.resolve();
     await settle();
     expect(harness.coordinator.diagnostics()).toEqual(stopped);
     expect(harness.trace).toEqual(stoppedTrace);

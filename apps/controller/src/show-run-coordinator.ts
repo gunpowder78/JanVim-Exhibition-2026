@@ -813,10 +813,14 @@ export class ShowRunCoordinator {
           this.ignore("restart-not-available");
           return false;
         }
+        const acceptedGenerationId = this.generationId;
+        const acceptedState = this.state;
         this.recoveryInFlight = true;
         this.operatorArmed = false;
         this.resetExhaustedRecoveryBudget();
-        this.startRecovery(() => this.restartFromSafeReady());
+        this.startRecovery(() =>
+          this.restartFromSafeReady(acceptedGenerationId, acceptedState),
+        );
         return true;
       case "stop-show":
         return this.handleStopAction();
@@ -1749,7 +1753,11 @@ export class ShowRunCoordinator {
     }
   }
 
-  private async restartFromSafeReady(): Promise<void> {
+  private async restartFromSafeReady(
+    acceptedGenerationId: number,
+    acceptedState: "safe-ready",
+  ): Promise<void> {
+    if (!this.canContinueRecovery(acceptedGenerationId, acceptedState)) return;
     const oldSession = this.session;
     this.incrementGeneration();
     const generationId = this.generationId;
@@ -1757,7 +1765,14 @@ export class ShowRunCoordinator {
     this.disposeSessionListeners();
     this.rebindRetainedSurface(this.surface, generationId);
     if (oldSession !== undefined) {
+      if (
+        !this.canContinueRecovery(generationId, "safe-ready") ||
+        this.session !== oldSession
+      ) {
+        return;
+      }
       const cleanup = await this.cleanupHeldSession(oldSession);
+      if (!this.canContinueRecovery(generationId, "safe-ready")) return;
       this.priorSessionSettlement = cleanup;
       if (!cleanup.childSettled || !cleanup.leaseRemoved) {
         if (this.canContinueRecovery(generationId, "safe-ready")) {
