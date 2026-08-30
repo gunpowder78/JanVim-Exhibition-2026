@@ -309,4 +309,62 @@ describe("run telemetry calculations", () => {
     notReset.recordSecondaryPresentation(key, 2_011);
     expect(() => notReset.finishLoop(finishInput("loop-1", 7, "insert"))).toThrow(/reset/i);
   });
+
+  it("rejects a finish before the latest endpoint chronology and allows equality", () => {
+    const withResetAtThreeSeconds = (): RunTelemetry => {
+      const telemetry = new RunTelemetry();
+      telemetry.beginLoop("loop-1", 1_000);
+      recordResetEndpoints(telemetry, {
+        primaryAtMs: 3_000,
+        secondaryAtMs: 3_000,
+      });
+      return telemetry;
+    };
+
+    const beforeResetAcks = withResetAtThreeSeconds();
+    expect(() =>
+      beforeResetAcks.finishLoop({ ...finishInput(), endedAtMs: 2_999 }),
+    ).toThrow(/finish|endpoint|chronology/i);
+
+    const equalResetAcks = withResetAtThreeSeconds();
+    expect(() =>
+      equalResetAcks.finishLoop({ ...finishInput(), endedAtMs: 3_000 }),
+    ).not.toThrow();
+
+    const beforeUnacknowledgedDispatch = withResetAtThreeSeconds();
+    beforeUnacknowledgedDispatch.recordDispatch(
+      "secondary",
+      correlation("late-visual"),
+      visualCue("late-visual"),
+      3_100,
+    );
+    expect(() =>
+      beforeUnacknowledgedDispatch.finishLoop({
+        ...finishInput(),
+        endedAtMs: 3_099,
+      }),
+    ).toThrow(/finish|endpoint|chronology/i);
+
+    const recordLaterPrimaryCompletion = (telemetry: RunTelemetry): void => {
+      const key = correlation("late-primary");
+      telemetry.recordDispatch(
+        "primary",
+        key,
+        insertCue("x", 0, "late-primary"),
+        3_100,
+      );
+      telemetry.recordPrimaryCompletion(key, 3_200, MODIFIED_BUFFER_SHA256);
+    };
+    const beforeLaterCompletion = withResetAtThreeSeconds();
+    recordLaterPrimaryCompletion(beforeLaterCompletion);
+    expect(() =>
+      beforeLaterCompletion.finishLoop({ ...finishInput(), endedAtMs: 3_199 }),
+    ).toThrow(/finish|endpoint|chronology/i);
+
+    const equalLaterCompletion = withResetAtThreeSeconds();
+    recordLaterPrimaryCompletion(equalLaterCompletion);
+    expect(() =>
+      equalLaterCompletion.finishLoop({ ...finishInput(), endedAtMs: 3_200 }),
+    ).not.toThrow();
+  });
 });

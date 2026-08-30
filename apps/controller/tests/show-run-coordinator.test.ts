@@ -1272,7 +1272,7 @@ async function completeResetBoundary(
 
   session.runtime.completedLoops = loopNumber;
   session.reserveNextLoopId?.();
-  harness.timers.now = dispatchedAtMs + 20;
+  harness.timers.now = Math.max(harness.timers.now, dispatchedAtMs + 20);
   await harness.timers.fireInterval(16);
   await settle();
 }

@@ -258,6 +258,21 @@ export class RunTelemetry {
     if (active.generationId === undefined || input.generationId !== active.generationId) {
       throw new Error("finish generation does not match active generation");
     }
+    let latestEndpointAtMs = active.startedAtMs;
+    for (const records of [active.primary, active.secondary]) {
+      for (const record of records.values()) {
+        latestEndpointAtMs = Math.max(latestEndpointAtMs, record.dispatchedAtMs);
+        if (record.acknowledgedAtMs !== undefined) {
+          latestEndpointAtMs = Math.max(
+            latestEndpointAtMs,
+            record.acknowledgedAtMs,
+          );
+        }
+      }
+    }
+    if (input.endedAtMs < latestEndpointAtMs) {
+      throw new Error("loop finish precedes recorded endpoint chronology");
+    }
   }
 
   private requireRecord(
