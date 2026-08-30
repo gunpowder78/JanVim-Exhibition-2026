@@ -179,6 +179,10 @@ class FakeSurface implements ShowSecondarySurface {
   public rejectStatusSends = false;
   public rejectClose = false;
   public registrationFailure: ListenerRegistrationFailure | undefined;
+  public registrationError: Error | undefined;
+  public readonly disposerFailures = new Set<
+    "surface.onEvent" | "surface.onDestroyed"
+  >();
   private readonly eventListeners = new Set<
     (event: RendererToControllerEvent) => void
   >();
@@ -200,25 +204,37 @@ class FakeSurface implements ShowSecondarySurface {
 
   public onEvent(listener: (event: RendererToControllerEvent) => void): () => void {
     if (this.registrationFailure === "surface.onEvent") {
-      throw new Error("fixture registration failure: surface.onEvent");
+      throw (
+        this.registrationError ??
+        new Error("fixture registration failure: surface.onEvent")
+      );
     }
     this.eventListeners.add(listener);
     this.capturedEventListeners.push(listener);
     return () => {
       this.trace.push("dispose-surface-event-listener");
       this.eventListeners.delete(listener);
+      if (this.disposerFailures.has("surface.onEvent")) {
+        throw new Error("fixture disposer failure: surface.onEvent");
+      }
     };
   }
 
   public onDestroyed(listener: () => void): () => void {
     if (this.registrationFailure === "surface.onDestroyed") {
-      throw new Error("fixture registration failure: surface.onDestroyed");
+      throw (
+        this.registrationError ??
+        new Error("fixture registration failure: surface.onDestroyed")
+      );
     }
     this.destroyedListeners.add(listener);
     this.capturedDestroyedListeners.push(listener);
     return () => {
       this.trace.push("dispose-surface-destroyed-listener");
       this.destroyedListeners.delete(listener);
+      if (this.disposerFailures.has("surface.onDestroyed")) {
+        throw new Error("fixture disposer failure: surface.onDestroyed");
+      }
     };
   }
 
@@ -273,7 +289,12 @@ class FakeSession implements ShowRunSession {
   public runtimeStartFailure: "return-false" | "throw" | undefined;
   public registrationFailure: ListenerRegistrationFailure | undefined;
   public loopConstructionFailure: LoopConstructionFailure | undefined;
-  public releaseLoopReferencesOnStop = false;
+  public rollbackRuntimeStopFailure = false;
+  public invokeCallbacksDuringRuntimeStop = false;
+  public reserveNextLoopOnStart = false;
+  public failDiagnosticsAfterRuntimeStart = false;
+  public traceLoopConstruction = false;
+  public readonly rollbackCallbackErrors: unknown[] = [];
   public readonly abortedPhases: string[] = [];
   public leaseRemoved = false;
   private disposed = false;
@@ -313,6 +334,7 @@ class FakeSession implements ShowRunSession {
           }
           return false;
         }
+        if (this.reserveNextLoopOnStart) this.reserveNextLoopId?.();
         if (this.runtimeStartFailure === "throw") {
           throw new Error("injected runtime start failure");
         }
@@ -323,14 +345,27 @@ class FakeSession implements ShowRunSession {
       advance: vi.fn(async () => 0),
       stop: vi.fn(() => {
         this.trace.push("runtime-stop");
-        if (this.loopConstructionFailure !== undefined) {
+        if (this.traceLoopConstruction) {
           this.trace.push("rollback:runtime.stop");
         }
-        if (this.releaseLoopReferencesOnStop) {
-          this.loopId = undefined;
-          this.loopSurface = undefined;
-          this.reserveNextLoopId = undefined;
-          this.primaryEditorDispatch = undefined;
+        if (this.invokeCallbacksDuringRuntimeStop) {
+          try {
+            this.reserveNextLoopId?.();
+          } catch (error) {
+            this.rollbackCallbackErrors.push(error);
+          }
+          const loopId = this.loopId;
+          if (loopId !== undefined) {
+            this.primaryEditorDispatch?.({
+              generationId: this.generationId,
+              loopId,
+              cueId: "cue-reset",
+              cue: resetCue(),
+            });
+          }
+        }
+        if (this.rollbackRuntimeStopFailure) {
+          throw new Error("injected rollback failure: runtime.stop");
         }
         if (this.failPhase("driver-stop")) {
           throw new Error("injected driver stop failure");
@@ -421,7 +456,7 @@ class FakeSession implements ShowRunSession {
       cue: Extract<Cue, { kind: "editor-action" }>;
     }) => void,
   ): OneLoopRuntime {
-    if (this.loopConstructionFailure !== undefined) {
+    if (this.traceLoopConstruction) {
       this.trace.push("loop-stage:session.createLoop");
     }
     if (this.loopConstructionFailure === "session.createLoop") {
@@ -505,6 +540,13 @@ class FakeSession implements ShowRunSession {
     editorCommandPending: boolean;
     leaseRemoved: boolean;
   } {
+    if (
+      this.failDiagnosticsAfterRuntimeStart &&
+      this.runtime.state === "running"
+    ) {
+      this.trace.push("loop-stage:runtimeCounts");
+      throw new Error("injected publication diagnostics failure");
+    }
     if (this.disposed && this.failPhase("session-diagnostics")) {
       throw new Error("injected session diagnostics failure");
     }
@@ -611,6 +653,11 @@ interface HarnessOptions {
   logger?: (event: Record<string, unknown>) => void;
   loopConstructionFailure?: LoopConstructionFailure;
   rollbackDriverStopFailure?: boolean;
+  rollbackRuntimeStopFailure?: boolean;
+  invokeCallbacksDuringRuntimeStop?: boolean;
+  reserveNextLoopOnStart?: boolean;
+  publicationDiagnosticsFailure?: boolean;
+  observeRetainedCallbacks?: boolean;
 }
 
 function createHarness(options: HarnessOptions = {}) {
@@ -632,6 +679,11 @@ function createHarness(options: HarnessOptions = {}) {
     diagnostics: ReturnType<ShowRunCoordinator["diagnostics"]>;
   }> = [];
   let networkSamples = 0;
+  const traceLoopConstruction =
+    options.loopConstructionFailure !== undefined ||
+    options.rollbackRuntimeStopFailure === true ||
+    options.publicationDiagnosticsFailure === true ||
+    options.observeRetainedCallbacks === true;
 
   const block = async (phase: string): Promise<void> => {
     if (options.blockedPhase === phase) await blocker?.promise;
@@ -687,14 +739,20 @@ function createHarness(options: HarnessOptions = {}) {
       session.connections = options.sessionConnections?.[sessionIndex] ?? 1;
       session.runtimeStartFailure = options.runtimeStartFailures?.[sessionIndex];
       session.loopConstructionFailure = options.loopConstructionFailure;
-      session.releaseLoopReferencesOnStop =
-        options.loopConstructionFailure !== undefined;
+      session.rollbackRuntimeStopFailure =
+        options.rollbackRuntimeStopFailure ?? false;
+      session.invokeCallbacksDuringRuntimeStop =
+        options.invokeCallbacksDuringRuntimeStop ?? false;
+      session.reserveNextLoopOnStart = options.reserveNextLoopOnStart ?? false;
+      session.failDiagnosticsAfterRuntimeStart =
+        options.publicationDiagnosticsFailure ?? false;
+      session.traceLoopConstruction = traceLoopConstruction;
       session.forcedExit = options.forcedExit ?? true;
       sessions.push(session);
       return session;
     },
     createDriver: (driverOptionsInput) => {
-      if (options.loopConstructionFailure !== undefined) {
+      if (traceLoopConstruction) {
         trace.push("loop-stage:createDriver");
       }
       if (options.loopConstructionFailure === "createDriver") {
@@ -702,7 +760,7 @@ function createHarness(options: HarnessOptions = {}) {
       }
       driverOptions.push(driverOptionsInput);
       const driver = new MultiLoopDriver(driverOptionsInput);
-      if (options.loopConstructionFailure !== undefined) {
+      if (traceLoopConstruction) {
         const start = driver.start.bind(driver);
         vi.spyOn(driver, "start").mockImplementation(() => {
           trace.push("loop-stage:driver.start");
@@ -722,14 +780,14 @@ function createHarness(options: HarnessOptions = {}) {
     },
     timers,
     createTelemetry: () => {
-      if (options.loopConstructionFailure !== undefined) {
+      if (traceLoopConstruction) {
         trace.push("loop-stage:createTelemetry");
       }
       if (options.loopConstructionFailure === "createTelemetry") {
         throw new Error("injected loop construction failure: createTelemetry");
       }
       const telemetry = new RunTelemetry();
-      if (options.loopConstructionFailure !== undefined) {
+      if (traceLoopConstruction) {
         const beginLoop = telemetry.beginLoop.bind(telemetry);
         vi.spyOn(telemetry, "beginLoop").mockImplementation((...arguments_) => {
           trace.push("loop-stage:beginLoop");
@@ -739,11 +797,14 @@ function createHarness(options: HarnessOptions = {}) {
           return beginLoop(...arguments_);
         });
       }
+      if (options.observeRetainedCallbacks === true) {
+        vi.spyOn(telemetry, "recordDispatch");
+      }
       telemetries.push(telemetry);
       return telemetry;
     },
     createResourceSampler: () => {
-      if (options.loopConstructionFailure !== undefined) {
+      if (traceLoopConstruction) {
         trace.push("loop-stage:createResourceSampler");
       }
       if (options.loopConstructionFailure === "createResourceSampler") {
@@ -758,12 +819,22 @@ function createHarness(options: HarnessOptions = {}) {
         timers,
       });
       sampler.start({ controller: 11, renderer: 22, janvim: 33 });
-      if (options.loopConstructionFailure !== undefined) {
+      if (traceLoopConstruction) {
         const finish = sampler.finish.bind(sampler);
         vi.spyOn(sampler, "finish").mockImplementation(() => {
           trace.push("rollback:sampler.finish");
           return finish();
         });
+        const disposable = sampler as ResourceSampler & {
+          dispose?: () => void;
+        };
+        if (disposable.dispose !== undefined) {
+          const dispose = disposable.dispose.bind(sampler);
+          vi.spyOn(disposable, "dispose").mockImplementation(() => {
+            trace.push("rollback:sampler.dispose");
+            dispose();
+          });
+        }
       }
       samplers.push(sampler);
       return sampler;
@@ -807,7 +878,7 @@ function createHarness(options: HarnessOptions = {}) {
       }
     },
     nextLoopId: (generationId, loopNumber) => {
-      if (options.loopConstructionFailure !== undefined) {
+      if (traceLoopConstruction) {
         trace.push(`loop-stage:nextLoopId:${loopNumber}`);
       }
       if (options.loopConstructionFailure === "nextLoopId") {
@@ -1098,6 +1169,41 @@ describe("show run coordinator", () => {
     expect(harness.coordinator.diagnostics().counts.listeners).toBe(0);
   });
 
+  it("preserves a registration error while every throwing listener disposer runs", () => {
+    const harness = createHarness();
+    const previous = new FakeSurface(harness.trace);
+    bindSurfaceForTest(harness.coordinator, previous);
+    previous.disposerFailures.add("surface.onEvent");
+
+    const replacement = new FakeSurface(harness.trace);
+    const registrationError = new Error("authoritative registration failure");
+    replacement.registrationFailure = "surface.onDestroyed";
+    replacement.registrationError = registrationError;
+    replacement.disposerFailures.add("surface.onEvent");
+
+    let thrown: unknown;
+    try {
+      bindSurfaceForTest(harness.coordinator, replacement);
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBe(registrationError);
+    expect(
+      harness.trace.filter(
+        (entry) => entry === "dispose-surface-event-listener",
+      ),
+    ).toHaveLength(2);
+    expect(
+      harness.trace.filter(
+        (entry) => entry === "dispose-surface-destroyed-listener",
+      ),
+    ).toHaveLength(1);
+    expect(previous.diagnostics().listeners).toBe(0);
+    expect(replacement.diagnostics().listeners).toBe(0);
+    expect(harness.coordinator.diagnostics().counts.listeners).toBe(0);
+  });
+
   it("publishes no surface disposer when the first registration throws", () => {
     const harness = createHarness();
     const surface = new FakeSurface(harness.trace);
@@ -1195,7 +1301,7 @@ describe("show run coordinator", () => {
         "loop-stage:createResourceSampler",
         "loop-stage:session.createLoop",
       ],
-      rollback: ["rollback:sampler.finish"],
+      rollback: ["rollback:sampler.dispose"],
     },
     {
       failure: "createDriver" as const,
@@ -1207,7 +1313,7 @@ describe("show run coordinator", () => {
         "loop-stage:session.createLoop",
         "loop-stage:createDriver",
       ],
-      rollback: ["rollback:runtime.stop", "rollback:sampler.finish"],
+      rollback: ["rollback:runtime.stop", "rollback:sampler.dispose"],
     },
     {
       failure: "driver.start-false" as const,
@@ -1224,7 +1330,7 @@ describe("show run coordinator", () => {
       rollback: [
         "rollback:driver.stop",
         "rollback:runtime.stop",
-        "rollback:sampler.finish",
+        "rollback:sampler.dispose",
       ],
       rollbackDriverStopFailure: true,
     },
@@ -1243,7 +1349,7 @@ describe("show run coordinator", () => {
       rollback: [
         "rollback:driver.stop",
         "rollback:runtime.stop",
-        "rollback:sampler.finish",
+        "rollback:sampler.dispose",
       ],
       rollbackDriverStopFailure: false,
     },
@@ -1280,12 +1386,6 @@ describe("show run coordinator", () => {
         counts: { listeners: 0, timers: 0 },
       });
       expect(harness.timers.active()).toBe(0);
-      expect(harness.sessions[0]).toMatchObject({
-        loopId: undefined,
-        loopSurface: undefined,
-        reserveNextLoopId: undefined,
-        primaryEditorDispatch: undefined,
-      });
 
       await expect(harness.coordinator.completion).resolves.toEqual({
         ok: false,
@@ -1304,6 +1404,132 @@ describe("show run coordinator", () => {
       });
     },
   );
+
+  it("revokes retained construction callbacks before a throwing runtime rollback", async () => {
+    const harness = createHarness({
+      mode: "Show",
+      loopConstructionFailure: "createDriver",
+      rollbackRuntimeStopFailure: true,
+      invokeCallbacksDuringRuntimeStop: true,
+      observeRetainedCallbacks: true,
+    });
+    await bootReady(harness);
+
+    expect(harness.coordinator.handleRendererEvent(startEvent())).toBe(false);
+
+    const session = harness.sessions[0]!;
+    const reserveNextLoopId = session.reserveNextLoopId;
+    const primaryEditorDispatch = session.primaryEditorDispatch;
+    expect(reserveNextLoopId).toBeTypeOf("function");
+    expect(primaryEditorDispatch).toBeTypeOf("function");
+    expect(harness.loopIds).toEqual(["g1-loop-1"]);
+    expect(session.rollbackCallbackErrors).toHaveLength(1);
+    expect(session.rollbackCallbackErrors[0]).toEqual(
+      expect.objectContaining({ message: expect.stringMatching(/revoked/i) }),
+    );
+    expect(harness.trace.filter((entry) => entry.startsWith("rollback:"))).toEqual([
+      "rollback:runtime.stop",
+      "rollback:sampler.dispose",
+    ]);
+
+    const callbacksBefore = {
+      loopIds: [...harness.loopIds],
+      sampler: harness.samplers[0]!.diagnostics(),
+    };
+    expect(() => reserveNextLoopId?.()).toThrow(/revoked/i);
+    primaryEditorDispatch?.({
+      generationId: 1,
+      loopId: "g1-loop-1",
+      cueId: "cue-reset",
+      cue: resetCue(),
+    });
+    expect(harness.loopIds).toEqual(callbacksBefore.loopIds);
+    expect(harness.samplers[0]!.diagnostics()).toEqual(callbacksBefore.sampler);
+    expect(harness.telemetries[0]!.recordDispatch).not.toHaveBeenCalled();
+    expect(constructionState(harness.coordinator).pendingNextLoop).toBeUndefined();
+
+    await expect(harness.coordinator.completion).resolves.toEqual({
+      ok: false,
+      reason: "loop-start-failed",
+    });
+  });
+
+  it("aborts the sampler after both driver and runtime rollback throw", async () => {
+    const harness = createHarness({
+      mode: "Show",
+      loopConstructionFailure: "driver.start-false",
+      rollbackDriverStopFailure: true,
+      rollbackRuntimeStopFailure: true,
+    });
+    await bootReady(harness);
+
+    expect(harness.coordinator.handleRendererEvent(startEvent())).toBe(false);
+    expect(harness.trace.filter((entry) => entry.startsWith("rollback:"))).toEqual([
+      "rollback:driver.stop",
+      "rollback:runtime.stop",
+      "rollback:sampler.dispose",
+    ]);
+    expect(harness.samplers[0]!.diagnostics()).toEqual({
+      timerCount: 0,
+      sampleInFlight: false,
+    });
+    expect(harness.timers.active()).toBe(0);
+    await expect(harness.coordinator.completion).resolves.toEqual({
+      ok: false,
+      reason: "loop-start-failed",
+    });
+  });
+
+  it("rolls back a successful driver start when publication diagnostics throw", async () => {
+    const harness = createHarness({
+      mode: "Show",
+      publicationDiagnosticsFailure: true,
+      reserveNextLoopOnStart: true,
+    });
+    await bootReady(harness);
+
+    expect(harness.coordinator.handleRendererEvent(startEvent())).toBe(false);
+    expect(
+      harness.trace.filter((entry) => entry.startsWith("loop-stage:")),
+    ).toEqual([
+      "loop-stage:nextLoopId:1",
+      "loop-stage:createTelemetry",
+      "loop-stage:beginLoop",
+      "loop-stage:createResourceSampler",
+      "loop-stage:session.createLoop",
+      "loop-stage:createDriver",
+      "loop-stage:driver.start",
+      "loop-stage:nextLoopId:2",
+      "loop-stage:runtimeCounts",
+    ]);
+    expect(harness.trace.filter((entry) => entry.startsWith("rollback:"))).toEqual([
+      "rollback:driver.stop",
+      "rollback:runtime.stop",
+      "rollback:sampler.dispose",
+    ]);
+    expect(harness.timers.active()).toBe(0);
+    expect(constructionState(harness.coordinator)).toMatchObject({
+      activeLoop: undefined,
+      pendingNextLoop: undefined,
+      driver: undefined,
+    });
+    expect(harness.coordinator.diagnostics()).toMatchObject({
+      currentLoopId: null,
+      startedLoops: 0,
+      completedLoops: 0,
+      counts: { listeners: 0, timers: 0 },
+    });
+    expect(() => harness.sessions[0]!.reserveNextLoopId?.()).toThrow(/revoked/i);
+
+    await expect(harness.coordinator.completion).resolves.toEqual({
+      ok: false,
+      reason: "loop-start-failed",
+    });
+    expect(harness.evidence).toHaveLength(1);
+    expect(
+      harness.trace.filter((entry) => entry === "terminal:loop-start-failed"),
+    ).toHaveLength(1);
+  });
 
   it.each(LOGGER_SAFETY_SCENARIOS)(
     "keeps $name safety identical when diagnostics throw",

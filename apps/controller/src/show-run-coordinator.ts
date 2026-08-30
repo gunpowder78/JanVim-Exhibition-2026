@@ -63,6 +63,11 @@ export type PrimaryEditorDispatchEvent = CueCorrelation & {
   cue: Extract<Cue, { kind: "editor-action" }>;
 };
 
+type StagedLoopCallbackGate = {
+  reserveNextLoopId(): string;
+  dispatchPrimary(event: PrimaryEditorDispatchEvent): void;
+};
+
 export interface ShowSecondarySurface {
   readonly rendererPid: number;
   send(event: RunCueEvent | RunStatusEvent): void;
@@ -645,20 +650,22 @@ export class ShowRunCoordinator {
     let stagedNextLoop:
       | { generationId: number; loopNumber: number; loopId: string }
       | undefined;
+    const stagedCallbackGate: StagedLoopCallbackGate = {
+      reserveNextLoopId: rejectRevokedNextLoopReservation,
+      dispatchPrimary: ignoreRevokedPrimaryDispatch,
+    };
     let published = false;
     try {
       const loopId = this.dependencies.nextLoopId(generationId, 1);
+      const loopNumber = 1;
       const telemetry = this.dependencies.createTelemetry();
       telemetry.beginLoop(loopId, this.dependencies.nowMs());
       const sampler = this.dependencies.createResourceSampler();
-      rollback.push(() => {
-        // finish() clears the sampler interval synchronously before returning.
-        void sampler.finish();
-      });
+      rollback.push(() => sampler.dispose());
       const active: ActiveLoop = {
         generationId,
         loopId,
-        loopNumber: 1,
+        loopNumber,
         telemetry,
         sampler,
       };
@@ -667,42 +674,44 @@ export class ShowRunCoordinator {
         generationId,
       );
       const reserveNextLoopId = (): string => {
-        if (published) return this.reserveNextLoopId(generationId);
+        if (published) {
+          return this.reserveNextLoopId(generationId);
+        }
         if (!this.isCurrentGeneration(generationId) || this.state !== "ready") {
           throw new Error(
             "next loop ID requested outside staged loop construction",
           );
         }
 
-        const loopNumber = active.loopNumber + 1;
+        const nextLoopNumber = loopNumber + 1;
         const terminalRotation =
-          (this.dependencies.mode === "Soak3" && loopNumber > 3) ||
+          (this.dependencies.mode === "Soak3" && nextLoopNumber > 3) ||
           this.stopQueued;
-        if (terminalRotation) return `${active.loopId}-terminal`;
+        if (terminalRotation) return `${loopId}-terminal`;
         if (stagedNextLoop !== undefined) return stagedNextLoop.loopId;
 
         const reservedLoopId = this.dependencies.nextLoopId(
           generationId,
-          loopNumber,
+          nextLoopNumber,
         );
-        if (
-          reservedLoopId.length === 0 ||
-          reservedLoopId === active.loopId
-        ) {
+        if (reservedLoopId.length === 0 || reservedLoopId === loopId) {
           throw new Error("next loop ID must be fresh and non-empty");
         }
         stagedNextLoop = {
           generationId,
-          loopNumber,
+          loopNumber: nextLoopNumber,
           loopId: reservedLoopId,
         };
         return reservedLoopId;
       };
+      stagedCallbackGate.reserveNextLoopId = reserveNextLoopId;
+      stagedCallbackGate.dispatchPrimary = (event) =>
+        this.recordPrimaryEditorDispatch(event, generationId);
       const runtime = session.createLoop(
         active.loopId,
         telemetrySurface,
-        reserveNextLoopId,
-        (event) => this.recordPrimaryEditorDispatch(event, generationId),
+        () => stagedCallbackGate.reserveNextLoopId(),
+        (event) => stagedCallbackGate.dispatchPrimary(event),
       );
       rollback.push(() => {
         if (runtime.state !== "stopped") runtime.stop();
@@ -733,8 +742,9 @@ export class ShowRunCoordinator {
       this.sendStatus();
       return true;
     } catch {
-      runRollbackInReverse(rollback);
+      revokeStagedLoopCallbacks(stagedCallbackGate);
       stagedNextLoop = undefined;
+      runRollbackInReverse(rollback);
       this.activeLoop = undefined;
       this.currentLoopId = null;
       this.pendingNextLoop = undefined;
@@ -2076,6 +2086,19 @@ function maxNullable(left: number | null, right: number | null): number | null {
   if (left === null) return right;
   if (right === null) return left;
   return Math.max(left, right);
+}
+
+function rejectRevokedNextLoopReservation(): never {
+  throw new Error("staged loop callbacks have been revoked");
+}
+
+function ignoreRevokedPrimaryDispatch(
+  _event: PrimaryEditorDispatchEvent,
+): void {}
+
+function revokeStagedLoopCallbacks(gate: StagedLoopCallbackGate): void {
+  gate.reserveNextLoopId = rejectRevokedNextLoopReservation;
+  gate.dispatchPrimary = ignoreRevokedPrimaryDispatch;
 }
 
 function cloneAggregate(aggregate: CoordinatorAggregate): CoordinatorAggregate {

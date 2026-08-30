@@ -19,6 +19,7 @@ class FakeTimers implements ResourceSamplerTimerAdapter {
   private nextId = 1;
   public readonly setDelays: number[] = [];
   public readonly cleared: ResourceSamplerTimerHandle[] = [];
+  public rejectClear = false;
 
   public setInterval(callback: () => void, delayMs: number): number {
     const interval = { id: this.nextId, delayMs, callback };
@@ -30,6 +31,7 @@ class FakeTimers implements ResourceSamplerTimerAdapter {
 
   public clearInterval(id: ResourceSamplerTimerHandle): void {
     this.cleared.push(id);
+    if (this.rejectClear) throw new Error("injected interval clear failure");
     if (typeof id === "number") this.intervals.delete(id);
   }
 
@@ -53,7 +55,109 @@ function expectEmptyAggregate(summary: ResourceSummary, role: keyof typeof PIDS)
   });
 }
 
+function samplerSnapshot(sampler: ResourceSampler): ResourceSummary {
+  const inspectable = sampler as unknown as { snapshot(): ResourceSummary };
+  return inspectable.snapshot();
+}
+
+async function settle(): Promise<void> {
+  for (let index = 0; index < 16; index += 1) await Promise.resolve();
+}
+
 describe("resource sampler", () => {
+  it("disposes an unstarted sampler synchronously and idempotently", () => {
+    const timers = new FakeTimers();
+    const adapter: ProcessSampleAdapter = {
+      sample: vi.fn(async () => ({ rssBytes: 1, handleCount: 1 })),
+    };
+    const sampler = new ResourceSampler({ adapter, timers });
+
+    expect(() => sampler.dispose()).not.toThrow();
+    expect(() => sampler.dispose()).not.toThrow();
+    expect(sampler.diagnostics()).toEqual({
+      timerCount: 0,
+      sampleInFlight: false,
+    });
+    expect(adapter.sample).not.toHaveBeenCalled();
+    expect(() => sampler.start(PIDS)).toThrow(/disposed/i);
+  });
+
+  it("disposes a nonsettling sample without a final sample or late mutation", async () => {
+    const timers = new FakeTimers();
+    let resolveSample!: (sample: { rssBytes: number; handleCount: number }) => void;
+    const blockedSample = new Promise<{ rssBytes: number; handleCount: number }>(
+      (resolve) => {
+        resolveSample = resolve;
+      },
+    );
+    const adapter: ProcessSampleAdapter = {
+      sample: vi.fn(() => blockedSample),
+    };
+    const sampler = new ResourceSampler({ adapter, timers });
+    sampler.start(PIDS);
+    expect(adapter.sample).toHaveBeenCalledTimes(1);
+    expect(sampler.diagnostics()).toEqual({
+      timerCount: 1,
+      sampleInFlight: true,
+    });
+
+    sampler.dispose();
+
+    expect(timers.activeCount()).toBe(0);
+    expect(timers.cleared).toHaveLength(1);
+    expect(sampler.diagnostics()).toEqual({
+      timerCount: 0,
+      sampleInFlight: false,
+    });
+    const disposedSnapshot = samplerSnapshot(sampler);
+    for (const role of Object.keys(PIDS) as Array<keyof typeof PIDS>) {
+      expectEmptyAggregate(disposedSnapshot, role);
+    }
+    await expect(sampler.sampleBoundary()).resolves.toBeUndefined();
+
+    resolveSample({ rssBytes: 999_999, handleCount: 999 });
+    await settle();
+
+    expect(adapter.sample).toHaveBeenCalledTimes(1);
+    expect(samplerSnapshot(sampler)).toEqual(disposedSnapshot);
+    expect(sampler.diagnostics()).toEqual({
+      timerCount: 0,
+      sampleInFlight: false,
+    });
+  });
+
+  it("commits disposal state before a timer-clear failure", async () => {
+    const timers = new FakeTimers();
+    timers.rejectClear = true;
+    let resolveSample!: (sample: { rssBytes: number; handleCount: number }) => void;
+    const blockedSample = new Promise<{ rssBytes: number; handleCount: number }>(
+      (resolve) => {
+        resolveSample = resolve;
+      },
+    );
+    const adapter: ProcessSampleAdapter = {
+      sample: vi.fn(() => blockedSample),
+    };
+    const sampler = new ResourceSampler({ adapter, timers });
+    sampler.start(PIDS);
+
+    expect(() => sampler.dispose()).toThrow(/interval clear failure/i);
+    expect(() => sampler.dispose()).not.toThrow();
+    expect(sampler.diagnostics()).toEqual({
+      timerCount: 0,
+      sampleInFlight: false,
+    });
+    await timers.fireInterval();
+    expect(adapter.sample).toHaveBeenCalledTimes(1);
+
+    resolveSample({ rssBytes: 123, handleCount: 45 });
+    await settle();
+    const snapshot = samplerSnapshot(sampler);
+    for (const role of Object.keys(PIDS) as Array<keyof typeof PIDS>) {
+      expectEmptyAggregate(snapshot, role);
+    }
+  });
+
   it("samples start, five-second ticks, boundaries, and finish using aggregates only", async () => {
     const timers = new FakeTimers();
     const counts = new Map<number, number>();
