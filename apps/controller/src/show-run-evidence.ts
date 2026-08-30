@@ -129,6 +129,7 @@ export type ShowRunEvidenceRecord = {
 };
 
 const MAX_SAFE_INTEGER = Number.MAX_SAFE_INTEGER;
+const PUBLISHED_TEMP_CLEANUP_ATTEMPTS = 3;
 const HASH_PATTERN = /^[0-9a-f]{64}$/;
 const RUN_ID_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
 const CONTROLLER_RUN_ID_PATTERN = /^[A-Za-z0-9._-]{1,96}$/;
@@ -868,15 +869,16 @@ export async function writeShowRunEvidenceAtomic(
     if (fs.existsSync(path)) {
       throw new Error("show-run-evidence-already-exists");
     }
-    publishTemporaryExclusivelySync(temporaryPath, path);
+    linkTemporaryExclusivelySync(temporaryPath, path);
     ownsTemporary = false;
+    removePublishedTemporaryWithRetrySync(temporaryPath);
   } finally {
     if (descriptor !== undefined) fs.closeSync(descriptor);
     if (ownsTemporary) fs.rmSync(temporaryPath, { force: true });
   }
 }
 
-function publishTemporaryExclusivelySync(
+function linkTemporaryExclusivelySync(
   temporaryPath: string,
   destinationPath: string,
 ): void {
@@ -888,7 +890,22 @@ function publishTemporaryExclusivelySync(
     }
     throw error;
   }
-  fs.rmSync(temporaryPath);
+}
+
+function removePublishedTemporaryWithRetrySync(temporaryPath: string): void {
+  for (let attempt = 1; attempt <= PUBLISHED_TEMP_CLEANUP_ATTEMPTS; attempt += 1) {
+    try {
+      fs.rmSync(temporaryPath);
+      return;
+    } catch (error) {
+      if (hasErrorCode(error, "ENOENT")) return;
+      if (attempt === PUBLISHED_TEMP_CLEANUP_ATTEMPTS) {
+        throw new Error(
+          "show-run-evidence-committed-but-cleanup-failed",
+        );
+      }
+    }
+  }
 }
 
 function hasErrorCode(error: unknown, code: string): boolean {

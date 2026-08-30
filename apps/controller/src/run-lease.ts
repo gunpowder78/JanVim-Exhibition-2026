@@ -67,6 +67,7 @@ const UTC_TIMESTAMP_PATTERN =
   /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?Z$/;
 const ATOMIC_RENAME_ATTEMPTS = 5;
 const ATOMIC_RENAME_RETRY_DELAY_MS = 500;
+const PUBLISHED_TEMP_CLEANUP_ATTEMPTS = 3;
 const TRANSIENT_RENAME_ERROR_CODES = new Set(["EPERM", "EACCES", "EBUSY"]);
 const LEASE_LOCK_ACQUIRE_TIMEOUT_MS = 2_500;
 const LEASE_LOCK_RELEASE_TIMEOUT_MS = 2_500;
@@ -144,15 +145,16 @@ export async function writeRunLeaseAtomic(
     let ownsTemporary = true;
     try {
       await requireAbsentLeaseDestination(destinationPath);
-      await publishTemporaryExclusively(temporaryPath, destinationPath);
+      await linkTemporaryExclusively(temporaryPath, destinationPath);
       ownsTemporary = false;
+      await removePublishedTemporaryWithRetry(temporaryPath);
     } finally {
       if (ownsTemporary) await fs.rm(temporaryPath, { force: true });
     }
   });
 }
 
-async function publishTemporaryExclusively(
+async function linkTemporaryExclusively(
   temporaryPath: string,
   destinationPath: string,
 ): Promise<void> {
@@ -164,7 +166,22 @@ async function publishTemporaryExclusively(
     }
     throw error;
   }
-  await fs.rm(temporaryPath);
+}
+
+async function removePublishedTemporaryWithRetry(
+  temporaryPath: string,
+): Promise<void> {
+  for (let attempt = 1; attempt <= PUBLISHED_TEMP_CLEANUP_ATTEMPTS; attempt += 1) {
+    try {
+      await fs.rm(temporaryPath);
+      return;
+    } catch (error) {
+      if (hasErrorCode(error, "ENOENT")) return;
+      if (attempt === PUBLISHED_TEMP_CLEANUP_ATTEMPTS) {
+        throw new Error("run-lease-committed-but-cleanup-failed");
+      }
+    }
+  }
 }
 
 export async function replaceRunLeaseGenerationAtomic(

@@ -806,6 +806,77 @@ describe("atomic show-run evidence writer", () => {
     }
   });
 
+  it("resolves after one transient post-link temp cleanup failure", async () => {
+    const root = mkdtempSync(join(tmpdir(), "show-run-evidence-cleanup-retry-"));
+    const path = join(root, "show-run-001.json");
+    const record = validEvidenceRecord();
+    const transient = Object.assign(new Error("transient temp cleanup failure"), {
+      code: "EPERM",
+    });
+    const rmSpy = vi
+      .spyOn(fs, "rmSync")
+      .mockImplementationOnce(() => {
+        throw transient;
+      });
+    try {
+      await expect(
+        writeShowRunEvidenceAtomic(path, record),
+      ).resolves.toBeUndefined();
+
+      expect(rmSpy).toHaveBeenCalledTimes(2);
+      expect(rmSpy.mock.calls.every(([target]) => String(target) !== path)).toBe(
+        true,
+      );
+      expect(readFileSync(path, "utf8")).toBe(
+        `${JSON.stringify(record, null, 2)}\n`,
+      );
+      expect(readdirSync(root)).toEqual(["show-run-001.json"]);
+    } finally {
+      vi.restoreAllMocks();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("reports committed evidence after the exact post-link temp cleanup budget", async () => {
+    const root = mkdtempSync(join(tmpdir(), "show-run-evidence-cleanup-limit-"));
+    const path = join(root, "show-run-001.json");
+    const record = validEvidenceRecord();
+    const persistent = Object.assign(new Error("persistent temp cleanup failure"), {
+      code: "EPERM",
+    });
+    const cleanupTargets: string[] = [];
+    let writerTemporaryPath = "";
+    const realLink = fs.linkSync.bind(fs);
+    vi.spyOn(fs, "linkSync").mockImplementation((source, destination) => {
+      writerTemporaryPath = String(source);
+      realLink(source, destination);
+    });
+    const rmSpy = vi.spyOn(fs, "rmSync").mockImplementation((target) => {
+      cleanupTargets.push(String(target));
+      throw persistent;
+    });
+    try {
+      await expect(
+        writeShowRunEvidenceAtomic(path, record),
+      ).rejects.toThrow(/show-run-evidence-committed-but-cleanup-failed/i);
+
+      expect(rmSpy).toHaveBeenCalledTimes(3);
+      expect(writerTemporaryPath).not.toBe("");
+      expect(cleanupTargets).toEqual(Array(3).fill(writerTemporaryPath));
+      expect(cleanupTargets).not.toContain(path);
+      expect(readFileSync(path, "utf8")).toBe(
+        `${JSON.stringify(record, null, 2)}\n`,
+      );
+      expect(readdirSync(root).sort()).toEqual([
+        basename(writerTemporaryPath),
+        "show-run-001.json",
+      ].sort());
+    } finally {
+      vi.restoreAllMocks();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("validates before opening and leaves unrelated temp files untouched", async () => {
     const root = mkdtempSync(join(tmpdir(), "show-run-evidence-invalid-"));
     try {

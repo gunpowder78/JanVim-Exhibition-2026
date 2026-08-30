@@ -12,7 +12,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, normalize, resolve } from "node:path";
+import { basename, join, normalize, resolve } from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -380,6 +380,69 @@ describe("run lease atomic persistence", () => {
 
     expect(existsSync(path)).toBe(false);
     expect(readdirSync(root)).toEqual([]);
+  });
+
+  it("resolves after one transient post-link temp cleanup failure", async () => {
+    const root = temporaryRoot("run-lease-cleanup-retry-");
+    const path = join(root, "run-lease.json");
+    const lease = validLease();
+    const transient = Object.assign(new Error("transient temp cleanup failure"), {
+      code: "EPERM",
+    });
+    const rmSpy = vi.spyOn(fs, "rm").mockRejectedValueOnce(transient);
+    try {
+      await expect(writeRunLeaseAtomic(path, lease)).resolves.toBeUndefined();
+
+      expect(rmSpy).toHaveBeenCalledTimes(2);
+      expect(rmSpy.mock.calls.every(([target]) => String(target) !== path)).toBe(
+        true,
+      );
+      expect(readFileSync(path, "utf8")).toBe(
+        `${JSON.stringify(lease, null, 2)}\n`,
+      );
+      expect(readdirSync(root)).toEqual(["run-lease.json"]);
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
+  it("reports a committed lease after the exact post-link temp cleanup budget", async () => {
+    const root = temporaryRoot("run-lease-cleanup-limit-");
+    const path = join(root, "run-lease.json");
+    const lease = validLease();
+    const persistent = Object.assign(new Error("persistent temp cleanup failure"), {
+      code: "EPERM",
+    });
+    const cleanupTargets: string[] = [];
+    let writerTemporaryPath = "";
+    const realLink = fs.link.bind(fs);
+    vi.spyOn(fs, "link").mockImplementation(async (source, destination) => {
+      writerTemporaryPath = String(source);
+      await realLink(source, destination);
+    });
+    const rmSpy = vi.spyOn(fs, "rm").mockImplementation(async (target) => {
+      cleanupTargets.push(String(target));
+      throw persistent;
+    });
+    try {
+      await expect(writeRunLeaseAtomic(path, lease)).rejects.toThrow(
+        /run-lease-committed-but-cleanup-failed/i,
+      );
+
+      expect(rmSpy).toHaveBeenCalledTimes(3);
+      expect(writerTemporaryPath).not.toBe("");
+      expect(cleanupTargets).toEqual(Array(3).fill(writerTemporaryPath));
+      expect(cleanupTargets).not.toContain(path);
+      expect(readFileSync(path, "utf8")).toBe(
+        `${JSON.stringify(lease, null, 2)}\n`,
+      );
+      expect(readdirSync(root).sort()).toEqual([
+        basename(writerTemporaryPath),
+        "run-lease.json",
+      ].sort());
+    } finally {
+      vi.restoreAllMocks();
+    }
   });
 
   it("allows exactly one winner when initial writers race", async () => {
