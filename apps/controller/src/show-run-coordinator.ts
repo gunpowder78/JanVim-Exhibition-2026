@@ -33,6 +33,10 @@ import type {
 import { RestartBudget } from "./supervisor.js";
 
 const SHOW_LOOP_DURATION_MS = 90_000;
+const STARTUP_PHASE_TIMEOUT_MS = 35_000;
+const BOUNDARY_PHASE_TIMEOUT_MS = 10_000;
+const CLEANUP_PHASE_TIMEOUT_MS = 10_000;
+const FINALIZATION_PHASE_TIMEOUT_MS = 10_000;
 const RECOVERY_PHASE_TIMEOUT_MS = 10_000;
 const MAX_RETAINED_SHOW_LOOPS = 3;
 const MAX_RETAINED_NETWORK_SNAPSHOTS = 8;
@@ -40,6 +44,16 @@ const MAX_RECOVERY_EVENTS = 32;
 const MAX_TRANSITIONS = 32;
 const MAX_IGNORED_REASON_BUCKETS = 32;
 const MAX_SHUTDOWN_FAILURES = 16;
+const MAX_COORDINATOR_PHASE_DEADLINES = 8;
+
+class BoundedPhaseTimeoutError extends Error {
+  public constructor(
+    public readonly phase: string,
+    public readonly timeoutMs: number,
+  ) {
+    super(`coordinator phase timed out: ${phase}`);
+  }
+}
 
 export type ShowCoordinatorState =
   | "booting"
@@ -191,6 +205,7 @@ export type CoordinatorDiagnostics = {
   startedLoops: number;
   completedLoops: number;
   stopQueued: boolean;
+  pendingBoundaryWork: 0 | 1;
   counts: RuntimeCountEvidence;
   aggregate: CoordinatorAggregate;
   loops: readonly CoordinatorLoopSummary[];
@@ -263,7 +278,6 @@ export class ShowRunCoordinator {
   private generationId = 1;
   private stateReason: string | undefined;
   private bootAttempted = false;
-  private readonly startupAbortController = new AbortController();
   private operatorArmed = false;
   private surface: ShowSecondarySurface | undefined;
   private session: ShowRunSession | undefined;
@@ -284,16 +298,17 @@ export class ShowRunCoordinator {
     OneLoopTimerHandle,
     (elapsed: boolean) => void
   >();
-  private readonly recoveryPhaseDeadlines = new Map<
+  private readonly phaseDeadlines = new Map<
     OneLoopTimerHandle,
-    () => void
+    { phase: string; cancel: () => void }
   >();
   private shutdownPromise: Promise<void> | undefined;
   private startupOperation: Promise<unknown> | undefined;
   private recoveryOperation: Promise<void> | undefined;
   private pendingRecoveryTerminalFailure: string | undefined;
   private priorSessionSettlement: SessionCleanupResult | undefined;
-  private boundaryQueue: Promise<void> = Promise.resolve();
+  private boundaryOperation: Promise<void> | undefined;
+  private pendingBoundaryTerminal: ShowRunResult | undefined;
   private readonly surfaceDisposers = new Set<() => void>();
   private readonly sessionDisposers = new Set<() => void>();
   private readonly ignoredReasonBuckets = new Set<string>();
@@ -342,22 +357,25 @@ export class ShowRunCoordinator {
     const capturedGeneration = this.generationId;
 
     try {
-      await this.runStartupOperation(() => this.dependencies.validate());
+      await this.runStartupOperation("validation", () =>
+        this.dependencies.validate(),
+      );
       if (!this.isBootGeneration(capturedGeneration)) {
         return { ready: false, reason: "controller-stopping" };
       }
       this.retainNetworkSnapshot(
-        await this.runStartupOperation(() => this.dependencies.sampleNetwork()),
+        await this.runStartupOperation("network-sample", () =>
+          this.dependencies.sampleNetwork(),
+        ),
       );
       if (!this.isBootGeneration(capturedGeneration)) {
         return { ready: false, reason: "controller-stopping" };
       }
 
-      const surface = await this.runStartupOperation(() =>
-        this.dependencies.openSecondary(
-          capturedGeneration,
-          this.startupAbortController.signal,
-        ),
+      const surface = await this.runStartupOperation(
+        "open-secondary",
+        (signal) => this.dependencies.openSecondary(capturedGeneration, signal),
+        (lateSurface) => lateSurface.close(),
       );
       if (!this.isBootGeneration(capturedGeneration)) {
         surface.close();
@@ -369,32 +387,33 @@ export class ShowRunCoordinator {
       const session = this.dependencies.createSession(capturedGeneration);
       this.session = session;
       this.bindSession(session, capturedGeneration);
-      await this.runStartupOperation(() =>
-        session.startBridge(this.startupAbortController.signal),
+      await this.runStartupOperation("start-bridge", (signal) =>
+        session.startBridge(signal),
       );
       if (!this.isBootGeneration(capturedGeneration)) {
         return { ready: false, reason: "controller-stopping" };
       }
-      await this.runStartupOperation(() =>
-        session.launchJanVim(this.startupAbortController.signal),
+      await this.runStartupOperation("launch-janvim", (signal) =>
+        session.launchJanVim(signal),
       );
       if (!this.isBootGeneration(capturedGeneration)) {
         return { ready: false, reason: "controller-stopping" };
       }
-      await this.runStartupOperation(() =>
-        session.placeJanVim(this.startupAbortController.signal),
+      await this.runStartupOperation("place-janvim", (signal) =>
+        session.placeJanVim(signal),
       );
       if (!this.isBootGeneration(capturedGeneration)) {
         return { ready: false, reason: "controller-stopping" };
       }
-      await this.runStartupOperation(() =>
-        session.awaitAgent(this.startupAbortController.signal),
+      await this.runStartupOperation("await-agent", (signal) =>
+        session.awaitAgent(signal),
       );
       if (!this.isBootGeneration(capturedGeneration)) {
         return { ready: false, reason: "controller-stopping" };
       }
-      const prepared = await this.runStartupOperation(() =>
-        session.prepareOriginalPoem(this.startupAbortController.signal),
+      const prepared = await this.runStartupOperation(
+        "prepare-original",
+        (signal) => session.prepareOriginalPoem(signal),
       );
       if (!this.isBootGeneration(capturedGeneration)) {
         return { ready: false, reason: "controller-stopping" };
@@ -445,6 +464,7 @@ export class ShowRunCoordinator {
       startedLoops: this.startedLoops,
       completedLoops: this.completedLoops,
       stopQueued: this.stopQueued,
+      pendingBoundaryWork: this.boundaryOperation === undefined ? 0 : 1,
       counts: this.runtimeCounts(),
       aggregate: cloneAggregate(this.aggregate),
       loops: this.loops.map((loop) => cloneLoopSummary(loop)),
@@ -462,14 +482,127 @@ export class ShowRunCoordinator {
     return this.state === "booting" && this.generationId === generationId;
   }
 
-  private async runStartupOperation<T>(action: () => Promise<T>): Promise<T> {
-    const operation = action();
+  private async runStartupOperation<T>(
+    phase: string,
+    action: (signal: AbortSignal) => Promise<T>,
+    onLateValue?: (value: T) => void,
+  ): Promise<T> {
+    const operation = this.runBoundedPhase(
+      `startup-${phase}`,
+      STARTUP_PHASE_TIMEOUT_MS,
+      action,
+      onLateValue,
+    );
     this.startupOperation = operation;
     try {
       return await operation;
     } finally {
       if (this.startupOperation === operation) this.startupOperation = undefined;
     }
+  }
+
+  private runBoundedPhase<T>(
+    phase: string,
+    timeoutMs: number,
+    action: (signal: AbortSignal) => Promise<T>,
+    onLateValue?: (value: T) => void,
+  ): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      let settled = false;
+      let lateValueHandled = false;
+      let handle: OneLoopTimerHandle | undefined;
+      const abortController = new AbortController();
+
+      const revokeDeadline = (clearExternal: boolean): boolean => {
+        const currentHandle = handle;
+        if (currentHandle === undefined) return true;
+        handle = undefined;
+        this.phaseDeadlines.delete(currentHandle);
+        if (!clearExternal) return true;
+        try {
+          this.dependencies.timers.clearTimeout(currentHandle);
+          return true;
+        } catch {
+          this.log({ type: "coordinator-timer-clear-failed", phase });
+          return false;
+        }
+      };
+
+      const abort = (): void => {
+        bestEffortSync(() => abortController.abort());
+      };
+
+      const cancel = (): void => {
+        if (settled) return;
+        settled = true;
+        const cleared = revokeDeadline(true);
+        abort();
+        if (!cleared && phase.startsWith("recovery-")) {
+          this.recordShutdownFailure("recovery-phase-timer-clear-failed");
+        }
+        reject(new Error(`coordinator phase cancelled: ${phase}`));
+      };
+
+      if (this.phaseDeadlines.size >= MAX_COORDINATOR_PHASE_DEADLINES) {
+        settled = true;
+        abort();
+        reject(new Error("coordinator phase deadline capacity exceeded"));
+        return;
+      }
+
+      try {
+        const allocatedHandle = this.dependencies.timers.setTimeout(() => {
+          if (settled) return;
+          settled = true;
+          revokeDeadline(false);
+          abort();
+          this.log({ type: "coordinator-phase-timeout", phase, timeoutMs });
+          reject(new BoundedPhaseTimeoutError(phase, timeoutMs));
+        }, timeoutMs);
+        handle = allocatedHandle;
+        this.phaseDeadlines.set(allocatedHandle, { phase, cancel });
+      } catch (error) {
+        settled = true;
+        abort();
+        reject(error);
+        return;
+      }
+
+      Promise.resolve()
+        .then(() => action(abortController.signal))
+        .then(
+          (value) => {
+            if (settled) {
+              if (!lateValueHandled) {
+                lateValueHandled = true;
+                bestEffortSync(() => onLateValue?.(value));
+              }
+              return;
+            }
+            settled = true;
+            revokeDeadline(true);
+            resolve(value);
+          },
+          (error: unknown) => {
+            if (settled) return;
+            settled = true;
+            revokeDeadline(true);
+            reject(error);
+          },
+        );
+    });
+  }
+
+  private cancelBoundedPhases(): void {
+    const deadlines = [...this.phaseDeadlines.values()];
+    for (const deadline of deadlines) deadline.cancel();
+  }
+
+  private cancelBoundedPhase(phase: string): void {
+    const deadline = [...this.phaseDeadlines.values()].find(
+      (candidate) => candidate.phase === phase,
+    );
+    deadline?.cancel();
   }
 
   private async holdStartupFailure(
@@ -489,21 +622,29 @@ export class ShowRunCoordinator {
   private async cleanupHeldSession(
     session: ShowRunSession,
   ): Promise<SessionCleanupResult> {
-    await bestEffort(() => session.sendAgentShutdown(2_000, 1));
-    await bestEffort(() => session.closePlacedWindow(2_000, 4_096));
-    const exit = await bestEffortResult(
+    await this.runCleanupPhase("held-agent-shutdown", () =>
+      session.sendAgentShutdown(2_000, 1),
+    );
+    await this.runCleanupPhase("held-hwnd-close", () =>
+      session.closePlacedWindow(2_000, 4_096),
+    );
+    const exit = await this.runCleanupPhase(
+      "held-wait-natural",
       () => session.waitForJanVimExit(5_000),
-      "still-running" as const,
     );
     let childSettled = exit === "natural";
     if (!childSettled) {
-      await bestEffort(() => session.terminateExactJanVim());
-      childSettled = await bestEffortResult(
-        () => session.waitForForcedExit(5_000),
-        false,
+      await this.runCleanupPhase("held-terminate-exact", () =>
+        session.terminateExactJanVim(),
       );
+      childSettled = (await this.runCleanupPhase(
+        "held-wait-forced",
+        () => session.waitForForcedExit(5_000),
+      )) === true;
     }
-    await bestEffort(() => session.closeBridge(5_000));
+    await this.runCleanupPhase("held-bridge-close", () =>
+      session.closeBridge(5_000),
+    );
     this.disposeSessionListeners();
     bestEffortSync(() => session.dispose());
     const leaseRemoved = bestEffortSyncResult(
@@ -512,6 +653,22 @@ export class ShowRunCoordinator {
     );
     if (this.session === session) this.session = undefined;
     return { childSettled, leaseRemoved };
+  }
+
+  private async runCleanupPhase<T>(
+    phase: string,
+    action: () => Promise<T>,
+  ): Promise<T | undefined> {
+    try {
+      return await this.runBoundedPhase(
+        `cleanup-${phase}`,
+        CLEANUP_PHASE_TIMEOUT_MS,
+        () => action(),
+      );
+    } catch {
+      this.log({ type: "cleanup-phase-failed", phase });
+      return undefined;
+    }
   }
 
   private bindSurface(
@@ -612,6 +769,16 @@ export class ShowRunCoordinator {
 
   private handleStopAction(): boolean {
     if (this.state === "running") {
+      if (this.boundaryOperation !== undefined) {
+        if (this.stopQueued) {
+          this.ignore("stop-already-queued");
+          return false;
+        }
+        this.stopQueued = true;
+        bestEffortSync(() => this.driver?.stop());
+        this.queueBoundaryTerminal({ ok: true, reason: "operator-stop" });
+        return true;
+      }
       if (this.stopQueued || this.driver === undefined) {
         this.ignore("stop-already-queued");
         return false;
@@ -983,6 +1150,14 @@ export class ShowRunCoordinator {
       this.ignore("stale-generation");
       return;
     }
+    if (this.boundaryOperation !== undefined) {
+      bestEffortSync(() => this.driver?.stop());
+      this.queueBoundaryTerminal({
+        ok: false,
+        reason: "loop-boundary-overlap",
+      });
+      return;
+    }
     try {
       const active = this.activeLoop;
       if (
@@ -1005,8 +1180,6 @@ export class ShowRunCoordinator {
         tickLatenessMs: boundary.tickLatenessMs,
         advanceOverrunMs: boundary.advanceOverrunMs,
       });
-      const resources = active.sampler.finish();
-      const network = this.dependencies.sampleNetwork();
       this.activeLoop = undefined;
       this.updateAggregate(telemetrySummary);
       this.completedLoops = this.aggregate.completedLoops;
@@ -1035,14 +1208,24 @@ export class ShowRunCoordinator {
         next.countsAtStart = this.runtimeCounts();
       }
 
-      this.boundaryQueue = this.boundaryQueue
-        .then(async () => {
+      let operation!: Promise<void>;
+      operation = this.runBoundedPhase(
+        "loop-boundary-finalize",
+        BOUNDARY_PHASE_TIMEOUT_MS,
+        async () => {
           const [resourceSummary, networkSnapshot] = await Promise.all([
-            resources,
-            network,
+            active.sampler.finish(),
+            this.dependencies.sampleNetwork(),
           ]);
-          if (!this.isCurrentGeneration(generationId)) {
-            this.ignore("stale-generation");
+          return { resourceSummary, networkSnapshot };
+        },
+      )
+        .then(({ resourceSummary, networkSnapshot }) => {
+          if (
+            this.boundaryOperation !== operation ||
+            !this.isCurrentGeneration(generationId) ||
+            this.state !== "running"
+          ) {
             return;
           }
           this.retainNetworkSnapshot(networkSnapshot);
@@ -1054,10 +1237,44 @@ export class ShowRunCoordinator {
             countsAtEnd,
           });
         })
-        .catch(() => this.receiveTerminalFailure("loop-boundary-finalize-failed"));
+        .then(
+          () => this.finishBoundaryOperation(operation),
+          () =>
+            this.finishBoundaryOperation(
+              operation,
+              "loop-boundary-finalize-failed",
+            ),
+        );
+      this.boundaryOperation = operation;
     } catch {
-      this.driver?.stop();
+      bestEffortSync(() => this.driver?.stop());
       this.receiveTerminalFailure("loop-boundary-invalid");
+    }
+  }
+
+  private finishBoundaryOperation(
+    operation: Promise<void>,
+    failureReason?: string,
+  ): void {
+    if (this.boundaryOperation !== operation) return;
+    this.boundaryOperation = undefined;
+    if (failureReason !== undefined) {
+      this.queueBoundaryTerminal({ ok: false, reason: failureReason });
+    }
+    const terminal = this.pendingBoundaryTerminal;
+    this.pendingBoundaryTerminal = undefined;
+    if (terminal !== undefined) void this.beginShutdown(terminal);
+  }
+
+  private queueBoundaryTerminal(result: ShowRunResult): void {
+    const pending = this.pendingBoundaryTerminal;
+    if (result.reason === "loop-boundary-overlap") {
+      this.pendingBoundaryTerminal = result;
+      return;
+    }
+    if (pending?.reason === "loop-boundary-overlap") return;
+    if (pending === undefined || (pending.ok && !result.ok)) {
+      this.pendingBoundaryTerminal = result;
     }
   }
 
@@ -1072,7 +1289,11 @@ export class ShowRunCoordinator {
         : this.stopQueued
           ? { ok: true, reason: "operator-stop" }
           : { ok: false, reason: "driver-completed-unexpectedly" };
-    void this.boundaryQueue.then(() => this.beginShutdown(result));
+    if (this.boundaryOperation !== undefined) {
+      this.queueBoundaryTerminal(result);
+    } else {
+      void this.beginShutdown(result);
+    }
   }
 
   private handleDriverFailure(generationId: number, reason: string): void {
@@ -1084,7 +1305,12 @@ export class ShowRunCoordinator {
   }
 
   private receiveTerminalFailure(reason: string): void {
-    void this.beginShutdown({ ok: false, reason });
+    const result: ShowRunResult = { ok: false, reason };
+    if (this.boundaryOperation !== undefined) {
+      this.queueBoundaryTerminal(result);
+    } else {
+      void this.beginShutdown(result);
+    }
   }
 
   private handleSecondaryDestroyed(): void {
@@ -1144,6 +1370,7 @@ export class ShowRunCoordinator {
     driverStopFailed: boolean;
   } {
     this.incrementGeneration();
+    this.revokeBoundaryOperation();
     this.log({
       type: "generation-invalidate",
       generationId: this.generationId,
@@ -1171,6 +1398,13 @@ export class ShowRunCoordinator {
     this.operatorArmed = false;
     if (sampler !== undefined) void bestEffort(() => sampler.finish());
     return { generationId: this.generationId, driverStopFailed };
+  }
+
+  private revokeBoundaryOperation(): void {
+    if (this.boundaryOperation === undefined) return;
+    this.boundaryOperation = undefined;
+    this.pendingBoundaryTerminal = undefined;
+    this.cancelBoundedPhase("loop-boundary-finalize");
   }
 
   private startRecovery(operation: () => Promise<void>): void {
@@ -1555,73 +1789,20 @@ export class ShowRunCoordinator {
     operation: (signal: AbortSignal) => Promise<T>,
     onLateValue?: (value: T) => void,
   ): Promise<T> {
-    return new Promise<T>((resolve, reject) => {
-      let settled = false;
-      let handle: OneLoopTimerHandle | undefined;
-      const abortController = new AbortController();
-
-      const clearDeadline = (): void => {
-        if (handle === undefined) return;
-        try {
-          this.dependencies.timers.clearTimeout(handle);
-          this.recoveryPhaseDeadlines.delete(handle);
-        } catch {
-          bestEffortSync(() =>
-            this.log({
-              type: "recovery-timer-clear-failed",
-              phase,
-            }),
-          );
-        }
-      };
-
-      const cancel = (): void => {
-        if (settled) return;
-        settled = true;
-        abortController.abort();
-        reject(new Error("recovery phase cancelled"));
-      };
-
-      try {
-        handle = this.dependencies.timers.setTimeout(() => {
-          if (handle !== undefined) this.recoveryPhaseDeadlines.delete(handle);
-          if (settled) return;
-          settled = true;
-          abortController.abort();
-          bestEffortSync(() =>
-            this.log({
-              type: "recovery-phase-timeout",
-              phase,
-              timeoutMs: RECOVERY_PHASE_TIMEOUT_MS,
-            }),
-          );
-          reject(new Error(`recovery phase timed out: ${phase}`));
-        }, RECOVERY_PHASE_TIMEOUT_MS);
-        this.recoveryPhaseDeadlines.set(handle, cancel);
-      } catch (error) {
-        reject(error);
-        return;
+    return this.runBoundedPhase(
+      `recovery-${phase}`,
+      RECOVERY_PHASE_TIMEOUT_MS,
+      operation,
+      onLateValue,
+    ).catch((error: unknown) => {
+      if (error instanceof BoundedPhaseTimeoutError) {
+        this.log({
+          type: "recovery-phase-timeout",
+          phase,
+          timeoutMs: RECOVERY_PHASE_TIMEOUT_MS,
+        });
       }
-
-      Promise.resolve()
-        .then(() => operation(abortController.signal))
-        .then(
-          (value) => {
-            if (settled) {
-              bestEffortSync(() => onLateValue?.(value));
-              return;
-            }
-            settled = true;
-            clearDeadline();
-            resolve(value);
-          },
-          (error: unknown) => {
-            if (settled) return;
-            settled = true;
-            clearDeadline();
-            reject(error);
-          },
-        );
+      throw error;
     });
   }
 
@@ -1650,18 +1831,6 @@ export class ShowRunCoordinator {
       resolve(false);
     }
     this.recoveryDelays.clear();
-  }
-
-  private cancelRecoveryPhases(): void {
-    for (const [handle, cancel] of [...this.recoveryPhaseDeadlines]) {
-      try {
-        this.dependencies.timers.clearTimeout(handle);
-        this.recoveryPhaseDeadlines.delete(handle);
-      } catch {
-        this.recordShutdownFailure("recovery-phase-timer-clear-failed");
-      }
-      cancel();
-    }
   }
 
   private resetExhaustedRecoveryBudget(): void {
@@ -1700,13 +1869,15 @@ export class ShowRunCoordinator {
 
     this.transition("shutting-down", result.reason);
     this.shutdownDiagnostics.requestedReason = result.reason;
+    const startupOperation = this.startupOperation;
+    const recoveryOperation = this.recoveryOperation;
     this.logShutdownPhase("disarm-operator");
     this.operatorArmed = false;
     this.incrementGeneration();
     this.logShutdownPhase("invalidate-generation");
     this.sendStatus();
-    this.startupAbortController.abort();
-    this.cancelRecoveryPhases();
+    this.revokeBoundaryOperation();
+    this.cancelBoundedPhases();
     this.cancelRecoveryDelays();
     this.logShutdownPhase("stop-driver-and-queued-editor-work");
     try {
@@ -1722,36 +1893,54 @@ export class ShowRunCoordinator {
     this.pendingNextLoop = undefined;
 
     const activeSampler = this.activeLoop?.sampler;
-    const startupOperation = this.startupOperation;
-    const recoveryOperation = this.recoveryOperation;
     this.activeLoop = undefined;
 
     this.shutdownPromise = Promise.resolve().then(async () => {
-      if (startupOperation !== undefined) await bestEffort(() => startupOperation);
-      if (recoveryOperation !== undefined) await bestEffort(() => recoveryOperation);
+      if (startupOperation !== undefined) {
+        await this.runShutdownPhase(
+          "startup-operation-wait-failed",
+          CLEANUP_PHASE_TIMEOUT_MS,
+          () => bestEffort(() => startupOperation),
+        );
+      }
+      if (recoveryOperation !== undefined) {
+        await this.runShutdownPhase(
+          "recovery-operation-wait-failed",
+          CLEANUP_PHASE_TIMEOUT_MS,
+          () => bestEffort(() => recoveryOperation),
+        );
+      }
 
       const session = this.session;
       const surface = this.surface;
       if (session !== undefined) {
-        await this.runShutdownPhase("agent-shutdown-failed", () =>
-          session.sendAgentShutdown(2_000, 1),
+        await this.runShutdownPhase(
+          "agent-shutdown-failed",
+          CLEANUP_PHASE_TIMEOUT_MS,
+          () => session.sendAgentShutdown(2_000, 1),
         );
-        await this.runShutdownPhase("hwnd-close-failed", () =>
-          session.closePlacedWindow(2_000, 4_096),
+        await this.runShutdownPhase(
+          "hwnd-close-failed",
+          CLEANUP_PHASE_TIMEOUT_MS,
+          () => session.closePlacedWindow(2_000, 4_096),
         );
         const exit = await this.runShutdownPhase(
           "wait-natural-failed",
+          CLEANUP_PHASE_TIMEOUT_MS,
           () => session.waitForJanVimExit(5_000),
         );
         if (exit === "natural") {
           this.shutdownDiagnostics.childSettled = true;
         } else {
           this.shutdownDiagnostics.forcedTermination = true;
-          await this.runShutdownPhase("terminate-exact-failed", () =>
-            session.terminateExactJanVim(),
+          await this.runShutdownPhase(
+            "terminate-exact-failed",
+            CLEANUP_PHASE_TIMEOUT_MS,
+            () => session.terminateExactJanVim(),
           );
           const forced = await this.runShutdownPhase(
             "wait-forced-failed",
+            CLEANUP_PHASE_TIMEOUT_MS,
             () => session.waitForForcedExit(5_000),
           );
           if (forced === true) {
@@ -1760,8 +1949,10 @@ export class ShowRunCoordinator {
             this.recordShutdownFailure("janvim-unsettled");
           }
         }
-        await this.runShutdownPhase("bridge-close-failed", () =>
-          session.closeBridge(5_000),
+        await this.runShutdownPhase(
+          "bridge-close-failed",
+          CLEANUP_PHASE_TIMEOUT_MS,
+          () => session.closeBridge(5_000),
         );
         this.runShutdownPhaseSync("session-dispose-failed", () =>
           session.dispose(),
@@ -1788,8 +1979,10 @@ export class ShowRunCoordinator {
       }
       this.session = undefined;
       if (activeSampler !== undefined) {
-        await this.runShutdownPhase("resource-finish-failed", () =>
-          activeSampler.finish(),
+        await this.runShutdownPhase(
+          "resource-finish-failed",
+          CLEANUP_PHASE_TIMEOUT_MS,
+          () => activeSampler.finish(),
         );
       }
       if (surface !== undefined) {
@@ -1798,20 +1991,29 @@ export class ShowRunCoordinator {
       this.surface = undefined;
       const networkSnapshot = await this.runShutdownPhase(
         "network-snapshot-failed",
+        CLEANUP_PHASE_TIMEOUT_MS,
         () => this.dependencies.sampleNetwork(),
       );
       if (networkSnapshot !== undefined) this.retainNetworkSnapshot(networkSnapshot);
-      await this.runShutdownPhase("flush-logs-failed", () =>
-        this.dependencies.flushLogs(),
+      await this.runShutdownPhase(
+        "flush-logs-failed",
+        FINALIZATION_PHASE_TIMEOUT_MS,
+        () => this.dependencies.flushLogs(),
       );
 
       let finalResult = this.classifyShutdownResult(result);
-      await this.runShutdownPhase("evidence-write-failed", () =>
-        this.dependencies.finalizeEvidence(finalResult, this.diagnostics()),
+      const evidenceDiagnostics = this.diagnostics();
+      await this.runShutdownPhase(
+        "evidence-write-failed",
+        FINALIZATION_PHASE_TIMEOUT_MS,
+        () =>
+          this.dependencies.finalizeEvidence(finalResult, evidenceDiagnostics),
       );
       finalResult = this.classifyShutdownResult(result);
-      await this.runShutdownPhase("terminal-marker-failed", () =>
-        this.dependencies.writeTerminalMarker(finalResult),
+      await this.runShutdownPhase(
+        "terminal-marker-failed",
+        FINALIZATION_PHASE_TIMEOUT_MS,
+        () => this.dependencies.writeTerminalMarker(finalResult),
       );
       finalResult = this.classifyShutdownResult(result);
       this.transition("stopped", finalResult.reason);
@@ -1832,10 +2034,15 @@ export class ShowRunCoordinator {
 
   private async runShutdownPhase<T>(
     classification: string,
+    timeoutMs: number,
     action: () => Promise<T>,
   ): Promise<T | undefined> {
     try {
-      return await action();
+      return await this.runBoundedPhase(
+        `shutdown-${classification}`,
+        timeoutMs,
+        () => action(),
+      );
     } catch {
       this.recordShutdownFailure(classification);
       return undefined;
@@ -1953,7 +2160,7 @@ export class ShowRunCoordinator {
         driverTimers +
         samplerTimers +
         this.recoveryDelays.size +
-        this.recoveryPhaseDeadlines.size,
+        this.phaseDeadlines.size,
       connections: session?.connections ?? 0,
       pendingCommands: session?.pendingCommands ?? 0,
     };
@@ -2116,17 +2323,6 @@ async function bestEffort(action: () => Promise<unknown>): Promise<void> {
     await action();
   } catch {
     // Task 9 classifies each bounded cleanup failure; Task 8 must still advance.
-  }
-}
-
-async function bestEffortResult<T>(
-  action: () => Promise<T>,
-  fallback: T,
-): Promise<T> {
-  try {
-    return await action();
-  } catch {
-    return fallback;
   }
 }
 
