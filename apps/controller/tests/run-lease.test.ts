@@ -406,6 +406,41 @@ describe("run lease atomic persistence", () => {
     }
   });
 
+  it("resolves when the published temp name vanishes before cleanup reports ENOENT", async () => {
+    const root = temporaryRoot("run-lease-cleanup-gone-");
+    const path = join(root, "run-lease.json");
+    const lease = validLease();
+    const vanished = Object.assign(new Error("temp name already removed"), {
+      code: "ENOENT",
+    });
+    let writerTemporaryPath = "";
+    let cleanupTarget = "";
+    const realLink = fs.link.bind(fs);
+    const realRm = fs.rm.bind(fs);
+    vi.spyOn(fs, "link").mockImplementation(async (source, destination) => {
+      writerTemporaryPath = String(source);
+      await realLink(source, destination);
+    });
+    const rmSpy = vi.spyOn(fs, "rm").mockImplementationOnce(async (target) => {
+      cleanupTarget = String(target);
+      await realRm(target);
+      throw vanished;
+    });
+    try {
+      await expect(writeRunLeaseAtomic(path, lease)).resolves.toBeUndefined();
+
+      expect(rmSpy).toHaveBeenCalledTimes(1);
+      expect(cleanupTarget).toBe(writerTemporaryPath);
+      expect(cleanupTarget).not.toBe(path);
+      expect(readFileSync(path, "utf8")).toBe(
+        `${JSON.stringify(lease, null, 2)}\n`,
+      );
+      expect(readdirSync(root)).toEqual(["run-lease.json"]);
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
   it("reports a committed lease after the exact post-link temp cleanup budget", async () => {
     const root = temporaryRoot("run-lease-cleanup-limit-");
     const path = join(root, "run-lease.json");

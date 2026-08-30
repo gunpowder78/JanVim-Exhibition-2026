@@ -837,6 +837,46 @@ describe("atomic show-run evidence writer", () => {
     }
   });
 
+  it("resolves when the published temp name vanishes before cleanup reports ENOENT", async () => {
+    const root = mkdtempSync(join(tmpdir(), "show-run-evidence-cleanup-gone-"));
+    const path = join(root, "show-run-001.json");
+    const record = validEvidenceRecord();
+    const vanished = Object.assign(new Error("temp name already removed"), {
+      code: "ENOENT",
+    });
+    let writerTemporaryPath = "";
+    let cleanupTarget = "";
+    const realLink = fs.linkSync.bind(fs);
+    const realRm = fs.rmSync.bind(fs);
+    vi.spyOn(fs, "linkSync").mockImplementation((source, destination) => {
+      writerTemporaryPath = String(source);
+      realLink(source, destination);
+    });
+    const rmSpy = vi
+      .spyOn(fs, "rmSync")
+      .mockImplementationOnce((target) => {
+        cleanupTarget = String(target);
+        realRm(target);
+        throw vanished;
+      });
+    try {
+      await expect(
+        writeShowRunEvidenceAtomic(path, record),
+      ).resolves.toBeUndefined();
+
+      expect(rmSpy).toHaveBeenCalledTimes(1);
+      expect(cleanupTarget).toBe(writerTemporaryPath);
+      expect(cleanupTarget).not.toBe(path);
+      expect(readFileSync(path, "utf8")).toBe(
+        `${JSON.stringify(record, null, 2)}\n`,
+      );
+      expect(readdirSync(root)).toEqual(["show-run-001.json"]);
+    } finally {
+      vi.restoreAllMocks();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("reports committed evidence after the exact post-link temp cleanup budget", async () => {
     const root = mkdtempSync(join(tmpdir(), "show-run-evidence-cleanup-limit-"));
     const path = join(root, "show-run-001.json");
