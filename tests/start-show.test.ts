@@ -61,6 +61,7 @@ function fakeNodeExecutableTemplate(): string {
   fakeNodeTemplate = join(publishRoot, "FakeNode.exe");
   const source = String.raw`
 using System;
+using System.Diagnostics;
 using System.IO;
 using System.Security.Cryptography;
 using System.Text.Json;
@@ -68,10 +69,56 @@ using System.Threading;
 
 public static class JanVimShowFakeNode
 {
+    private static void AttemptParserMutation()
+    {
+        if (Environment.GetEnvironmentVariable("SHOW_TEST_PARSER_MUTATION") != "attempt-before-graph-verifier") {
+            return;
+        }
+        string parserPath = Environment.GetEnvironmentVariable("SHOW_TEST_PARSER_IMPLEMENTATION");
+        string mutationLog = Environment.GetEnvironmentVariable("SHOW_TEST_PARSER_MUTATION_LOG");
+        try {
+            string original = File.ReadAllText(parserPath);
+            string modified = original.Replace("original", "modified", StringComparison.Ordinal);
+            if (String.Equals(original, modified, StringComparison.Ordinal)) return;
+            File.WriteAllText(parserPath, modified);
+            File.AppendAllText(mutationLog, "replaced" + Environment.NewLine);
+        }
+        catch (Exception error) {
+            File.AppendAllText(
+                mutationLog,
+                "blocked:" + unchecked((uint)error.HResult).ToString("X8") + Environment.NewLine
+            );
+        }
+    }
+
+    private static int ExecuteFakeParser()
+    {
+        ProcessStartInfo startInfo = new ProcessStartInfo();
+        startInfo.FileName = Environment.GetEnvironmentVariable("SHOW_TEST_REAL_NODE");
+        startInfo.UseShellExecute = false;
+        startInfo.CreateNoWindow = true;
+        startInfo.RedirectStandardOutput = true;
+        startInfo.RedirectStandardError = true;
+        startInfo.ArgumentList.Add(Environment.GetEnvironmentVariable("SHOW_TEST_PARSER_IMPLEMENTATION"));
+        using Process parser = Process.Start(startInfo);
+        if (parser == null) return 93;
+        if (!parser.WaitForExit(5000)) {
+            parser.Kill(true);
+            parser.WaitForExit();
+            return 93;
+        }
+        string stdout = parser.StandardOutput.ReadToEnd();
+        string stderr = parser.StandardError.ReadToEnd();
+        return parser.ExitCode == 0 && stdout.Length == 0 && stderr.Length == 0 ? 0 : 93;
+    }
+
     public static int Main(string[] arguments)
     {
         if (arguments.Length != 1) return 91;
         if (Path.GetFileName(arguments[0]).Equals("verify-electron-module-graph.mjs", StringComparison.Ordinal)) {
+            AttemptParserMutation();
+            int parserExit = ExecuteFakeParser();
+            if (parserExit != 0) return parserExit;
             string root = Environment.CurrentDirectory;
             string[] relativePaths = new[] {
                 "apps/controller/dist/src/electron-main.js",
@@ -205,6 +252,8 @@ interface LauncherFixture {
   leaseMutationLog: string;
   inputMutationLog: string;
   launchMutationLog: string;
+  parserMutationLog: string;
+  parserExecutionLog: string;
   terminalMarker: string;
   leasePath: string;
   evidencePath: string;
@@ -215,6 +264,7 @@ interface LauncherFixture {
   showAdapterEntry: string;
   transitiveModule: string;
   graphVerifier: string;
+  parserImplementation: string;
   verifyRuntime: string;
   closeHelper: string;
   showConfig: string;
@@ -260,7 +310,9 @@ interface RunOptions {
     | "graph-verifier"
     | "runtime-verifier"
     | "close-helper"
-    | "runtime-core";
+    | "runtime-core"
+    | "typescript-parser";
+  parserMutation?: "none" | "attempt-before-graph-verifier";
   graphOutput?: string;
   graphMutation?: "none" | "same-size-after-output";
   nodeVersion?: string;
@@ -853,6 +905,8 @@ function makeLauncherFixture(): LauncherFixture {
   const leaseMutationLog = join(root, "lease-mutation.log");
   const inputMutationLog = join(root, "input-mutation.log");
   const launchMutationLog = join(root, "launch-mutation.log");
+  const parserMutationLog = join(root, "parser-mutation.log");
+  const parserExecutionLog = join(root, "parser-execution.log");
   const terminalMarker = win32.join(externalRoot, "controller-terminal.json");
   const leasePath = win32.join(externalRoot, "run-lease.json");
   const evidencePath = win32.join(externalRoot, "show-run.json");
@@ -883,6 +937,13 @@ function makeLauncherFixture(): LauncherFixture {
     "runtime-adapter-common.js",
   );
   const graphVerifier = join(root, "scripts", "verify-electron-module-graph.mjs");
+  const parserImplementation = join(
+    root,
+    "node_modules",
+    "typescript",
+    "lib",
+    "typescript.js",
+  );
   const verifyRuntime = join(root, "scripts", "verify-runtime.ps1");
   const closeHelper = join(root, "scripts", "close-janvim-window.ps1");
   const checkedInMap = join(root, "show", "display-map.json");
@@ -914,6 +975,16 @@ function makeLauncherFixture(): LauncherFixture {
   copyFixtureFile("runtime/user-root/plugin-lab/config/init.lua", root);
   const artifactLock = copyFixtureFile("janvim-artifact.lock.json", root);
   copyFixtureFile("scripts/verify-electron-module-graph.mjs", root);
+  writeText(
+    parserImplementation,
+    [
+      'const { appendFileSync } = require("node:fs");',
+      'appendFileSync(process.env.SHOW_TEST_PARSER_EXECUTION_LOG, "original\\n");',
+      'appendFileSync(process.env.SHOW_TEST_SEQUENCE_LOG, "parser-executed:original\\n");',
+      'module.exports = Object.freeze({ fixtureIdentity: "original" });',
+      "",
+    ].join("\n"),
+  );
   const fixtureLock = JSON.parse(
     readFileSync(artifactLock, "utf8"),
   ) as Record<string, unknown>;
@@ -1019,6 +1090,8 @@ function makeLauncherFixture(): LauncherFixture {
     leaseMutationLog,
     inputMutationLog,
     launchMutationLog,
+    parserMutationLog,
+    parserExecutionLog,
     terminalMarker,
     leasePath,
     evidencePath,
@@ -1029,6 +1102,7 @@ function makeLauncherFixture(): LauncherFixture {
     showAdapterEntry,
     transitiveModule,
     graphVerifier,
+    parserImplementation,
     verifyRuntime,
     closeHelper,
     showConfig,
@@ -1096,6 +1170,7 @@ function runLauncher(
     "runtime-verifier": fixture.verifyRuntime,
     "close-helper": fixture.closeHelper,
     "runtime-core": fixture.janvimExecutable,
+    "typescript-parser": fixture.parserImplementation,
   }[launchMutation];
   const graphOutputOverride = join(fixture.root, "graph-output-override.json");
   if (options.graphOutput !== undefined) {
@@ -1133,6 +1208,11 @@ function runLauncher(
           options.graphOutput === undefined ? "" : graphOutputOverride,
         SHOW_TEST_GRAPH_MUTATION: options.graphMutation ?? "none",
         SHOW_TEST_GRAPH_MUTATION_TARGET: fixture.transitiveModule,
+        SHOW_TEST_PARSER_MUTATION: options.parserMutation ?? "none",
+        SHOW_TEST_PARSER_IMPLEMENTATION: fixture.parserImplementation,
+        SHOW_TEST_PARSER_MUTATION_LOG: fixture.parserMutationLog,
+        SHOW_TEST_PARSER_EXECUTION_LOG: fixture.parserExecutionLog,
+        SHOW_TEST_REAL_NODE: process.execPath,
         SHOW_TEST_CONTROLLER_EXIT: String(options.controllerExit ?? 9),
         SHOW_TEST_CONTROLLER_OUTPUT_BYTES: String(
           options.controllerOutputBytes ?? 0,
@@ -1703,6 +1783,44 @@ describe("offline show launcher and external watchdog", () => {
       );
       expect(sequence.indexOf("electron")).toBeGreaterThan(sequence.indexOf("verify"));
       expect(sequence).not.toContain("electron-wrapper");
+    } finally {
+      fixture.cleanup();
+    }
+  }, 15_000);
+
+  it("claims the TypeScript parser before graph verification executes its bytes", () => {
+    const fixture = makeLauncherFixture();
+    const originalParserSha256 = sha256(fixture.parserImplementation);
+    try {
+      const result = runLauncher(
+        fixture,
+        launcherArguments(fixture, "ValidateOnly"),
+        {
+          behavior: "matching-success",
+          parserMutation: "attempt-before-graph-verifier",
+        },
+      );
+      const mutationDiagnostic = existsSync(fixture.parserMutationLog)
+        ? readFileSync(fixture.parserMutationLog, "utf8").trim()
+        : "parser-mutation-log-missing";
+      const parserExecutions = existsSync(fixture.parserExecutionLog)
+        ? readFileSync(fixture.parserExecutionLog, "utf8")
+          .trim()
+          .split(/\r?\n/u)
+          .filter(Boolean)
+        : [];
+      const sequence = existsSync(fixture.sequenceLog)
+        ? readFileSync(fixture.sequenceLog, "utf8").trim().split(/\r?\n/u)
+        : [];
+
+      expect.soft(result.status, output(result)).toBe(0);
+      expect.soft(mutationDiagnostic).toMatch(/^blocked:800700(?:05|20)$/u);
+      expect.soft(sha256(fixture.parserImplementation)).toBe(originalParserSha256);
+      expect.soft(parserExecutions).toEqual(["original"]);
+      expect.soft(sequence).not.toContain("parser-executed:modified");
+      expect.soft(sequence.indexOf("graph-verify")).toBeGreaterThan(
+        sequence.indexOf("parser-executed:original"),
+      );
     } finally {
       fixture.cleanup();
     }
@@ -2328,6 +2446,7 @@ describe("offline show launcher and external watchdog", () => {
     ["electron-main.js", "electron-main", (fixture: LauncherFixture) => fixture.compiledEntry],
     ["transitive module", "transitive-module", (fixture: LauncherFixture) => fixture.transitiveModule],
     ["graph verifier", "graph-verifier", (fixture: LauncherFixture) => fixture.graphVerifier],
+    ["TypeScript parser", "typescript-parser", (fixture: LauncherFixture) => fixture.parserImplementation],
     ["runtime verifier", "runtime-verifier", (fixture: LauncherFixture) => fixture.verifyRuntime],
     ["close helper", "close-helper", (fixture: LauncherFixture) => fixture.closeHelper],
     ["JanVim core", "runtime-core", (fixture: LauncherFixture) => fixture.janvimExecutable],
@@ -2350,10 +2469,17 @@ describe("offline show launcher and external watchdog", () => {
         const mutationDiagnostic = existsSync(fixture.launchMutationLog)
           ? readFileSync(fixture.launchMutationLog, "utf8").trim()
           : "launch-mutation-log-missing";
+        const parserExecutions = existsSync(fixture.parserExecutionLog)
+          ? readFileSync(fixture.parserExecutionLog, "utf8")
+            .trim()
+            .split(/\r?\n/u)
+            .filter(Boolean)
+          : [];
         expect(result.status, `${output(result)}\n${mutationDiagnostic}`).toBe(0);
         expect(invocations(fixture)).toHaveLength(2);
         expect(mutationDiagnostic).toMatch(/^blocked:800700(?:05|20)$/u);
         expect(sha256(target)).toBe(originalSha256);
+        expect(parserExecutions).toEqual(["original"]);
       } finally {
         fixture.cleanup();
       }

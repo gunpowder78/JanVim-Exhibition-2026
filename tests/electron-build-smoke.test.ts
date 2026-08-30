@@ -51,6 +51,18 @@ function createVerifierFixture(
     join(repositoryRoot, "scripts", "verify-electron-module-graph.mjs"),
     join(scripts, "verify-electron-module-graph.mjs"),
   );
+  const parserImplementation = join(
+    root,
+    "node_modules",
+    "typescript",
+    "lib",
+    "typescript.js",
+  );
+  mkdirSync(join(parserImplementation, ".."), { recursive: true });
+  copyFileSync(
+    join(repositoryRoot, "node_modules", "typescript", "lib", "typescript.js"),
+    parserImplementation,
+  );
   const completeFiles = {
     "electron-main.js": "export const electronMain = true;\n",
     "g2-runtime-adapters.js": "export const g2 = true;\n",
@@ -175,7 +187,7 @@ describe("compiled Electron module graph", () => {
     ]);
   });
 
-  it("fails closed on an escaped bare require identifier", () => {
+  it("discovers a normalized escaped bare require identifier", () => {
     const fixture = createVerifierFixture({
       "electron-main.js": 'import "./escaped-require-parent.cjs";\n',
       "escaped-require-parent.cjs":
@@ -185,8 +197,12 @@ describe("compiled Electron module graph", () => {
 
     const result = runVerifier(fixture.root);
 
-    expect(result.status).not.toBe(0);
-    expect(result.stderr).toContain("Unsupported identifier escape");
+    expect(result.status, result.stderr).toBe(0);
+    expect(manifestPaths(result.stdout)).toEqual([
+      "apps/controller/dist/src/electron-main.js",
+      "apps/controller/dist/src/escaped-require-child.cjs",
+      "apps/controller/dist/src/escaped-require-parent.cjs",
+    ]);
   });
 
   it("ignores import-like text in comments, strings, regexes, and template raw text", () => {
@@ -269,6 +285,30 @@ describe("compiled Electron module graph", () => {
     expect(manifestPaths(result.stdout)).toEqual([
       "apps/controller/dist/src/division-child.js",
       "apps/controller/dist/src/electron-main.js",
+    ]);
+  });
+
+  it("discovers dynamic imports in class, function, and arrow expression division", () => {
+    const fixture = createVerifierFixture({
+      "electron-main.js": [
+        'void (class {} / import(".\\/class-expression-child.js") / 1);',
+        'void (function () {} / import(".\\/function-expression-child.js") / 1);',
+        'void (() => function () {} / import(".\\/arrow-expression-child.js") / 1)();',
+        "",
+      ].join("\n"),
+      "class-expression-child.js": "export const child = true;\n",
+      "function-expression-child.js": "export const child = true;\n",
+      "arrow-expression-child.js": "export const child = true;\n",
+    });
+
+    const result = runVerifier(fixture.root);
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(manifestPaths(result.stdout)).toEqual([
+      "apps/controller/dist/src/arrow-expression-child.js",
+      "apps/controller/dist/src/class-expression-child.js",
+      "apps/controller/dist/src/electron-main.js",
+      "apps/controller/dist/src/function-expression-child.js",
     ]);
   });
 

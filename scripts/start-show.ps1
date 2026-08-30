@@ -45,6 +45,7 @@ $maximumGraphModules = 256
 $maximumCompiledModuleBytes = 16777216L
 $maximumLaunchFileBytes = 268435456L
 $maximumRuntimeExecutableBytes = 268435456L
+$maximumTypeScriptParserBytes = 9144216L
 $crashWindowMilliseconds = 600000L
 $restartDelaysMilliseconds = @(1000, 2000, 4000)
 
@@ -1869,6 +1870,7 @@ $electronExecutable = Join-Path $repositoryRoot 'node_modules\electron\dist\elec
 $compiledEntry = Join-Path $controllerPackage 'dist\src\electron-main.js'
 $showAdapterEntry = Join-Path $controllerPackage 'dist\src\show-runtime-adapters.js'
 $moduleGraphVerifier = Join-Path $repositoryRoot 'scripts\verify-electron-module-graph.mjs'
+$typescriptParser = Join-Path $repositoryRoot 'node_modules\typescript\lib\typescript.js'
 $verifyRuntime = Join-Path $repositoryRoot 'scripts\verify-runtime.ps1'
 $windowCloseHelper = Join-Path $repositoryRoot 'scripts\close-janvim-window.ps1'
 $artifactLockPath = Join-Path $repositoryRoot 'janvim-artifact.lock.json'
@@ -1885,6 +1887,7 @@ foreach ($requiredFile in @(
     $compiledEntry,
     $showAdapterEntry,
     $moduleGraphVerifier,
+    $typescriptParser,
     $verifyRuntime,
     $windowCloseHelper,
     $artifactLockPath,
@@ -1909,6 +1912,10 @@ $verifierClaimSpecifications = @(
         -Path $verifyRuntime `
         -MaximumBytes 1048576L `
         -Reason 'runtime-verifier-snapshot-failed'
+    New-FrozenInputClaimSpecification `
+        -Path $typescriptParser `
+        -MaximumBytes $maximumTypeScriptParserBytes `
+        -Reason 'typescript-parser-snapshot-failed'
 )
 $frozenInputClaims = Open-FrozenInputClaims -Specifications $verifierClaimSpecifications
 try {
