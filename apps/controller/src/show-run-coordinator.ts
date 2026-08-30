@@ -474,7 +474,7 @@ export class ShowRunCoordinator {
     if (this.state === "booting") this.transition("safe-ready", reason);
     this.operatorArmed = true;
     this.sendStatus();
-    this.dependencies.log({ type: "startup-cleanup", reason });
+    this.log({ type: "startup-cleanup", reason });
     if (session !== undefined) {
       this.priorSessionSettlement = await this.cleanupHeldSession(session);
     }
@@ -1049,7 +1049,7 @@ export class ShowRunCoordinator {
     driverStopFailed: boolean;
   } {
     this.incrementGeneration();
-    this.dependencies.log({
+    this.log({
       type: "generation-invalidate",
       generationId: this.generationId,
     });
@@ -1059,7 +1059,7 @@ export class ShowRunCoordinator {
     } catch {
       driverStopFailed = true;
       bestEffortSync(() =>
-        this.dependencies.log({
+        this.log({
           type: "recovery-cleanup-failure",
           classification: "driver-stop-failed",
         }),
@@ -1472,7 +1472,7 @@ export class ShowRunCoordinator {
           this.recoveryPhaseDeadlines.delete(handle);
         } catch {
           bestEffortSync(() =>
-            this.dependencies.log({
+            this.log({
               type: "recovery-timer-clear-failed",
               phase,
             }),
@@ -1494,7 +1494,7 @@ export class ShowRunCoordinator {
           settled = true;
           abortController.abort();
           bestEffortSync(() =>
-            this.dependencies.log({
+            this.log({
               type: "recovery-phase-timeout",
               phase,
               timeoutMs: RECOVERY_PHASE_TIMEOUT_MS,
@@ -1534,7 +1534,7 @@ export class ShowRunCoordinator {
     domain: "secondary" | "janvim",
     delayMs: 1_000 | 2_000 | 4_000,
   ): Promise<boolean> {
-    this.dependencies.log({ type: "recovery-delay", domain, delayMs });
+    this.log({ type: "recovery-delay", domain, delayMs });
     return new Promise<boolean>((resolve) => {
       let handle: OneLoopTimerHandle;
       handle = this.dependencies.timers.setTimeout(() => {
@@ -1584,7 +1584,7 @@ export class ShowRunCoordinator {
     this.recoveries.push({ ...event });
     if (this.recoveries.length > MAX_RECOVERY_EVENTS) this.recoveries.shift();
     bestEffortSync(() =>
-      this.dependencies.log({
+      this.log({
         type: "recovery-outcome",
         ...event,
       }),
@@ -1778,13 +1778,13 @@ export class ShowRunCoordinator {
       this.shutdownDiagnostics.failures.push(classification);
     }
     bestEffortSync(() =>
-      this.dependencies.log({ type: "shutdown-failure", classification }),
+      this.log({ type: "shutdown-failure", classification }),
     );
   }
 
   private logShutdownPhase(phase: string): void {
     bestEffortSync(() =>
-      this.dependencies.log({ type: "shutdown-phase", phase }),
+      this.log({ type: "shutdown-phase", phase }),
     );
   }
 
@@ -1909,7 +1909,15 @@ export class ShowRunCoordinator {
       return;
     }
     this.ignoredReasonBuckets.add(reason);
-    this.dependencies.log({ type: "ignored-event", reason });
+    this.log({ type: "ignored-event", reason });
+  }
+
+  private log(event: Record<string, unknown>): void {
+    try {
+      this.dependencies.log(event);
+    } catch {
+      // Logging is diagnostic; coordinator safety remains authoritative.
+    }
   }
 
   private disposeSurfaceListeners(): void {

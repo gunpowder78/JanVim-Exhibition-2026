@@ -551,11 +551,13 @@ interface HarnessOptions {
   shutdownFailures?: Set<InjectedShutdownFailure>;
   forcedExit?: boolean;
   timerClearFailure?: boolean;
+  logger?: (event: Record<string, unknown>) => void;
 }
 
 function createHarness(options: HarnessOptions = {}) {
   const trace: string[] = [];
   const logs: Array<Record<string, unknown>> = [];
+  const logAttempts: Array<Record<string, unknown>> = [];
   const timers = new FakeTimers();
   timers.rejectTimeoutClear = options.timerClearFailure ?? false;
   const blocker = options.blockedPhase === undefined ? undefined : deferred();
@@ -697,6 +699,8 @@ function createHarness(options: HarnessOptions = {}) {
     },
     nowMs: () => timers.now,
     log: (event) => {
+      logAttempts.push(event);
+      options.logger?.(event);
       logs.push(event);
       if (event.type === "generation-invalidate") trace.push("generation-invalidate");
       if (event.type === "recovery-delay") {
@@ -713,6 +717,7 @@ function createHarness(options: HarnessOptions = {}) {
     coordinator,
     trace,
     logs,
+    logAttempts,
     timers,
     blocker,
     surfaces,
@@ -829,7 +834,126 @@ async function completeResetBoundary(
   await settle();
 }
 
+type LoggerSafetyScenario =
+  | "invalid-renderer-input"
+  | "startup-failure-cleanup"
+  | "generation-invalidation"
+  | "recovery-delay-and-outcome"
+  | "shutdown-phase-and-failure";
+
+const LOGGER_SAFETY_SCENARIOS: ReadonlyArray<{
+  name: LoggerSafetyScenario;
+  expectedLogTypes: readonly string[];
+}> = [
+  { name: "invalid-renderer-input", expectedLogTypes: ["ignored-event"] },
+  { name: "startup-failure-cleanup", expectedLogTypes: ["startup-cleanup"] },
+  {
+    name: "generation-invalidation",
+    expectedLogTypes: ["generation-invalidate"],
+  },
+  {
+    name: "recovery-delay-and-outcome",
+    expectedLogTypes: ["recovery-delay", "recovery-outcome"],
+  },
+  {
+    name: "shutdown-phase-and-failure",
+    expectedLogTypes: ["shutdown-phase", "shutdown-failure"],
+  },
+];
+
+function safetyCleanupTrace(trace: readonly string[]): string[] {
+  return trace.filter(
+    (entry) =>
+      entry !== "generation-invalidate" &&
+      !entry.startsWith("recovery-delay:") &&
+      !entry.startsWith("shutdown-phase:"),
+  );
+}
+
+async function runLoggerSafetyScenario(
+  scenario: LoggerSafetyScenario,
+  logger: (event: Record<string, unknown>) => void,
+) {
+  const common = { mode: "Show" as const, logger };
+  let harness: ReturnType<typeof createHarness>;
+
+  switch (scenario) {
+    case "invalid-renderer-input":
+      harness = createHarness(common);
+      await bootReady(harness);
+      expect(harness.coordinator.handleRendererEvent({ type: "invalid" })).toBe(false);
+      await harness.coordinator.requestEmergencyStop("sigint");
+      break;
+    case "startup-failure-cleanup":
+      harness = createHarness({ ...common, prepareHash: WRONG_POEM_SHA256 });
+      await expect(harness.coordinator.boot()).resolves.toEqual({
+        ready: false,
+        reason: "original-poem-hash-mismatch",
+      });
+      expect(harness.coordinator.handleRendererEvent(stopEvent())).toBe(true);
+      await harness.coordinator.completion;
+      break;
+    case "generation-invalidation":
+      harness = createHarness(common);
+      await startRunning(harness);
+      harness.sessions[0]!.emitFault("janvim-exited");
+      await settle();
+      await harness.coordinator.requestEmergencyStop("sigint");
+      break;
+    case "recovery-delay-and-outcome":
+      harness = createHarness(common);
+      await startRunning(harness);
+      harness.sessions[0]!.emitFault("janvim-exited");
+      await settle();
+      await harness.timers.fireTimeout(1_000);
+      await settle();
+      await harness.coordinator.requestEmergencyStop("sigint");
+      break;
+    case "shutdown-phase-and-failure":
+      harness = createHarness({
+        ...common,
+        shutdownFailures: new Set(["agent-shutdown"]),
+      });
+      await startRunning(harness);
+      await harness.coordinator.requestEmergencyStop("sigint");
+      break;
+  }
+
+  return {
+    result: await harness.coordinator.completion,
+    diagnostics: harness.coordinator.diagnostics(),
+    safetyCleanupTrace: safetyCleanupTrace(harness.trace),
+    logAttempts: harness.logAttempts,
+  };
+}
+
 describe("show run coordinator", () => {
+  it.each(LOGGER_SAFETY_SCENARIOS)(
+    "keeps $name safety identical when diagnostics throw",
+    async ({ name, expectedLogTypes }) => {
+      const baseline = await runLoggerSafetyScenario(name, () => undefined);
+      const throwing = await runLoggerSafetyScenario(name, () => {
+        throw new Error("fixture logger failure");
+      });
+
+      expect(baseline.logAttempts.map((event) => event.type)).toEqual(
+        expect.arrayContaining(expectedLogTypes),
+      );
+      expect(throwing.logAttempts.length).toBeGreaterThan(0);
+      expect(throwing.result).toEqual(baseline.result);
+      expect(throwing.diagnostics).toEqual(baseline.diagnostics);
+      expect(throwing.diagnostics.state).toBe(baseline.diagnostics.state);
+      expect(throwing.diagnostics.generationId).toBe(
+        baseline.diagnostics.generationId,
+      );
+      expect(throwing.safetyCleanupTrace).toEqual(baseline.safetyCleanupTrace);
+      expect(throwing.diagnostics.counts.timers).toBe(0);
+      expect(throwing.diagnostics.transitions.length).toBeLessThanOrEqual(32);
+      expect(throwing.diagnostics.recoveries.length).toBeLessThanOrEqual(32);
+      expect(throwing.diagnostics.shutdown.failures.length).toBeLessThanOrEqual(16);
+    },
+  );
+
   it("records reset primary dispatch before ACK completion and secondary reset without a duplicate primary endpoint", async () => {
     const harness = createHarness();
     await startRunning(harness);
