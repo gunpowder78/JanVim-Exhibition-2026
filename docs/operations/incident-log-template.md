@@ -23,7 +23,7 @@ Use this template for one controller incident. This is a strict operational reco
 - [ ] SHA-256:
 - [ ] Follow-up owner:
 
-Secrets are not recorded. Poem text is not recorded. User config paths are not recorded. Arbitrary shell commands are not recorded. Do not add free-form fields for credentials, hidden session material, arbitrary commands, global-input mechanisms, window-title discovery, or source-repository changes.
+Secrets are not recorded. Poem text is not recorded. User config paths are not recorded. Arbitrary shell commands are not recorded. Bridge token is not recorded. Arbitrary command is not recorded. Keyboard injection is not recorded. Title matching is not recorded. User config path is not recorded. Source-repository mutation is not recorded.
 
 ## Bounded Event Table
 
