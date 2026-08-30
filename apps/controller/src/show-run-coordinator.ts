@@ -1725,8 +1725,15 @@ export class ShowRunCoordinator {
         }
       }
     } catch {
-      if (session !== undefined) {
-        this.priorSessionSettlement = await this.cleanupHeldSession(session);
+      if (
+        session !== undefined &&
+        this.session === session &&
+        this.canContinueRecovery(generationId, "black-recovering")
+      ) {
+        const cleanup = await this.cleanupHeldSession(session);
+        if (this.canContinueRecovery(generationId, "black-recovering")) {
+          this.priorSessionSettlement = cleanup;
+        }
       }
       if (this.canContinueRecovery(generationId, "black-recovering")) {
         this.recordRecovery({
@@ -1819,8 +1826,15 @@ export class ShowRunCoordinator {
         this.sendStatus();
       }
     } catch {
-      if (session !== undefined) {
-        this.priorSessionSettlement = await this.cleanupHeldSession(session);
+      if (
+        session !== undefined &&
+        this.session === session &&
+        this.canContinueRecovery(generationId, "safe-ready")
+      ) {
+        const cleanup = await this.cleanupHeldSession(session);
+        if (this.canContinueRecovery(generationId, "safe-ready")) {
+          this.priorSessionSettlement = cleanup;
+        }
       }
       if (this.canContinueRecovery(generationId, "safe-ready")) {
         this.stateReason = "operator-restart-failed";
@@ -2324,6 +2338,8 @@ function createGuardedAbortController(): {
     wrapped: EventListener;
     capture: boolean;
     once: boolean;
+    externalSignal?: AbortSignal;
+    externalAbortListener?: EventListener;
   };
   const registrations: Registration[] = [];
   let exposedSignal!: AbortSignal;
@@ -2337,6 +2353,15 @@ function createGuardedAbortController(): {
   const removeRegistration = (registration: Registration): void => {
     const index = registrations.indexOf(registration);
     if (index >= 0) registrations.splice(index, 1);
+    if (
+      registration.externalSignal !== undefined &&
+      registration.externalAbortListener !== undefined
+    ) {
+      registration.externalSignal.removeEventListener(
+        "abort",
+        registration.externalAbortListener,
+      );
+    }
     controller.signal.removeEventListener(
       "abort",
       registration.wrapped,
@@ -2348,7 +2373,15 @@ function createGuardedAbortController(): {
     listener: EventListenerOrEventListenerObject | null,
     options?: boolean | AddEventListenerOptions,
   ): void => {
-    if (listener === null || controller.signal.aborted) return;
+    const externalSignal =
+      typeof options === "object" ? options.signal : undefined;
+    if (
+      listener === null ||
+      controller.signal.aborted ||
+      externalSignal?.aborted === true
+    ) {
+      return;
+    }
     const capture = captureOf(options);
     if (
       registrations.some(
@@ -2370,17 +2403,45 @@ function createGuardedAbortController(): {
     registration.wrapped = (event) => {
       if (registration.once) removeRegistration(registration);
       try {
+        let result: unknown;
         if (typeof listener === "function") {
-          listener.call(exposedSignal, event);
+          result = (
+            listener as unknown as (
+              this: AbortSignal,
+              event: Event,
+            ) => unknown
+          ).call(exposedSignal, event);
         } else {
-          listener.handleEvent(event);
+          result = (
+            listener.handleEvent as unknown as (event: Event) => unknown
+          )(event);
         }
+        absorbAbortListenerResult(result);
       } catch {
         // One dependency listener cannot escape the bounded phase or skip peers.
       }
     };
     registrations.push(registration);
-    controller.signal.addEventListener("abort", registration.wrapped, options);
+    try {
+      if (externalSignal !== undefined && externalSignal !== exposedSignal) {
+        const externalAbortListener = (): void => {
+          removeRegistration(registration);
+        };
+        registration.externalSignal = externalSignal;
+        registration.externalAbortListener = externalAbortListener;
+        externalSignal.addEventListener("abort", externalAbortListener, {
+          once: true,
+        });
+        if (externalSignal.aborted) {
+          removeRegistration(registration);
+          return;
+        }
+      }
+      controller.signal.addEventListener("abort", registration.wrapped, options);
+    } catch (error) {
+      removeRegistration(registration);
+      throw error;
+    }
   };
 
   const removeAbortListener = (
@@ -2434,7 +2495,9 @@ function createGuardedAbortController(): {
           ? null
           : (event) => {
               try {
-                onabort?.call(exposedSignal, event);
+                absorbAbortListenerResult(
+                  onabort?.call(exposedSignal, event),
+                );
               } catch {
                 // Property listeners receive the same nonthrowing isolation.
               }
@@ -2461,6 +2524,10 @@ function createGuardedAbortController(): {
     signal: exposedSignal,
     abort: (reason?: unknown) => controller.abort(reason),
   };
+}
+
+function absorbAbortListenerResult(result: unknown): void {
+  void Promise.resolve(result).catch(() => undefined);
 }
 
 function cueReachesSecondary(cue: Cue): boolean {
