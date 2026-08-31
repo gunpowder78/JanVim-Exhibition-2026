@@ -265,14 +265,15 @@ Alt+F4 is only the frozen G2 manual acceptance flow, never a normal Task 9 stop 
 ## Secondary Fault
 
 Precondition -> Show is running; the observer shell contains the exact active `$repo`, `$runId`,
-and `$root`; the fixed controller log has the exact current secondary renderer PID; an operator is
-watching the primary and secondary surfaces. Do not run this block during development or
-automated tests.
+and `$root`; the fixed controller log has the exact current secondary renderer PID and UTC start
+identity; an operator is watching the primary and secondary surfaces. Do not run this block during
+development or automated tests.
 
 Exact command/action -> read the strict current token-free lease and the four fixed controller log
 slots with finite bounds, accept exactly one current `secondary-opened` identity, hold exact
-process handles, and perform the approved deliberate renderer fault against that exact identity
-by stopping only that renderer PID:
+process handles, compare the renderer PID and StartTime immediately before the fault, and perform
+the approved deliberate renderer fault against that exact identity by stopping only that renderer
+PID:
 
 ```powershell
 # block: fault-secondary
@@ -431,9 +432,29 @@ function Complete-StrictControllerLogRecord {
     if ($record.type -cne 'secondary-opened') {
         return
     }
-    Assert-ExactPropertySet -InputObject $record -ExpectedNames @(
+    $actualNames = @($record.PSObject.Properties.Name)
+    $currentNames = @(
+        'type', 'runId', 'controllerRunId', 'generationId', 'rendererPid',
+        'rendererStartedAtUtc'
+    )
+    $legacyNames = @(
         'type', 'runId', 'controllerRunId', 'generationId', 'rendererPid'
     )
+    $isCurrentShape = $actualNames.Count -eq $currentNames.Count
+    foreach ($name in $currentNames) {
+        if ($name -cnotin $actualNames) {
+            $isCurrentShape = $false
+        }
+    }
+    $isLegacyShape = $actualNames.Count -eq $legacyNames.Count
+    foreach ($name in $legacyNames) {
+        if ($name -cnotin $actualNames) {
+            $isLegacyShape = $false
+        }
+    }
+    if (-not $isCurrentShape -and -not $isLegacyShape) {
+        throw 'json-property-count-invalid'
+    }
     if (
         $record.runId -isnot [string] -or
         $record.runId -cnotmatch '^[A-Za-z0-9._-]{1,64}$' -or
@@ -450,11 +471,18 @@ function Complete-StrictControllerLogRecord {
     ) {
         throw 'secondary-opened-scalar-invalid'
     }
-    if (
+    $matchesCurrent =
         $record.runId -ceq $RunId -and
         $record.controllerRunId -ceq $ControllerRunId -and
         $record.generationId -eq $GenerationId
-    ) {
+    if ($isLegacyShape) {
+        if ($matchesCurrent) {
+            throw 'current-secondary-start-identity-missing'
+        }
+        return
+    }
+    [void](Convert-StrictUtcInstant -Value $record.rendererStartedAtUtc)
+    if ($matchesCurrent) {
         $State.MatchingCount += 1
         if ($State.MatchingCount -gt 1) {
             throw 'current-secondary-identity-not-unique'
@@ -650,6 +678,13 @@ try {
     $rendererPid = [int]$logState.MatchingEvent.rendererPid
     $rendererProcess = Get-Process -Id $rendererPid -ErrorAction Stop
     [void]$rendererProcess.Handle
+    $expectedRendererStart = Convert-StrictUtcInstant -Value (
+        $logState.MatchingEvent.rendererStartedAtUtc
+    )
+    $actualRendererStart = [DateTimeOffset]$rendererProcess.StartTime.ToUniversalTime()
+    if ($actualRendererStart.Ticks -ne $expectedRendererStart.Ticks) {
+        throw 'current-secondary-start-identity-mismatch'
+    }
     Stop-Process -Id $rendererPid
 }
 finally {
@@ -664,7 +699,7 @@ Visible result -> the secondary enters safe-cruise, is replaced at black, the he
 resets to the original poem, and one fresh loop starts; no old cue is replayed.
 
 Machine evidence -> a secondary recovery record includes the exact prior generation, one
-1/2/4-second bounded delay, outcome, renderer PID, and fresh loop ID.
+1/2/4-second bounded delay, outcome, renderer PID and start identity, and fresh loop ID.
 
 Bounded failure branch -> any missing, malformed, stale, duplicate, oversized, or mismatched
 identity aborts before the stop. After the fourth real failure the controller is safe-ready; Stop

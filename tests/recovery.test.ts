@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, win32 } from "node:path";
 import { PassThrough } from "node:stream";
 
@@ -1524,6 +1525,110 @@ function assertRuntimeLogBounds(storage: MemoryLogStorage): void {
   expect(entries.length).toBeLessThanOrEqual(16);
 }
 
+interface SecondaryFaultContractResult {
+  readonly ok: boolean;
+  readonly error: string | null;
+  readonly stoppedPids: readonly number[];
+}
+
+function runSecondaryFaultContract(
+  records: readonly Record<string, unknown>[],
+  actualRendererStartedAtUtc = "2026-08-30T00:00:00.250Z",
+): SecondaryFaultContractResult {
+  const runbook = readFileSync(runbookPath, "utf8");
+  const secondary = powershellBlocks(
+    markdownSections(runbook).get("Secondary Fault")!,
+  ).get("fault-secondary")!;
+  const root = mkdtempSync(join(tmpdir(), "janvim-r3-secondary-fault-"));
+  const lease = {
+    schema: 1,
+    runId: "show-001",
+    controllerRunId: "controller-001",
+    generationId: 1,
+    controller: {
+      pid: 8001,
+      startedAtUtc: "2026-08-30T00:00:00.000Z",
+    },
+    janvim: {
+      pid: 8003,
+      startedAtUtc: "2026-08-30T00:00:00.500Z",
+      hwnd: "0x0000000000001F43",
+      executableRelativePath: "janvim-core.exe",
+      executableSha256:
+        "224b3457d89fbc6cf946359683632f29f9262bae08b6f0d2e3043a3a7a6d83b3",
+    },
+  };
+  writeFileSync(join(root, "run-lease.json"), JSON.stringify(lease), "utf8");
+  writeFileSync(
+    join(root, "show-run.log.controller"),
+    records.map((record) => JSON.stringify(record)).join("\n") + "\n",
+    "utf8",
+  );
+
+  const wrapper = `
+$root = $env:JANVIM_R3_ROOT
+$runId = 'show-001'
+$script:StoppedPids = [Collections.Generic.List[int]]::new()
+function global:Get-Process {
+    param([int]$Id, [object]$ErrorAction)
+    $startedAtUtc = if ($Id -eq 8001) {
+        '2026-08-30T00:00:00.000Z'
+    }
+    else {
+        $env:JANVIM_R3_RENDERER_STARTED_AT_UTC
+    }
+    $candidate = [pscustomobject]@{
+        Handle = [IntPtr]1
+        StartTime = [DateTimeOffset]::Parse($startedAtUtc).UtcDateTime
+    }
+    $candidate | Add-Member -MemberType ScriptMethod -Name Dispose -Value { }
+    return $candidate
+}
+function global:Stop-Process {
+    param([int]$Id)
+    [void]$script:StoppedPids.Add($Id)
+}
+try {
+${secondary}
+    [ordered]@{ok=$true;error=$null;stoppedPids=@($script:StoppedPids)} |
+        ConvertTo-Json -Compress
+}
+catch {
+    [ordered]@{ok=$false;error=$_.Exception.Message;stoppedPids=@($script:StoppedPids)} |
+        ConvertTo-Json -Compress
+}
+`;
+
+  try {
+    const result = spawnSync(
+      "pwsh",
+      ["-NoProfile", "-NonInteractive", "-Command", wrapper],
+      {
+        cwd: repositoryRoot,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          JANVIM_R3_ROOT: root,
+          JANVIM_R3_RENDERER_STARTED_AT_UTC: actualRendererStartedAtUtc,
+        },
+        maxBuffer: 1024 * 1024,
+        timeout: 10_000,
+        windowsHide: true,
+      },
+    );
+    if (result.status !== 0) {
+      throw new Error(`secondary fault contract failed: ${result.stderr}`);
+    }
+    const output = result.stdout.trim();
+    if (output.length === 0) {
+      throw new Error("secondary fault contract returned no result");
+    }
+    return JSON.parse(output) as SecondaryFaultContractResult;
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
 describe("Task 9 recovery operations", () => {
   it("requires bounded, observable operator documents", () => {
     const runbook = readFileSync(runbookPath, "utf8");
@@ -1864,6 +1969,77 @@ describe("Task 9 recovery operations", () => {
     expect(
       secondary.indexOf("Stop-Process -Id $rendererPid"),
     ).toBeGreaterThan(readerEnd);
+  });
+
+  it("requires exact current renderer start identity while tolerating valid historical legacy", () => {
+    const current = {
+      type: "secondary-opened",
+      runId: "show-001",
+      controllerRunId: "controller-001",
+      generationId: 1,
+      rendererPid: 8002,
+      rendererStartedAtUtc: "2026-08-30T00:00:00.250Z",
+    };
+    const currentLegacy = {
+      type: "secondary-opened",
+      runId: "show-001",
+      controllerRunId: "controller-001",
+      generationId: 1,
+      rendererPid: 8002,
+    };
+    const historicalLegacy = {
+      type: "secondary-opened",
+      runId: "show-000",
+      controllerRunId: "controller-000",
+      generationId: 7,
+      rendererPid: 7002,
+    };
+
+    expect(runSecondaryFaultContract([historicalLegacy, current])).toEqual({
+      ok: true,
+      error: null,
+      stoppedPids: [8002],
+    });
+
+    const failures = [
+      {
+        name: "matching legacy",
+        records: [currentLegacy],
+        actualStartedAtUtc: "2026-08-30T00:00:00.250Z",
+        error: "current-secondary-start-identity-missing",
+      },
+      {
+        name: "start mismatch",
+        records: [current],
+        actualStartedAtUtc: "2026-08-30T00:00:00.251Z",
+        error: "current-secondary-start-identity-mismatch",
+      },
+      {
+        name: "malformed current record",
+        records: [{ ...current, unexpected: true }],
+        actualStartedAtUtc: "2026-08-30T00:00:00.250Z",
+        error: "json-property-count-invalid",
+      },
+      {
+        name: "duplicate current record",
+        records: [current, current],
+        actualStartedAtUtc: "2026-08-30T00:00:00.250Z",
+        error: "current-secondary-identity-not-unique",
+      },
+    ];
+    for (const failure of failures) {
+      expect(
+        runSecondaryFaultContract(
+          failure.records,
+          failure.actualStartedAtUtc,
+        ),
+        failure.name,
+      ).toEqual({
+        ok: false,
+        error: failure.error,
+        stoppedPids: [],
+      });
+    }
   });
 
   it("mirrors safe lease, event, token, and complete frozen artifact-lock schemas", () => {
@@ -2222,6 +2398,9 @@ describe("Task 9 recovery operations", () => {
       "$logState.MatchingCount -ne 1",
       "Get-Process -Id $rendererPid -ErrorAction Stop",
       "$rendererProcess.Handle",
+      "$expectedRendererStart",
+      "$actualRendererStart",
+      "current-secondary-start-identity-mismatch",
       "Stop-Process -Id $rendererPid",
     ]);
     expectTextOrder(blocks.get("JanVim Fault:fault-janvim")!, [
@@ -2271,9 +2450,11 @@ describe("Task 9 recovery operations", () => {
       "controllerRunId",
       "generationId",
       "rendererPid",
+      "rendererStartedAtUtc",
       "Assert-ExactPropertySet",
       "Assert-NoDuplicateJsonProperties",
       "Get-Process -Id $rendererPid",
+      "StartTime",
       "FileShare]::Read",
       "$maximumControllerLogBytes = 8 * 1024 * 1024",
       "$maximumControllerLogRecords = 8192",

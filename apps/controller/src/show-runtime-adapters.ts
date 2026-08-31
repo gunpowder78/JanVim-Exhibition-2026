@@ -1046,6 +1046,14 @@ function normalizeShowDisplays(values: readonly unknown[]): ShowRuntimeDisplay[]
 
 type ShowWebContentsAdapter = G2BrowserWindowAdapter["webContents"] & {
   getOSProcessId(): number;
+  on(
+    event: "render-process-gone",
+    listener: (event: unknown, details: unknown) => void,
+  ): void;
+  removeListener(
+    event: "render-process-gone",
+    listener: (event: unknown, details: unknown) => void,
+  ): void;
 };
 
 type ShowBrowserWindowAdapter = Omit<
@@ -1308,6 +1316,16 @@ async function openShowSecondary(input: {
   const eventListeners = new Set<(event: RendererToControllerEvent) => void>();
   const destroyedListeners = new Set<() => void>();
   let intentionalClose = false;
+  let rendererLost = false;
+  const takeDestroyedListeners = (): readonly (() => void)[] => {
+    if (intentionalClose || rendererLost) return [];
+    rendererLost = true;
+    return [...destroyedListeners];
+  };
+  const onRendererGone = (): void => {
+    for (const listener of takeDestroyedListeners()) listener();
+  };
+  window.webContents.on("render-process-gone", onRendererGone);
   const onWindowClose = (): void => {
     if (!intentionalClose) input.lifecycle.notifyWindowClose();
   };
@@ -1333,6 +1351,7 @@ async function openShowSecondary(input: {
     let hasCleanupError = false;
     const cleanupActions: readonly (() => void)[] = [
       () => closeEvents.removeListener("close", onWindowClose),
+      () => window.webContents.removeListener("render-process-gone", onRendererGone),
       disposeIpc,
       disposeGuards,
       () => {
@@ -1356,7 +1375,7 @@ async function openShowSecondary(input: {
     if (hasCleanupError) throw cleanupError;
   };
   const onClosed = (): void => {
-    const listeners = intentionalClose ? [] : [...destroyedListeners];
+    const listeners = takeDestroyedListeners();
     try {
       dispose();
     } catch {
@@ -1366,9 +1385,29 @@ async function openShowSecondary(input: {
   };
   window.once("closed", onClosed);
 
+  let rendererPid: number;
+  let rendererStartedAtUtc: string;
   try {
     await input.host.runWithDeadline(15_000, () => window.loadURL(input.entryUrl));
     if (input.signal.aborted) throw new Error("secondary-open-aborted");
+    rendererPid = window.webContents.getOSProcessId();
+    if (!Number.isSafeInteger(rendererPid) || rendererPid <= 0) {
+      throw new Error("secondary-renderer-pid-invalid");
+    }
+    const inspectedStartedAtUtc = await input.host.runWithDeadline(2_000, () =>
+      input.host.inspectProcessStartedAtUtc(rendererPid),
+    );
+    rendererStartedAtUtc = processIdentitySchema.parse({
+      schema: 1,
+      startedAtUtc: inspectedStartedAtUtc,
+    }).startedAtUtc;
+    if (input.signal.aborted) throw new Error("secondary-open-aborted");
+    if (rendererLost || window.isDestroyed()) {
+      throw new Error("secondary-renderer-lost-during-identity-inspection");
+    }
+    if (window.webContents.getOSProcessId() !== rendererPid) {
+      throw new Error("secondary-renderer-pid-changed-during-identity-inspection");
+    }
   } catch (error) {
     try {
       dispose();
@@ -1379,17 +1418,13 @@ async function openShowSecondary(input: {
     throw error;
   }
 
-  const rendererPid = window.webContents.getOSProcessId();
-  if (!Number.isSafeInteger(rendererPid) || rendererPid <= 0) {
-    if (!window.isDestroyed()) window.destroy();
-    throw new Error("secondary-renderer-pid-invalid");
-  }
   input.logger.writeJson("controller", {
     type: "secondary-opened",
     runId: input.command.runId,
     controllerRunId: input.command.controllerRunId,
     generationId: input.generationId,
     rendererPid,
+    rendererStartedAtUtc,
   });
 
   return {

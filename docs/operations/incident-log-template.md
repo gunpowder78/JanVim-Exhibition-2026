@@ -12,7 +12,7 @@ Use this template for one controller incident. This is a strict operational reco
 - [ ] Monotonic timestamp:
 - [ ] Wall timestamp:
 - [ ] Mode/state:
-- [ ] Exact process identities: controller PID; secondary renderer PID; JanVim PID, HWND, start identity, executable SHA-256.
+- [ ] Exact process identities: controller PID and start identity; secondary renderer PID and start identity; JanVim PID, HWND, start identity, executable SHA-256.
 - [ ] Fault/retry/domain:
 - [ ] Offline snapshot: external default routes, connected profiles, offline result.
 - [ ] Artifact/content/display hashes: artifact lock, core, poem, manifest, display map, and display geometry hashes.

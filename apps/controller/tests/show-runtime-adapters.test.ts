@@ -558,6 +558,13 @@ function createStartupHarness(options: {
   missingChildStream?: "stdout" | "stderr";
   deferLaunchArtifactVerification?: boolean;
   deferInitialIdentityInspection?: boolean;
+  deferRendererIdentityInspection?: boolean;
+  rendererIdentityFailure?:
+    | "reject"
+    | "timeout"
+    | "pid-change"
+    | "renderer-loss";
+  rendererStartedAtUtc?: string;
   deferLoopPrepare?: boolean;
   deferredHostOperation?: {
     name: DeferredHostOperation;
@@ -646,6 +653,10 @@ function createStartupHarness(options: {
   let releaseInitialIdentityInspection!: () => void;
   const initialIdentityInspectionGate = new Promise<void>((resolve) => {
     releaseInitialIdentityInspection = resolve;
+  });
+  let releaseRendererIdentityInspection!: () => void;
+  const rendererIdentityInspectionGate = new Promise<void>((resolve) => {
+    releaseRendererIdentityInspection = resolve;
   });
   const loopPrepareGate = publicationGate();
   const activeChildPids = new Set<number>();
@@ -743,10 +754,12 @@ function createStartupHarness(options: {
   let spawnCount = 0;
   let timeoutFiveSecondOperations = false;
   const rejectedEditorCueIds = new Set<string>();
+  const pendingRendererIdentityPids = new Set<number>();
 
   class FakeWebContents extends EventEmitter {
-    public constructor(private readonly rendererPid: number) {
+    public constructor(private rendererPid: number) {
       super();
+      pendingRendererIdentityPids.add(rendererPid);
     }
 
     public readonly session = {
@@ -806,6 +819,10 @@ function createStartupHarness(options: {
       },
     );
     public readonly getOSProcessId = vi.fn(() => this.rendererPid);
+
+    public replaceRendererPid(pid: number): void {
+      this.rendererPid = pid;
+    }
 
     public override removeListener(
       eventName: string | symbol,
@@ -1069,6 +1086,31 @@ function createStartupHarness(options: {
       return spawnedChild;
     },
     inspectProcessStartedAtUtc: async (pid: number) => {
+      const renderer = pendingRendererIdentityPids.has(pid)
+        ? webContentsHistory.find(
+            (candidate) => candidate.getOSProcessId() === pid,
+          )
+        : undefined;
+      if (renderer !== undefined) {
+        pendingRendererIdentityPids.delete(pid);
+        trace.push("inspect-renderer-start");
+        if (options.deferRendererIdentityInspection === true) {
+          await rendererIdentityInspectionGate;
+        }
+        if (options.rendererIdentityFailure === "reject") {
+          throw new Error("injected renderer identity rejection");
+        }
+        if (options.rendererIdentityFailure === "timeout") {
+          await new Promise<void>(() => undefined);
+        }
+        if (options.rendererIdentityFailure === "pid-change") {
+          renderer.replaceRendererPid(pid + 1000);
+        }
+        if (options.rendererIdentityFailure === "renderer-loss") {
+          renderer.emit("render-process-gone", {}, { reason: "killed" });
+        }
+        return options.rendererStartedAtUtc ?? "2026-08-30T00:00:00.250Z";
+      }
       expect(children.some((candidate) => candidate.pid === pid)).toBe(true);
       trace.push("inspect-janvim-start");
       const startedAtUtc =
@@ -1209,6 +1251,13 @@ function createStartupHarness(options: {
         void pending.catch(() => undefined);
         throw new Error("injected bridge close timeout");
       }
+      if (
+        options.rendererIdentityFailure === "timeout" &&
+        timeoutMs === 2_000
+      ) {
+        void pending.catch(() => undefined);
+        throw new Error("injected renderer identity timeout");
+      }
       if (childKilled && timeoutMs === 5_000) {
         void pending.catch(() => undefined);
         return undefined as T;
@@ -1335,6 +1384,14 @@ function createStartupHarness(options: {
     destroySecondary: () => {
       lastWindow?.destroy();
     },
+    emitRendererGone: () => {
+      lastWindow?.webContents.emit(
+        "render-process-gone",
+        {},
+        { reason: "killed" },
+      );
+    },
+    lastWindowIsDestroyed: () => lastWindow?.isDestroyed() ?? true,
     emitAgentDisconnect: (bridgeIndex = bridgeDisconnectListeners.length - 1) => {
       const listeners = bridgeDisconnectListeners[bridgeIndex];
       if (listeners === undefined) throw new Error("bridge disconnect fixture is missing");
@@ -1373,6 +1430,7 @@ function createStartupHarness(options: {
     },
     releaseLaunchArtifactVerification,
     releaseInitialIdentityInspection,
+    releaseRendererIdentityInspection,
     releaseLoopPrepare: loopPrepareGate.resolve,
     replaceRuntimeCoreBytes: (value: Uint8Array) => {
       files.set(
@@ -1412,6 +1470,93 @@ async function createValidatedRuntimeSession(
 }
 
 describe("real Task 9 show runtime adapters", () => {
+  it("binds renderer loss and window close to one surface lifetime", async () => {
+    const harness = createStartupHarness();
+    const coordinator = harness.adapters.createCoordinator(showCommand("Show"));
+    const dependencies = (
+      coordinator as unknown as { dependencies: ShowRunCoordinatorDependencies }
+    ).dependencies;
+    await dependencies.validate();
+
+    const lostSurface = await dependencies.openSecondary(
+      1,
+      new AbortController().signal,
+    );
+    const lost = vi.fn();
+    lostSurface.onDestroyed(lost);
+    const firstWebContents = harness.webContentsHistory[0]!;
+    expect(firstWebContents.listenerCount("render-process-gone")).toBe(1);
+
+    harness.emitRendererGone();
+    expect(lost).toHaveBeenCalledOnce();
+    expect(harness.lastWindowIsDestroyed()).toBe(false);
+    harness.destroySecondary();
+    expect(lost).toHaveBeenCalledOnce();
+    expect(firstWebContents.listenerCount("render-process-gone")).toBe(0);
+
+    const intentionallyClosedSurface = await dependencies.openSecondary(
+      2,
+      new AbortController().signal,
+    );
+    const intentionallyLost = vi.fn();
+    intentionallyClosedSurface.onDestroyed(intentionallyLost);
+    const secondWebContents = harness.webContentsHistory[1]!;
+    expect(secondWebContents.listenerCount("render-process-gone")).toBe(1);
+
+    intentionallyClosedSurface.close();
+
+    expect(intentionallyLost).not.toHaveBeenCalled();
+    expect(secondWebContents.listenerCount("render-process-gone")).toBe(0);
+  });
+
+  it.each([
+    ["inspection rejection", { rendererIdentityFailure: "reject" }],
+    ["inspection timeout", { rendererIdentityFailure: "timeout" }],
+    ["PID change", { rendererIdentityFailure: "pid-change" }],
+    ["renderer loss", { rendererIdentityFailure: "renderer-loss" }],
+    ["invalid UTC start", { rendererStartedAtUtc: "2026-08-30 00:00:00" }],
+  ] as const)("fails secondary publication closed on %s", async (_caseName, options) => {
+    const harness = createStartupHarness(options);
+    const coordinator = harness.adapters.createCoordinator(showCommand("Show"));
+    const dependencies = (
+      coordinator as unknown as { dependencies: ShowRunCoordinatorDependencies }
+    ).dependencies;
+    await dependencies.validate();
+
+    await expect(
+      dependencies.openSecondary(1, new AbortController().signal),
+    ).rejects.toThrow();
+
+    expect(harness.trace).toContain("inspect-renderer-start");
+    expect(harness.lastWindowIsDestroyed()).toBe(true);
+    expect(harness.cleanupAttempts.windowClose).toBe(1);
+    expect(
+      [...harness.logStorage.files.values()].join(""),
+    ).not.toContain("secondary-opened");
+  });
+
+  it("fails secondary publication closed when identity inspection is aborted", async () => {
+    const harness = createStartupHarness({
+      deferRendererIdentityInspection: true,
+    });
+    const coordinator = harness.adapters.createCoordinator(showCommand("Show"));
+    const dependencies = (
+      coordinator as unknown as { dependencies: ShowRunCoordinatorDependencies }
+    ).dependencies;
+    await dependencies.validate();
+    const controller = new AbortController();
+
+    const opening = dependencies.openSecondary(1, controller.signal);
+    await settlePromises();
+    expect(harness.trace).toContain("inspect-renderer-start");
+    controller.abort();
+    harness.releaseRendererIdentityInspection();
+
+    await expect(opening).rejects.toThrow();
+    expect(harness.lastWindowIsDestroyed()).toBe(true);
+    expect(harness.cleanupAttempts.windowClose).toBe(1);
+  });
+
   it("retains the same bridge when disconnect registration fails and bounded compensation rejects", async () => {
     const harness = createStartupHarness({
       failBridgeDisconnectRegistration: true,
@@ -1997,6 +2142,7 @@ describe("real Task 9 show runtime adapters", () => {
       controllerRunId: "controller-001",
       generationId: 1,
       rendererPid: 8002,
+      rendererStartedAtUtc: "2026-08-30T00:00:00.250Z",
     });
     expect(events.filter((event) => event.type === "p1-skip")).toEqual([
       { type: "p1-skip", feature: "formula", reason: "fixture-asset-absent" },
