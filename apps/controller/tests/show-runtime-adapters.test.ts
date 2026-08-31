@@ -1817,6 +1817,9 @@ describe("real Task 9 show runtime adapters", () => {
     expect(controllerStartedAtUtc(1_788_048_000_123)).toBe(
       "2026-08-30T00:00:00.123Z",
     );
+    expect(controllerStartedAtUtc(1_788_163_535_695.775)).toBe(
+      "2026-08-31T08:05:35.695Z",
+    );
     for (const value of [null, 0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
       expect(() => controllerStartedAtUtc(value)).toThrow(/creation|time/i);
     }

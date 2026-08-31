@@ -307,14 +307,14 @@ export function createShowLoopId(
 
 export function controllerStartedAtUtc(creationTimeMs: number | null): string {
   if (
-    !Number.isSafeInteger(creationTimeMs) ||
     creationTimeMs === null ||
+    !Number.isFinite(creationTimeMs) ||
     creationTimeMs <= 0
   ) {
     throw new Error("controller-process-creation-time-invalid");
   }
   try {
-    return new Date(creationTimeMs).toISOString();
+    return new Date(Math.floor(creationTimeMs)).toISOString();
   } catch {
     throw new Error("controller-process-creation-time-invalid");
   }
