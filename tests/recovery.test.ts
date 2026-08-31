@@ -1225,6 +1225,124 @@ function commandsNamed(
   );
 }
 
+const expectedProcessControlTopology = new Map<
+  string,
+  { getProcess: string[][]; stopProcess: string[][] }
+>([
+  ["Preflight:setup", { getProcess: [], stopProcess: [] }],
+  [
+    "Display Capture and Confirmation:capture",
+    { getProcess: [], stopProcess: [] },
+  ],
+  [
+    "Display Capture and Confirmation:confirm",
+    { getProcess: [], stopProcess: [] },
+  ],
+  ["ValidateOnly:launch", { getProcess: [], stopProcess: [] }],
+  [
+    "ValidateOnly:diagnostic-connected",
+    { getProcess: [], stopProcess: [] },
+  ],
+  ["Soak3:launch", { getProcess: [], stopProcess: [] }],
+  ["Show:launch", { getProcess: [], stopProcess: [] }],
+  [
+    "Secondary Fault:fault-secondary",
+    {
+      getProcess: [
+        [
+          "Get-Process",
+          "-Id",
+          "$controllerPid",
+          "-ErrorAction",
+          "Stop",
+        ],
+        [
+          "Get-Process",
+          "-Id",
+          "$rendererPid",
+          "-ErrorAction",
+          "Stop",
+        ],
+      ],
+      stopProcess: [["Stop-Process", "-Id", "$rendererPid"]],
+    },
+  ],
+  [
+    "JanVim Fault:fault-janvim",
+    {
+      getProcess: [
+        [
+          "Get-Process",
+          "-Id",
+          "$controllerPid",
+          "-ErrorAction",
+          "Stop",
+        ],
+        [
+          "Get-Process",
+          "-Id",
+          "$janvimPid",
+          "-ErrorAction",
+          "Stop",
+        ],
+      ],
+      stopProcess: [["Stop-Process", "-Id", "$janvimPid"]],
+    },
+  ],
+  [
+    "Controller Fault:fault-controller",
+    {
+      getProcess: [
+        [
+          "Get-Process",
+          "-Id",
+          "$controllerPid",
+          "-ErrorAction",
+          "Stop",
+        ],
+      ],
+      stopProcess: [["Stop-Process", "-Id", "$controllerPid"]],
+    },
+  ],
+]);
+
+function expectProcessControlTopology(
+  summaries: ReadonlyMap<string, PowerShellAstSummary>,
+): void {
+  expect([...summaries.keys()]).toEqual([
+    ...expectedProcessControlTopology.keys(),
+  ]);
+  for (const [key, contract] of expectedProcessControlTopology) {
+    const summary = summaries.get(key)!;
+    const gets = commandsNamed(summary, "Get-Process");
+    const stops = commandsNamed(summary, "Stop-Process");
+    expect(
+      gets.map((command) => command.elements),
+      key,
+    ).toEqual(contract.getProcess);
+    expect(
+      stops.map((command) => command.elements),
+      key,
+    ).toEqual(contract.stopProcess);
+    if (stops.length > 0) {
+      expect(
+        stops[0]!.startOffset,
+        key,
+      ).toBeGreaterThan(Math.max(...gets.map((command) => command.endOffset)));
+    }
+  }
+  expect(
+    [...summaries.values()].flatMap((summary) =>
+      commandsNamed(summary, "Get-Process"),
+    ),
+  ).toHaveLength(5);
+  expect(
+    [...summaries.values()].flatMap((summary) =>
+      commandsNamed(summary, "Stop-Process"),
+    ),
+  ).toHaveLength(3);
+}
+
 function expectTextOrder(block: string, markers: readonly string[]): void {
   let priorOffset = -1;
   for (const marker of markers) {
@@ -1889,6 +2007,40 @@ describe("Task 9 recovery operations", () => {
     expect(() => allPowershellBlocks(lines.join("\n"))).toThrow(/PowerShell/iu);
   });
 
+  it("rejects exact PID process control in an existing non-fault block", () => {
+    const blocks = allPowershellBlocks(readFileSync(runbookPath, "utf8"));
+    const key = "Preflight:setup";
+    blocks.set(
+      key,
+      [
+        blocks.get(key)!,
+        "Get-Process -Id $controllerPid -ErrorAction Stop",
+        "Stop-Process -Id $controllerPid",
+      ].join("\n"),
+    );
+
+    expect(() =>
+      expectProcessControlTopology(parsePowershellAst(blocks)),
+    ).toThrow();
+  });
+
+  it("rejects an extra exact PID process pair inside a fault block", () => {
+    const blocks = allPowershellBlocks(readFileSync(runbookPath, "utf8"));
+    const key = "Secondary Fault:fault-secondary";
+    blocks.set(
+      key,
+      [
+        blocks.get(key)!,
+        "Get-Process -Id $rendererPid -ErrorAction Stop",
+        "Stop-Process -Id $rendererPid",
+      ].join("\n"),
+    );
+
+    expect(() =>
+      expectProcessControlTopology(parsePowershellAst(blocks)),
+    ).toThrow();
+  });
+
   it("allowlists parsed commands and enforces exact launcher and PID-stop topology", () => {
     const malicious = parsePowershellAst(
       new Map([
@@ -2006,56 +2158,7 @@ describe("Task 9 recovery operations", () => {
       ),
     ).toHaveLength(6);
 
-    const faultContracts = new Map<
-      string,
-      { pid: string; getProcessPids: string[] }
-    >([
-      [
-        "Secondary Fault:fault-secondary",
-        {
-          pid: "$rendererPid",
-          getProcessPids: ["$controllerPid", "$rendererPid"],
-        },
-      ],
-      [
-        "JanVim Fault:fault-janvim",
-        {
-          pid: "$janvimPid",
-          getProcessPids: ["$controllerPid", "$janvimPid"],
-        },
-      ],
-      [
-        "Controller Fault:fault-controller",
-        { pid: "$controllerPid", getProcessPids: ["$controllerPid"] },
-      ],
-    ]);
-    for (const [key, contract] of faultContracts) {
-      const summary = summaries.get(key)!;
-      const stops = commandsNamed(summary, "Stop-Process");
-      expect(stops, key).toHaveLength(1);
-      expect(stops[0]!.elements, key).toEqual([
-        "Stop-Process",
-        "-Id",
-        contract.pid,
-      ]);
-      const gets = commandsNamed(summary, "Get-Process");
-      expect(
-        gets.map((command) => command.elements),
-        key,
-      ).toEqual(
-        contract.getProcessPids.map((pid) => [
-          "Get-Process",
-          "-Id",
-          pid,
-          "-ErrorAction",
-          "Stop",
-        ]),
-      );
-      expect(
-        stops[0]!.startOffset,
-        key,
-      ).toBeGreaterThan(Math.max(...gets.map((command) => command.endOffset)));
-    }
+    expectProcessControlTopology(summaries);
 
     const secondary = summaries.get("Secondary Fault:fault-secondary")!;
     const boundedReaders = commandsNamed(
