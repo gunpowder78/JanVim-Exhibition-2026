@@ -1,5 +1,6 @@
 import typescript from "../node_modules/typescript/lib/typescript.js";
 
+import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 import {
   closeSync,
@@ -40,7 +41,10 @@ function parseJavaScript(source, modulePath) {
       typescript.ScriptKind.JS,
     );
   } catch (error) {
-    throw new Error(`JavaScript parser failed: ${modulePath}: ${errorMessage(error)}`);
+    throw new Error(
+      `JavaScript parser failed: ${modulePath}: ${errorMessage(error)}`,
+      { cause: error },
+    );
   }
 
   if (sourceFile.parseDiagnostics.length > 0) {
@@ -132,6 +136,7 @@ function discoverModuleSpecifiers(source, modulePath) {
     } catch (error) {
       throw new Error(
         `JavaScript AST traversal failed: ${modulePath}: ${errorMessage(error)}`,
+        { cause: error },
       );
     }
     for (let index = children.length - 1; index >= 0; index -= 1) {
