@@ -189,6 +189,10 @@ export type CoordinatorRecoveryEvent = {
 
 export type CoordinatorAggregate = {
   completedLoops: number;
+  offlineSampleCount: number;
+  onlineSampleCount: number;
+  resourceIncompleteLoopCount: number;
+  runtimeCountGrowthLoopCount: number;
   automaticRecoveryRetryCount: number;
   recoveryEventCount: number;
   dispatchedCueCount: number;
@@ -331,6 +335,10 @@ export class ShowRunCoordinator {
   private readonly offlineSnapshots: NetworkSnapshotEvidence[] = [];
   private readonly aggregate: CoordinatorAggregate = {
     completedLoops: 0,
+    offlineSampleCount: 0,
+    onlineSampleCount: 0,
+    resourceIncompleteLoopCount: 0,
+    runtimeCountGrowthLoopCount: 0,
     automaticRecoveryRetryCount: 0,
     recoveryEventCount: 0,
     dispatchedCueCount: 0,
@@ -2500,6 +2508,12 @@ export class ShowRunCoordinator {
   }
 
   private retainLoopSummary(summary: CoordinatorLoopSummary): void {
+    if (resourceSampleIncomplete(summary.resources)) {
+      this.aggregate.resourceIncompleteLoopCount += 1;
+    }
+    if (runtimeCountsGrew(summary.countsAtStart, summary.countsAtEnd)) {
+      this.aggregate.runtimeCountGrowthLoopCount += 1;
+    }
     this.loops.push(summary);
     const limit =
       this.dependencies.mode === "Soak3" ? 3 : MAX_RETAINED_SHOW_LOOPS;
@@ -2507,6 +2521,8 @@ export class ShowRunCoordinator {
   }
 
   private retainNetworkSnapshot(snapshot: NetworkSnapshotEvidence): void {
+    if (snapshot.offline) this.aggregate.offlineSampleCount += 1;
+    else this.aggregate.onlineSampleCount += 1;
     this.offlineSnapshots.push({ ...snapshot });
     const limit =
       this.dependencies.mode === "Soak3"
@@ -2822,6 +2838,26 @@ function absorbAbortListenerResult(result: unknown): void {
 
 function cueReachesSecondary(cue: Cue): boolean {
   return cue.target === "secondary" || cue.target === "both";
+}
+
+function resourceSampleIncomplete(resources: ResourceSummary): boolean {
+  return (
+    resources.sampleIncomplete ||
+    (["controller", "renderer", "janvim"] as const).some(
+      (role) =>
+        resources[role].rssBytes.count === 0 ||
+        resources[role].handleCount.count === 0,
+    )
+  );
+}
+
+function runtimeCountsGrew(
+  countsAtStart: RuntimeCountEvidence,
+  countsAtEnd: RuntimeCountEvidence,
+): boolean {
+  return (["listeners", "timers", "connections", "pendingCommands"] as const).some(
+    (field) => countsAtEnd[field] > countsAtStart[field],
+  );
 }
 
 function cloneLoopSummary(summary: CoordinatorLoopSummary): CoordinatorLoopSummary {

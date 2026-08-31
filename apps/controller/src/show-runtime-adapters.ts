@@ -827,13 +827,11 @@ function buildShowEvidence(
   const offlineSnapshots = diagnostics.offlineSnapshots.map((snapshot) => ({
     ...snapshot,
   }));
-  const offlineSampleCount = offlineSnapshots.filter(
-    (snapshot) => snapshot.offline,
-  ).length;
-  const onlineSampleCount = offlineSnapshots.length - offlineSampleCount;
+  const offlineSampleCount = diagnostics.aggregate.offlineSampleCount;
+  const onlineSampleCount = diagnostics.aggregate.onlineSampleCount;
   const offlineVerified =
     command.networkPolicy === "OfflineRequired" &&
-    offlineSnapshots.length > 0 &&
+    offlineSampleCount + onlineSampleCount > 0 &&
     onlineSampleCount === 0;
   const shutdownFailures = new Set(diagnostics.shutdown.failures);
   const shutdown = {
@@ -869,7 +867,7 @@ function buildShowEvidence(
   }));
   const loggingIncomplete = logger.snapshot().incomplete;
   return {
-    schema: 1,
+    schema: 2,
     runId: command.runId,
     controllerRunId: command.controllerRunId,
     mode: command.mode,
@@ -916,6 +914,10 @@ function buildShowEvidence(
       completedLoops: diagnostics.aggregate.completedLoops,
       offlineSampleCount,
       onlineSampleCount,
+      resourceIncompleteLoopCount:
+        diagnostics.aggregate.resourceIncompleteLoopCount,
+      runtimeCountGrowthLoopCount:
+        diagnostics.aggregate.runtimeCountGrowthLoopCount,
       totalRetries: diagnostics.aggregate.automaticRecoveryRetryCount,
       totalSkips: P1_SKIP_COUNT,
       totalRecoveries: diagnostics.aggregate.recoveryEventCount,

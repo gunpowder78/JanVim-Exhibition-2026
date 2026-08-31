@@ -65,6 +65,8 @@ export type RunAggregateEvidence = {
   completedLoops: number;
   offlineSampleCount: number;
   onlineSampleCount: number;
+  resourceIncompleteLoopCount: number;
+  runtimeCountGrowthLoopCount: number;
   totalRetries: number;
   totalSkips: number;
   totalRecoveries: number;
@@ -77,7 +79,7 @@ export type RunAggregateEvidence = {
 };
 
 export type ShowRunEvidenceRecord = {
-  schema: 1;
+  schema: 2;
   runId: string;
   controllerRunId: string;
   mode: "Soak3" | "Show";
@@ -471,6 +473,8 @@ const runAggregateSchema = z
     completedLoops: safeNonnegativeIntegerSchema,
     offlineSampleCount: safeNonnegativeIntegerSchema,
     onlineSampleCount: safeNonnegativeIntegerSchema,
+    resourceIncompleteLoopCount: safeNonnegativeIntegerSchema,
+    runtimeCountGrowthLoopCount: safeNonnegativeIntegerSchema,
     totalRetries: safeNonnegativeIntegerSchema,
     totalSkips: safeNonnegativeIntegerSchema,
     totalRecoveries: safeNonnegativeIntegerSchema,
@@ -552,7 +556,7 @@ const operatorNoteSchema = z
 
 const showRunEvidenceSchema = z
   .object({
-    schema: z.literal(1),
+    schema: z.literal(2),
     runId: z.string().regex(RUN_ID_PATTERN),
     controllerRunId: z.string().regex(CONTROLLER_RUN_ID_PATTERN),
     mode: z.enum(["Soak3", "Show"]),
@@ -603,10 +607,37 @@ const showRunEvidenceSchema = z
     if (!Number.isSafeInteger(aggregateNetworkSamples)) {
       addIssue(["aggregate"], "aggregate network sample count is unsafe");
     }
+    const maximumLifecycleNetworkSamples =
+      record.aggregate.completedLoops > MAX_SAFE_INTEGER - 2
+        ? MAX_SAFE_INTEGER
+        : record.aggregate.completedLoops + 2;
+    if (aggregateNetworkSamples > maximumLifecycleNetworkSamples) {
+      addIssue(
+        ["aggregate"],
+        "run-wide network samples exceed the completed lifecycle",
+      );
+    }
+    if (
+      record.aggregate.resourceIncompleteLoopCount >
+        record.aggregate.completedLoops ||
+      record.aggregate.runtimeCountGrowthLoopCount >
+        record.aggregate.completedLoops
+    ) {
+      addIssue(
+        ["aggregate"],
+        "run-wide loop violations exceed completed loops",
+      );
+    }
 
     const loopRetries = sum(record.loops.map((loop) => loop.retryCount));
     const loopSkips = sum(record.loops.map((loop) => loop.skipCount));
     const loopRecoveries = sum(record.loops.map((loop) => loop.recoveryCount));
+    const retainedResourceIncompleteLoops = record.loops.filter(
+      (loop) => resourceSampleIncomplete(loop.resources),
+    ).length;
+    const retainedRuntimeCountGrowthLoops = record.loops.filter((loop) =>
+      runtimeCountsGrew(loop.countsAtStart, loop.countsAtEnd),
+    ).length;
     const retainedDrift = sum(
       record.loops.map((loop) => loop.finalVisibleDriftMs),
     );
@@ -646,6 +677,17 @@ const showRunEvidenceSchema = z
         addIssue(
           ["aggregate"],
           "Soak3 network aggregate must match its five snapshots",
+        );
+      }
+      if (
+        record.aggregate.resourceIncompleteLoopCount !==
+          retainedResourceIncompleteLoops ||
+        record.aggregate.runtimeCountGrowthLoopCount !==
+          retainedRuntimeCountGrowthLoops
+      ) {
+        addIssue(
+          ["aggregate"],
+          "Soak3 loop-violation aggregates must match its three loops",
         );
       }
       if (
@@ -692,6 +734,17 @@ const showRunEvidenceSchema = z
         );
       }
       if (
+        record.aggregate.resourceIncompleteLoopCount <
+          retainedResourceIncompleteLoops ||
+        record.aggregate.runtimeCountGrowthLoopCount <
+          retainedRuntimeCountGrowthLoops
+      ) {
+        addIssue(
+          ["aggregate"],
+          "Show loop-violation totals cannot be below retained loops",
+        );
+      }
+      if (
         record.aggregate.totalRetries < loopRetries ||
         record.aggregate.totalSkips < loopSkips ||
         record.aggregate.totalRecoveries < loopRecoveries
@@ -729,10 +782,9 @@ const showRunEvidenceSchema = z
 
     const expectedOfflineVerified =
       record.aggregate.acceptanceOutcome !== "diagnostic" &&
-      record.offlineSnapshots.length > 0 &&
+      aggregateNetworkSamples > 0 &&
       record.aggregate.offlineSampleCount > 0 &&
-      record.aggregate.onlineSampleCount === 0 &&
-      retainedOnlineSamples === 0;
+      record.aggregate.onlineSampleCount === 0;
     if (record.offlineVerified !== expectedOfflineVerified) {
       addIssue(
         ["offlineVerified"],
@@ -789,10 +841,13 @@ function showAcceptanceFailures(
     record.aggregate.completedLoops + 2,
     record.mode === "Soak3" ? 5 : 8,
   );
+  const aggregateNetworkSamples =
+    record.aggregate.offlineSampleCount + record.aggregate.onlineSampleCount;
   const cardinalityAccepted =
     record.aggregate.completedLoops > 0 &&
     record.loops.length === expectedRetainedLoops &&
     record.offlineSnapshots.length === expectedRetainedSnapshots &&
+    aggregateNetworkSamples === record.aggregate.completedLoops + 2 &&
     (record.mode !== "Soak3" || record.aggregate.completedLoops === 3);
   if (!cardinalityAccepted) {
     fail(
@@ -805,7 +860,6 @@ function showAcceptanceFailures(
     !record.offlineVerified ||
     record.offlineSnapshots.length === 0 ||
     record.offlineSnapshots.some((snapshot) => !snapshot.offline) ||
-    record.aggregate.offlineSampleCount !== record.offlineSnapshots.length ||
     record.aggregate.onlineSampleCount !== 0
   ) {
     fail(["offlineVerified"], "passing evidence requires offline verification");
@@ -814,6 +868,18 @@ function showAcceptanceFailures(
     fail(
       ["aggregate", "cumulativeVisibleDriftMs"],
       "passing cumulative visible drift must be below 250 ms",
+    );
+  }
+  if (record.aggregate.resourceIncompleteLoopCount !== 0) {
+    fail(
+      ["aggregate", "resourceIncompleteLoopCount"],
+      "passing evidence cannot contain a resource-incomplete loop",
+    );
+  }
+  if (record.aggregate.runtimeCountGrowthLoopCount !== 0) {
+    fail(
+      ["aggregate", "runtimeCountGrowthLoopCount"],
+      "passing evidence cannot contain runtime count growth",
     );
   }
 
@@ -1006,6 +1072,26 @@ function hasErrorCode(error: unknown, code: string): boolean {
 
 function sum(values: readonly number[]): number {
   return values.reduce((total, value) => total + value, 0);
+}
+
+function resourceSampleIncomplete(resources: ResourceSummary): boolean {
+  return (
+    resources.sampleIncomplete ||
+    (["controller", "renderer", "janvim"] as const).some(
+      (role) =>
+        resources[role].rssBytes.count === 0 ||
+        resources[role].handleCount.count === 0,
+    )
+  );
+}
+
+function runtimeCountsGrew(
+  countsAtStart: RuntimeCountEvidence,
+  countsAtEnd: RuntimeCountEvidence,
+): boolean {
+  return RUNTIME_COUNT_FIELDS.some(
+    (field) => countsAtEnd[field] > countsAtStart[field],
+  );
 }
 
 function assertNoProhibitedSerializedContent(

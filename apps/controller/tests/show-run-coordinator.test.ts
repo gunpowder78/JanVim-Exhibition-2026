@@ -330,6 +330,7 @@ class FakeSession implements ShowRunSession {
   public reserveNextLoopOnStart = false;
   public failDiagnosticsAfterRuntimeStart = false;
   public rebindGenerationFailure = false;
+  public runtimeCountGrowthLoop: number | undefined;
   public traceLoopConstruction = false;
   public readonly rollbackCallbackErrors: unknown[] = [];
   public readonly abortedPhases: string[] = [];
@@ -594,7 +595,9 @@ class FakeSession implements ShowRunSession {
       throw new Error("injected session diagnostics failure");
     }
     return {
-      connections: this.connections,
+      connections:
+        this.connections +
+        Number(this.runtime.completedLoops === this.runtimeCountGrowthLoop),
       pendingCommands: Number(this.editorCommandPending),
       editorCommandPending: this.editorCommandPending,
       leaseRemoved: this.leaseRemoved,
@@ -720,6 +723,9 @@ interface HarnessOptions {
   firstHeldCleanupGate?: Deferred;
   replacementHeldCleanupGate?: Deferred;
   rebindGenerationFailures?: boolean[];
+  networkOfflineSequence?: readonly boolean[];
+  resourceIncompleteLoops?: readonly number[];
+  runtimeCountGrowthLoop?: number;
 }
 
 function createHarness(options: HarnessOptions = {}) {
@@ -896,6 +902,7 @@ function createHarness(options: HarnessOptions = {}) {
         options.publicationDiagnosticsFailure ?? false;
       session.rebindGenerationFailure =
         options.rebindGenerationFailures?.[sessionIndex] ?? false;
+      session.runtimeCountGrowthLoop = options.runtimeCountGrowthLoop;
       session.traceLoopConstruction = traceLoopConstruction;
       session.forcedExit = options.forcedExit ?? true;
       session.naturalExit = options.naturalExit ?? "natural";
@@ -983,7 +990,10 @@ function createHarness(options: HarnessOptions = {}) {
         ) {
           throw new Error("injected boundary resource failure");
         }
-        return finish();
+        const summary = await finish();
+        return options.resourceIncompleteLoops?.includes(samplerNumber) === true
+          ? { ...summary, sampleIncomplete: true }
+          : summary;
       });
       if (traceLoopConstruction) {
         const finishSpy = sampler.finish;
@@ -1031,11 +1041,12 @@ function createHarness(options: HarnessOptions = {}) {
       ) {
         throw new Error("injected boundary network failure");
       }
+      const offline = options.networkOfflineSequence?.[networkSamples - 1] ?? true;
       return {
         sampledAtMs: timers.now,
-        activeExternalDefaultRoutes: 0,
+        activeExternalDefaultRoutes: offline ? 0 : 1,
         connectedExternalProfiles: 0,
-        offline: true,
+        offline,
       };
     },
     finalizeEvidence: async (result, diagnostics, signal?: AbortSignal) => {
@@ -2316,6 +2327,92 @@ describe("show run coordinator", () => {
     expect(harness.driverOptions[0]?.loopLimit).toBeNull();
     expect(JSON.stringify(diagnostics)).not.toMatch(/checkpoint/i);
     expect(harness.evidence).toHaveLength(1);
+  });
+
+  it("keeps a first-loop online sample run-wide after eight later offline samples evict it", async () => {
+    const networkOfflineSequence = Array<boolean>(10).fill(true);
+    networkOfflineSequence[1] = false;
+    const harness = createHarness({ mode: "Show", networkOfflineSequence });
+    await startRunning(harness);
+
+    for (let loopNumber = 1; loopNumber <= 8; loopNumber += 1) {
+      if (loopNumber === 8) {
+        expect(harness.coordinator.handleRendererEvent(stopEvent())).toBe(true);
+      }
+      await completeResetBoundary(harness, loopNumber, 1);
+    }
+
+    await expect(harness.coordinator.completion).resolves.toEqual({
+      ok: true,
+      reason: "operator-stop",
+    });
+    const diagnostics = harness.evidence[0]!.diagnostics;
+    expect(diagnostics.offlineSnapshots).toHaveLength(8);
+    expect(diagnostics.offlineSnapshots.every((sample) => sample.offline)).toBe(
+      true,
+    );
+    expect(diagnostics.aggregate).toMatchObject({
+      offlineSampleCount: 9,
+      onlineSampleCount: 1,
+    });
+  });
+
+  it("keeps a first-loop incomplete resource sample after clean loops evict its summary", async () => {
+    const harness = createHarness({
+      mode: "Show",
+      resourceIncompleteLoops: [1],
+    });
+    await startRunning(harness);
+
+    for (let loopNumber = 1; loopNumber <= 4; loopNumber += 1) {
+      if (loopNumber === 4) {
+        expect(harness.coordinator.handleRendererEvent(stopEvent())).toBe(true);
+      }
+      await completeResetBoundary(harness, loopNumber, 1);
+    }
+
+    await expect(harness.coordinator.completion).resolves.toEqual({
+      ok: true,
+      reason: "operator-stop",
+    });
+    const diagnostics = harness.evidence[0]!.diagnostics;
+    expect(diagnostics.loops.map((loop) => loop.loopId)).toEqual([
+      "g1-loop-2",
+      "g1-loop-3",
+      "g1-loop-4",
+    ]);
+    expect(diagnostics.loops.every((loop) => !loop.resources.sampleIncomplete)).toBe(
+      true,
+    );
+    expect(diagnostics.aggregate).toMatchObject({
+      resourceIncompleteLoopCount: 1,
+    });
+  });
+
+  it("keeps first-loop runtime-count growth after clean loops evict its summary", async () => {
+    const harness = createHarness({ mode: "Show", runtimeCountGrowthLoop: 1 });
+    await startRunning(harness);
+
+    for (let loopNumber = 1; loopNumber <= 4; loopNumber += 1) {
+      if (loopNumber === 4) {
+        expect(harness.coordinator.handleRendererEvent(stopEvent())).toBe(true);
+      }
+      await completeResetBoundary(harness, loopNumber, 1);
+    }
+
+    await expect(harness.coordinator.completion).resolves.toEqual({
+      ok: true,
+      reason: "operator-stop",
+    });
+    const diagnostics = harness.evidence[0]!.diagnostics;
+    expect(
+      diagnostics.loops.every(
+        (loop) => loop.countsAtEnd.connections <= loop.countsAtStart.connections,
+      ),
+    ).toBe(true);
+    expect(diagnostics.aggregate).toMatchObject({
+      runtimeCountGrowthLoopCount: 1,
+    });
   });
 
   it("stops immediately from ready and keeps every observed transition inside the closed model", async () => {

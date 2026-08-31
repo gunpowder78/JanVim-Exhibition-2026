@@ -1333,7 +1333,7 @@ function Read-StrictShowRunIdentityEvidence {
     $loggingIncomplete = Get-RequiredPropertyValue -InputObject $evidence -Name 'loggingIncomplete' -Reason $reason
     $operatorNotes = Get-RequiredPropertyValue -InputObject $evidence -Name 'operatorNotes' -Reason $reason
     if (
-        -not (Test-ExactJsonInteger -Value $schema -Expected 1) -or
+        -not (Test-ExactJsonInteger -Value $schema -Expected 2) -or
         $evidenceRunId -isnot [string] -or
         $evidenceRunId -cne $RunId -or
         $evidenceControllerRunId -isnot [string] -or

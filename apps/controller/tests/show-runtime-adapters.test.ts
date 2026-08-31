@@ -2206,7 +2206,14 @@ describe("real Task 9 show runtime adapters", () => {
     const evidence = harness.evidenceWrites[0]!.value as ReturnType<
       typeof parseShowRunEvidence
     >;
+    expect(evidence.schema).toBe(2);
     expect(evidence.loops).toHaveLength(3);
+    expect(evidence.aggregate).toMatchObject({
+      offlineSampleCount: 5,
+      onlineSampleCount: 0,
+      resourceIncompleteLoopCount: 0,
+      runtimeCountGrowthLoopCount: 0,
+    });
     expect(evidence.aggregate.totalSkips).toBe(3);
     expect(
       evidence.loops.reduce((total, loop) => total + loop.skipCount, 0),
@@ -2650,7 +2657,7 @@ describe("real Task 9 show runtime adapters", () => {
     expect(harness.evidenceWrites[0]).toMatchObject({
       path: `${rehearsalRoot}\\show-run.json`,
       value: {
-        schema: 1,
+        schema: 2,
         runId: "show-001",
         controllerRunId: "controller-001",
         mode: "Show",

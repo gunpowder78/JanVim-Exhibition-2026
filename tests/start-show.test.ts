@@ -595,7 +595,7 @@ function Write-ShowEvidence {
     $completedLoops = if ($showMode -ceq 'soak3') { 3 } else { 0 }
     $offlineSampleCount = if ($showMode -ceq 'soak3') { 5 } else { 1 }
     $evidence = [ordered]@{
-        schema = 1
+        schema = 2
         runId = $runId
         controllerRunId = if ($Mutation -ceq 'controller') { 'wrong-controller-run' } else { $controllerRunId }
         mode = if ($showMode -ceq 'show') { 'Show' } else { 'Soak3' }
@@ -644,6 +644,8 @@ function Write-ShowEvidence {
             completedLoops = $completedLoops
             offlineSampleCount = $offlineSampleCount
             onlineSampleCount = 0
+            resourceIncompleteLoopCount = if ($showMode -ceq 'soak3') { 3 } else { 0 }
+            runtimeCountGrowthLoopCount = 0
             totalRetries = 0
             totalSkips = 0
             totalRecoveries = 0

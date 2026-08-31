@@ -110,7 +110,7 @@ function validEvidenceRecord(
   overrides: Partial<ShowRunEvidenceRecord> = {},
 ): ShowRunEvidenceRecord {
   return {
-    schema: 1,
+    schema: 2,
     runId: "show-run-001",
     controllerRunId: "controller-run-001",
     mode: "Soak3",
@@ -190,6 +190,8 @@ function validEvidenceRecord(
       completedLoops: 3,
       offlineSampleCount: 5,
       onlineSampleCount: 0,
+      resourceIncompleteLoopCount: 0,
+      runtimeCountGrowthLoopCount: 0,
       totalRetries: 1,
       totalSkips: 0,
       totalRecoveries: 1,
@@ -287,6 +289,65 @@ function reverseObjectKeys(value: unknown): unknown {
 }
 
 describe("strict show-run evidence schema", () => {
+  it("rejects schema 1 instead of treating retained tails as current run-wide proof", () => {
+    const legacy = { ...validEvidenceRecord(), schema: 1 };
+    expect(() => parseShowRunEvidence(legacy)).toThrow();
+  });
+
+  it.each([
+    ["resource-incomplete", "resourceIncompleteLoopCount"],
+    ["runtime-count-growth", "runtimeCountGrowthLoopCount"],
+  ] as const)(
+    "fails Show acceptance when an aged-out %s loop remains in the run aggregate",
+    (_label, field) => {
+      const record = cloneRecord();
+      record.mode = "Show";
+      record.shutdown.requestedBy = "operator-stop";
+      record.aggregate.completedLoops = 4;
+      record.offlineSnapshots = [
+        ...record.offlineSnapshots,
+        {
+          sampledAtMs: 270_200,
+          activeExternalDefaultRoutes: 0,
+          connectedExternalProfiles: 0,
+          offline: true,
+        },
+      ];
+      record.aggregate.offlineSampleCount = 6;
+      Object.assign(record.aggregate, {
+        resourceIncompleteLoopCount: 0,
+        runtimeCountGrowthLoopCount: 0,
+        [field]: 1,
+      });
+
+      expect(
+        evaluateShowAcceptance(record, {
+          requestedResultOk: true,
+          diagnosticConnected: false,
+        }),
+      ).toBe("fail");
+    },
+  );
+
+  it.each([
+    ["network samples", "network"],
+    ["resource-incomplete loops", "resources"],
+    ["runtime-growth loops", "runtime"],
+  ] as const)("bounds run-wide %s by the completed lifecycle", (_label, field) => {
+    const record = cloneRecord(validShowRecord());
+    if (field === "network") {
+      record.aggregate.offlineSampleCount = record.aggregate.completedLoops + 3;
+    } else if (field === "resources") {
+      record.aggregate.resourceIncompleteLoopCount =
+        record.aggregate.completedLoops + 1;
+    } else {
+      record.aggregate.runtimeCountGrowthLoopCount =
+        record.aggregate.completedLoops + 1;
+    }
+
+    expect(() => parseShowRunEvidence(record)).toThrow();
+  });
+
   it("binds evidence to the exact frozen Task 9 artifact identity", () => {
     expect(TASK9_ARTIFACT_IDENTITY).toEqual({
       lockSha256:
@@ -390,6 +451,7 @@ describe("strict show-run evidence schema", () => {
         offline: true as const,
       })),
     ];
+    eightSnapshots.aggregate.completedLoops = 6;
     eightSnapshots.aggregate.offlineSampleCount = 8;
     expect(parseShowRunEvidence(eightSnapshots).offlineSnapshots).toHaveLength(8);
 
@@ -575,6 +637,45 @@ describe("strict show-run evidence schema", () => {
     contradictorySnapshot.offlineSnapshots[0]!.activeExternalDefaultRoutes = 1;
     expect(() => parseShowRunEvidence(contradictorySnapshot)).toThrow();
   });
+
+  it.each([
+    ["resourceIncompleteLoopCount", "resources"],
+    ["runtimeCountGrowthLoopCount", "runtime"],
+  ] as const)(
+    "requires exact Soak3 and lower-bounded Show %s aggregates",
+    (field, violation) => {
+      const soak = cloneRecord();
+      soak.aggregate.acceptanceOutcome = "fail";
+      if (violation === "resources") {
+        soak.loops[0]!.resources.sampleIncomplete = true;
+      } else {
+        soak.loops[0]!.countsAtEnd.listeners += 1;
+      }
+      soak.aggregate[field] = 1;
+      expect(parseShowRunEvidence(soak).aggregate[field]).toBe(1);
+
+      const wrongSoak = cloneRecord(soak);
+      wrongSoak.aggregate[field] = 0;
+      expect(() => parseShowRunEvidence(wrongSoak)).toThrow();
+
+      const show = cloneRecord(validShowRecord());
+      if (violation === "resources") {
+        show.loops[0]!.resources.sampleIncomplete = true;
+      } else {
+        show.loops[0]!.countsAtEnd.listeners += 1;
+      }
+      show.aggregate[field] = 1;
+      expect(parseShowRunEvidence(show).aggregate[field]).toBe(1);
+
+      const wrongShow = cloneRecord(show);
+      wrongShow.aggregate[field] = 0;
+      expect(() => parseShowRunEvidence(wrongShow)).toThrow();
+
+      const agedOutShow = cloneRecord(validShowRecord());
+      agedOutShow.aggregate[field] = 1;
+      expect(parseShowRunEvidence(agedOutShow).aggregate[field]).toBe(1);
+    },
+  );
 
   it("caps retained recoveries at 32 and operator notes at 16", () => {
     const atLimits = cloneRecord(validShowRecord());
@@ -797,7 +898,10 @@ describe("strict show-run evidence schema", () => {
       ],
       [
         "incomplete resource sample",
-        (record) => { record.loops[0]!.resources.sampleIncomplete = true; },
+        (record) => {
+          record.loops[0]!.resources.sampleIncomplete = true;
+          record.aggregate.resourceIncompleteLoopCount = 1;
+        },
       ],
       [
         "empty process resource sample",
@@ -806,11 +910,15 @@ describe("strict show-run evidence schema", () => {
             rssBytes: emptyScalar(),
             handleCount: emptyScalar(),
           };
+          record.aggregate.resourceIncompleteLoopCount = 1;
         },
       ],
       [
         "runtime count growth",
-        (record) => { record.loops[0]!.countsAtEnd.listeners += 1; },
+        (record) => {
+          record.loops[0]!.countsAtEnd.listeners += 1;
+          record.aggregate.runtimeCountGrowthLoopCount = 1;
+        },
       ],
       [
         "reset hash mismatch",
