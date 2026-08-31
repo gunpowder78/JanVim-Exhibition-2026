@@ -512,6 +512,7 @@ type NetworkBoundaryEvent = {
 function createComposedHost(options: {
   resetPrimaryDelaysMs?: readonly number[];
   resetSecondaryPresentationDelaysMs?: readonly number[];
+  ageOutFirstLoopAcceptanceViolations?: boolean;
 } = {}) {
   const clock = new FakeClock();
   const logStorage = new MemoryLogStorage();
@@ -546,6 +547,9 @@ function createComposedHost(options: {
   let runtimeNetworkBoundaryStart = 0;
   let resetIndex = 0;
   let resetSecondaryPresentationIndex = 0;
+  let networkSampleCount = 0;
+  let processSampleCount = 0;
+  let authenticatedConnections = 1;
 
   const recordPotentialAttempt = (
     kind: NetworkBoundaryEvent["kind"],
@@ -620,6 +624,16 @@ function createComposedHost(options: {
         "id" in payload.cue &&
         typeof payload.cue.id === "string"
       ) {
+        if (options.ageOutFirstLoopAcceptanceViolations) {
+          if (
+            payload.loopId === "recovery-composed-g1-l1" &&
+            payload.cue.id === "cue-reset"
+          ) {
+            authenticatedConnections = 2;
+          } else if (payload.loopId === "recovery-composed-g1-l2") {
+            authenticatedConnections = 1;
+          }
+        }
         if (payload.cue.id === "cue-reset") {
           clock.advanceBy(
             options.resetSecondaryPresentationDelaysMs?.[
@@ -779,12 +793,16 @@ function createComposedHost(options: {
       if (args.some((argument) => argument.includes("Get-NetRoute"))) {
         trace.push("network-snapshot");
         clock.advanceBy(1);
+        networkSampleCount += 1;
+        const online =
+          options.ageOutFirstLoopAcceptanceViolations === true &&
+          networkSampleCount === 2;
         return {
           exitCode: 0,
           stdout: JSON.stringify({
             schema: 1,
-            activeExternalDefaultRoutes: 0,
-            connectedExternalProfiles: 0,
+            activeExternalDefaultRoutes: online ? 1 : 0,
+            connectedExternalProfiles: online ? 1 : 0,
           }),
           stderr: "",
         };
@@ -874,8 +892,8 @@ function createComposedHost(options: {
         bridgeDisconnectListeners.clear();
       },
       diagnostics: () => ({
-        activeConnections: 1,
-        authenticatedConnections: 1,
+        activeConnections: authenticatedConnections,
+        authenticatedConnections,
         pendingCommands: 0,
         pendingTimers: 0,
         sessionListeners: 3,
@@ -888,7 +906,16 @@ function createComposedHost(options: {
     nowMonotonic: () => clock.nowMonotonic(),
     timers: clock,
     nowUtc: () => "2026-08-30T00:00:01.000Z",
-    sampleProcess: async (pid: number) => ({ rssBytes: pid * 10, handleCount: pid }),
+    sampleProcess: async (pid: number) => {
+      processSampleCount += 1;
+      if (
+        options.ageOutFirstLoopAcceptanceViolations === true &&
+        processSampleCount === 1
+      ) {
+        throw new Error("first-loop-resource-sample-failed");
+      }
+      return { rssBytes: pid * 10, handleCount: pid };
+    },
     writeRunLease: async (_path: string, lease: RunLease) => {
       leases.push(lease);
     },
@@ -2537,6 +2564,75 @@ describe("Task 9 recovery operations", () => {
       ),
     ).toHaveLength(4);
     expectNoExternalNetworkAttempts(rejectedHost);
+  });
+
+  it("fails the real Show terminal path when first-loop acceptance violations age out of retained tails", async () => {
+    const host = createComposedHost({
+      ageOutFirstLoopAcceptanceViolations: true,
+    });
+    const coordinator = await startComposedRun(host, "Show");
+
+    for (let loopNumber = 1; loopNumber <= 8; loopNumber += 1) {
+      await advanceComposedLoop(host, loopNumber === 8);
+    }
+
+    await expect(coordinator.completion).resolves.toEqual({
+      ok: false,
+      reason: "acceptance-failed",
+    });
+    expect(host.evidenceAttempts).toHaveLength(1);
+    expect(host.evidenceValues).toHaveLength(1);
+    const evidence = host.evidenceValues[0]!;
+    expect(parseShowRunEvidence(host.evidenceAttempts[0])).toEqual(evidence);
+    expect(evidence).toMatchObject({
+      schema: 2,
+      mode: "Show",
+      offlineVerified: false,
+      aggregate: {
+        completedLoops: 8,
+        offlineSampleCount: 9,
+        onlineSampleCount: 1,
+        resourceIncompleteLoopCount: 1,
+        runtimeCountGrowthLoopCount: 1,
+        acceptanceOutcome: "fail",
+      },
+      shutdown: {
+        requestedBy: "operator-stop",
+      },
+    });
+    expect(evidence.loops.map((loop) => loop.loopId)).toEqual([
+      "recovery-composed-g1-l6",
+      "recovery-composed-g1-l7",
+      "recovery-composed-g1-l8",
+    ]);
+    expect(
+      evidence.loops.every(
+        (loop) =>
+          !loop.resources.sampleIncomplete &&
+          (["listeners", "timers", "connections", "pendingCommands"] as const)
+            .every((field) => loop.countsAtEnd[field] <= loop.countsAtStart[field]),
+      ),
+    ).toBe(true);
+    expect(evidence.offlineSnapshots).toHaveLength(8);
+    expect(evidence.offlineSnapshots.every((snapshot) => snapshot.offline)).toBe(
+      true,
+    );
+    expect(host.terminalValues).toEqual([
+      {
+        schema: 1,
+        runId: "recovery-composed",
+        controllerRunId: "recovery-composed-controller",
+        controllerPid: 8_001,
+        outcome: "intentional-failure",
+        reason: "acceptance-failed",
+      },
+    ]);
+    expect(
+      host.runtimeNetworkBoundaryEvents.filter(
+        (event) => event.kind === "exec-file" && event.value.includes("Get-NetRoute"),
+      ),
+    ).toHaveLength(9);
+    expectNoExternalNetworkAttempts(host);
   });
 
   it("safe-cruises a secondary loss and replaces only the secondary with a fresh loop", async () => {
