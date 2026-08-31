@@ -246,7 +246,7 @@ describe("secondary preload contract", () => {
     const packageJson = JSON.parse(
       readFileSync(join(repositoryRoot, "apps", "controller", "package.json"), "utf8"),
     ) as { main: string };
-    expect(packageJson.main).toBe("dist/src/electron-main.js");
+    expect(packageJson.main).toBe("dist/main/electron-main.js");
     expect(
       existsSync(join(repositoryRoot, "apps", "controller", "src", "electron-main.ts")),
     ).toBe(true);

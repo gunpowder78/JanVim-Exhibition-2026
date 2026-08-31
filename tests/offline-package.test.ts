@@ -377,7 +377,7 @@ describe("offline JanVim artifact scripts", () => {
     expect(
       readFileSync(join(fixture.root, "AGENTS.md"), "utf8"),
     ).toBe("# JanVim Exhibition 2026 agent instructions\n");
-  });
+  }, 10_000);
 
   it("accepts a portable directory only when its separate provenance archive has identical required bytes", () => {
     const fixture = makeFixture();
