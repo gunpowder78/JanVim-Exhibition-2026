@@ -1036,15 +1036,50 @@ function markdownSections(markdown: string): Map<string, string> {
   );
 }
 
-function powershellBlocks(markdownSection: string): Map<string, string> {
-  const matches = [...markdownSection.matchAll(
-    /```powershell[ \t]*\r?\n# block: ([a-z][a-z0-9-]{0,31})\r?\n([\s\S]*?)\r?\n```/gu,
+type RawPowerShellFence = {
+  label: string;
+  block: string;
+  startOffset: number;
+  endOffset: number;
+};
+
+function rawPowershellFences(markdown: string): RawPowerShellFence[] {
+  const headers = [...markdown.matchAll(/^```powershell[^\r\n]*\r?$/gmu)];
+  const closedFences = [...markdown.matchAll(
+    /^(```powershell[^\r\n]*\r?)\n([\s\S]*?)^```[ \t]*\r?$/gmu,
   )];
+  if (headers.length !== closedFences.length) {
+    throw new Error(
+      `PowerShell fence header/closure count mismatch: ${headers.length}/${closedFences.length}`,
+    );
+  }
+
+  return closedFences.map((match) => {
+    if (!/^```powershell[ \t]*\r?$/u.test(match[1]!)) {
+      throw new Error("PowerShell fence header must contain only the language label");
+    }
+    const lines = match[2]!.split(/\r?\n/u);
+    const labelMatch = /^# block: ([a-z][a-z0-9-]{0,31})$/u.exec(lines[0]!);
+    const labelLines = lines.filter((line) => /^[ \t]*# block:/u.test(line));
+    if (labelMatch === null || labelLines.length !== 1) {
+      throw new Error(
+        "PowerShell fence must have exactly one valid block label on its first line",
+      );
+    }
+    return {
+      label: labelMatch[1]!,
+      block: lines.slice(1).join("\n").trim(),
+      startOffset: match.index!,
+      endOffset: match.index! + match[0].length,
+    };
+  });
+}
+
+function powershellBlocks(markdownSection: string): Map<string, string> {
   const blocks = new Map<string, string>();
-  for (const match of matches) {
-    const label = match[1]!;
+  for (const { label, block } of rawPowershellFences(markdownSection)) {
     if (blocks.has(label)) throw new Error(`duplicate PowerShell block label: ${label}`);
-    blocks.set(label, match[2]!.trim());
+    blocks.set(label, block);
   }
   return blocks;
 }
@@ -1124,11 +1159,33 @@ $summaries = foreach ($item in @($payload)) {
 `;
 
 function allPowershellBlocks(markdown: string): Map<string, string> {
+  const sections = [...markdown.matchAll(/^## (.+)$/gmu)].map(
+    (match, index, matches) => ({
+      name: match[1]!,
+      bodyStartOffset: match.index! + match[0].length,
+      endOffset: matches[index + 1]?.index ?? markdown.length,
+    }),
+  );
+  const fences = rawPowershellFences(markdown);
   const flattened = new Map<string, string>();
-  for (const [section, body] of markdownSections(markdown)) {
-    for (const [label, block] of powershellBlocks(body)) {
-      flattened.set(section + ":" + label, block);
+  const keys = new Set<string>();
+  for (const fence of fences) {
+    const owningSections = sections.filter(
+      (section) =>
+        fence.startOffset >= section.bodyStartOffset &&
+        fence.endOffset <= section.endOffset,
+    );
+    if (owningSections.length !== 1) {
+      throw new Error(
+        `PowerShell fence ${fence.label} must belong to exactly one level-two section`,
+      );
     }
+    const key = owningSections[0]!.name + ":" + fence.label;
+    if (keys.has(key)) {
+      throw new Error(`duplicate PowerShell block label: ${key}`);
+    }
+    keys.add(key);
+    flattened.set(key, fence.block);
   }
   return flattened;
 }
@@ -1744,6 +1801,92 @@ describe("Task 9 recovery operations", () => {
     ]) {
       expect(janvim).toContain(literal);
     }
+  });
+
+  it("rejects an unlabeled PowerShell fence containing hidden launch and stop commands", () => {
+    const runbook = [
+      "## Safe",
+      "```powershell",
+      'pwsh -NoProfile -File ".\\scripts\\start-show.ps1"',
+      "gps -Id 1 | kill",
+      "$process.Kill()",
+      "```",
+    ].join("\n");
+
+    expect(() => allPowershellBlocks(runbook)).toThrow(/PowerShell/iu);
+  });
+
+  it("rejects a PowerShell fence before the first level-two section", () => {
+    const runbook = [
+      "```powershell",
+      "# block: outside",
+      "Write-Warning 'outside'",
+      "```",
+      "## Safe",
+      "```powershell",
+      "# block: inside",
+      "Write-Warning 'inside'",
+      "```",
+    ].join("\n");
+
+    expect(() => allPowershellBlocks(runbook)).toThrow(/PowerShell/iu);
+  });
+
+  it.each([
+    ["malformed", ["# block: Bad_Label", "Write-Warning 'bad'"]],
+    ["non-first", ["Write-Warning 'before'", "# block: late"]],
+    [
+      "multiple",
+      ["# block: first", "# block: second", "Write-Warning 'bad'"],
+    ],
+  ])("rejects a %s PowerShell block label", (_caseName, body) => {
+    const runbook = ["## Safe", "```powershell", ...body, "```"].join("\n");
+
+    expect(() => allPowershellBlocks(runbook)).toThrow(/PowerShell/iu);
+  });
+
+  it("rejects duplicate PowerShell labels within a repeated section identity", () => {
+    const runbook = [
+      "## Repeated",
+      "```powershell",
+      "# block: duplicate",
+      "Write-Warning 'first'",
+      "```",
+      "## Repeated",
+      "```powershell",
+      "# block: duplicate",
+      "Write-Warning 'second'",
+      "```",
+    ].join("\n");
+
+    expect(() => allPowershellBlocks(runbook)).toThrow(/PowerShell/iu);
+  });
+
+  it.each([
+    [
+      "unclosed",
+      [
+        "## Safe",
+        "```powershell",
+        "# block: unclosed",
+        "Write-Warning 'open'",
+      ],
+    ],
+    [
+      "header-count mismatch",
+      [
+        "## Safe",
+        "```powershell",
+        "# block: first",
+        "Write-Warning 'first'",
+        "```powershell",
+        "# block: second",
+        "Write-Warning 'second'",
+        "```",
+      ],
+    ],
+  ])("rejects a PowerShell fence with %s", (_caseName, lines) => {
+    expect(() => allPowershellBlocks(lines.join("\n"))).toThrow(/PowerShell/iu);
   });
 
   it("allowlists parsed commands and enforces exact launcher and PID-stop topology", () => {
