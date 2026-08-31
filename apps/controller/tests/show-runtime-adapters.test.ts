@@ -567,6 +567,9 @@ function createStartupHarness(options: {
   removeRunLeaseResult?: boolean;
   replaceRunLeaseFailure?: boolean;
   rejectBridgeClose?: boolean;
+  bridgeCloseOutcomes?: readonly ("success" | "reject" | "timeout")[];
+  bridgeListenHost?: string;
+  failBridgeDisconnectRegistration?: boolean;
   closeChildAfterSecondIdentityInspection?: boolean;
   cleanupFailures?: readonly (
     | "close-listener"
@@ -675,6 +678,13 @@ function createStartupHarness(options: {
   let activeBridges = 0;
   let maxActiveBridges = 0;
   const bridgeDisconnectListeners: Array<Set<() => void>> = [];
+  const bridgeCloseAttempts: Array<{
+    bridgeIndex: number;
+    bounded: boolean;
+    outcome: "success" | "reject" | "timeout";
+  }> = [];
+  const timedOutBridgeCloseGates: Array<ReturnType<typeof publicationGate>> = [];
+  let deadlineOperationDepth = 0;
   const sent: Array<{ channel: string; payload: unknown }> = [];
   const sampledPids: number[] = [];
   const evidenceAttempts: Array<{ path: string; value: unknown }> = [];
@@ -1097,7 +1107,7 @@ function createStartupHarness(options: {
           trace.push("bridge-listen");
           trace.push(`bridge-listen:${bridgeIndex + 1}:complete`);
           return {
-            host: "127.0.0.1" as const,
+            host: options.bridgeListenHost ?? "127.0.0.1",
             port: 32123 + bridgeIndex,
             family: "IPv4",
           };
@@ -1140,13 +1150,33 @@ function createStartupHarness(options: {
           };
         },
         onAgentDisconnected: (listener: () => void) => {
+          if (options.failBridgeDisconnectRegistration === true) {
+            throw new Error("injected bridge disconnect registration failure");
+          }
           disconnectListeners.add(listener);
           return () => disconnectListeners.delete(listener);
         },
         close: async () => {
           trace.push("bridge-close");
-          if (options.rejectBridgeClose === true) {
+          const invocation = bridgeCloseAttempts.length + 1;
+          const outcome =
+            options.bridgeCloseOutcomes?.[invocation - 1] ??
+            (options.rejectBridgeClose === true ? "reject" : "success");
+          bridgeCloseAttempts.push({
+            bridgeIndex: bridgeIndex + 1,
+            bounded: deadlineOperationDepth > 0,
+            outcome,
+          });
+          if (outcome === "reject") {
             throw new Error("injected bridge close rejection");
+          }
+          if (outcome === "timeout") {
+            if (deadlineOperationDepth === 0) {
+              throw new Error("injected unbounded bridge close invocation");
+            }
+            const gate = publicationGate();
+            timedOutBridgeCloseGates.push(gate);
+            await gate.promise;
           }
           if (!closed && listening) activeBridges -= 1;
           closed = true;
@@ -1166,7 +1196,19 @@ function createStartupHarness(options: {
       timeoutMs: number,
       operation: () => Promise<T>,
     ): Promise<T> => {
-      const pending = operation();
+      const closeAttemptsBefore = bridgeCloseAttempts.length;
+      deadlineOperationDepth += 1;
+      let pending: Promise<T>;
+      try {
+        pending = operation();
+      } finally {
+        deadlineOperationDepth -= 1;
+      }
+      const closeAttempt = bridgeCloseAttempts[closeAttemptsBefore];
+      if (closeAttempt?.outcome === "timeout" && timeoutMs === 5_000) {
+        void pending.catch(() => undefined);
+        throw new Error("injected bridge close timeout");
+      }
       if (childKilled && timeoutMs === 5_000) {
         void pending.catch(() => undefined);
         return undefined as T;
@@ -1301,6 +1343,11 @@ function createStartupHarness(options: {
     bridgeDisconnectListenerCount: (
       bridgeIndex = bridgeDisconnectListeners.length - 1,
     ) => bridgeDisconnectListeners[bridgeIndex]?.size ?? 0,
+    bridgeCloseAttempts: () =>
+      bridgeCloseAttempts.map((attempt) => ({ ...attempt })),
+    releaseTimedOutBridgeCloses: () => {
+      for (const gate of timedOutBridgeCloseGates) gate.resolve();
+    },
     emitJanVimExit: (childIndex = children.length - 1) => {
       const target = children[childIndex];
       if (target === undefined) throw new Error("JanVim child fixture is missing");
@@ -1353,7 +1400,129 @@ async function bootAndStartRuntimeHarness(
   return coordinator;
 }
 
+async function createValidatedRuntimeSession(
+  harness: ReturnType<typeof createStartupHarness>,
+) {
+  const coordinator = harness.adapters.createCoordinator(showCommand("Show"));
+  const dependencies = (
+    coordinator as unknown as { dependencies: ShowRunCoordinatorDependencies }
+  ).dependencies;
+  await dependencies.validate();
+  return dependencies.createSession(1);
+}
+
 describe("real Task 9 show runtime adapters", () => {
+  it("retains the same bridge when disconnect registration fails and bounded compensation rejects", async () => {
+    const harness = createStartupHarness({
+      failBridgeDisconnectRegistration: true,
+      bridgeCloseOutcomes: ["reject", "success"],
+    });
+    const session = await createValidatedRuntimeSession(harness);
+    const signal = new AbortController().signal;
+
+    await expect(session.startBridge(signal)).rejects.toThrow(
+      "injected bridge disconnect registration failure",
+    );
+
+    expect(harness.bridgeCloseAttempts()).toEqual([
+      { bridgeIndex: 1, bounded: true, outcome: "reject" },
+    ]);
+    expect(harness.activeResourceCounts().bridges).toBe(1);
+    expect(harness.bridgeDisconnectListenerCount(0)).toBe(0);
+    expect(harness.spawnCall).toBeUndefined();
+    const failedStartupPublication = JSON.stringify([
+      ...harness.logStorage.files.entries(),
+    ]);
+    expect(failedStartupPublication).not.toContain("ab".repeat(24));
+    expect(failedStartupPublication).not.toContain("32123");
+
+    await expect(session.closeBridge(5_000)).resolves.toBeUndefined();
+
+    expect(harness.bridgeCloseAttempts()).toEqual([
+      { bridgeIndex: 1, bounded: true, outcome: "reject" },
+      { bridgeIndex: 1, bounded: true, outcome: "success" },
+    ]);
+    expect(harness.activeResourceCounts().bridges).toBe(0);
+  });
+
+  it("retains the same bridge when invalid address compensation times out", async () => {
+    const harness = createStartupHarness({
+      bridgeListenHost: "0.0.0.0",
+      bridgeCloseOutcomes: ["timeout", "success"],
+    });
+    const session = await createValidatedRuntimeSession(harness);
+    const signal = new AbortController().signal;
+
+    await expect(session.startBridge(signal)).rejects.toThrow(
+      "bridge-not-ipv4-loopback",
+    );
+
+    expect(harness.bridgeCloseAttempts()).toEqual([
+      { bridgeIndex: 1, bounded: true, outcome: "timeout" },
+    ]);
+    expect(harness.activeResourceCounts().bridges).toBe(1);
+    expect(harness.bridgeDisconnectListenerCount(0)).toBe(0);
+    expect(harness.spawnCall).toBeUndefined();
+
+    await expect(session.closeBridge(5_000)).resolves.toBeUndefined();
+    expect(harness.bridgeCloseAttempts()).toEqual([
+      { bridgeIndex: 1, bounded: true, outcome: "timeout" },
+      { bridgeIndex: 1, bounded: true, outcome: "success" },
+    ]);
+    expect(harness.activeResourceCounts().bridges).toBe(0);
+
+    harness.releaseTimedOutBridgeCloses();
+    await settlePromises();
+    expect(harness.activeResourceCounts().bridges).toBe(0);
+  });
+
+  it("keeps failed startup bridge cleanup unsettled in coordinator evidence", async () => {
+    const harness = createStartupHarness({
+      failBridgeDisconnectRegistration: true,
+      rejectBridgeClose: true,
+    });
+    const coordinator = harness.adapters.createCoordinator(showCommand("Show"));
+    const boot = coordinator.boot();
+
+    for (let invocation = 0; invocation < 2; invocation += 1) {
+      await settlePromises();
+      expect(harness.timers.activeTimeouts(10_000)).toBe(1);
+      await harness.timers.fireTimeout(10_000);
+    }
+    await expect(boot).resolves.toEqual({
+      ready: false,
+      reason: "startup-failed",
+    });
+    expect(coordinator.diagnostics()).toMatchObject({
+      state: "safe-ready",
+      reason: "startup-failed",
+    });
+    expect(harness.activeResourceCounts().bridges).toBe(1);
+
+    const shutdown = coordinator.requestEmergencyStop("sigint");
+    for (let invocation = 0; invocation < 2; invocation += 1) {
+      await settlePromises();
+      expect(harness.timers.activeTimeouts(10_000)).toBe(1);
+      await harness.timers.fireTimeout(10_000);
+    }
+    await shutdown;
+
+    expect(harness.bridgeCloseAttempts()).toEqual([
+      { bridgeIndex: 1, bounded: true, outcome: "reject" },
+      { bridgeIndex: 1, bounded: true, outcome: "reject" },
+      { bridgeIndex: 1, bounded: true, outcome: "reject" },
+    ]);
+    expect(coordinator.diagnostics().shutdown).toMatchObject({
+      bridgeClosed: false,
+      failures: expect.arrayContaining(["bridge-close-failed"]),
+    });
+    expect(harness.evidenceWrites).toHaveLength(1);
+    expect(harness.evidenceWrites[0]).toMatchObject({
+      value: { shutdown: { bridgeClose: "failed" } },
+    });
+    expect(harness.activeResourceCounts().bridges).toBe(1);
+  });
+
   it("reports one exact editor cue before bridge dispatch across a bounded retry", async () => {
     const harness = createStartupHarness({ rejectFirstEditorCueId: "cue-insert" });
     const coordinator = harness.adapters.createCoordinator(showCommand("Show"));

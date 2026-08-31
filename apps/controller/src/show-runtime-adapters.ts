@@ -1505,43 +1505,53 @@ class RuntimeShowSession implements ShowRunSession {
     if (this.bridge !== undefined) throw new Error("bridge-already-started");
     const token = this.options.host.randomBytes(24).toString("hex");
     const bridge = this.options.host.createBridge(token);
+    let bridgePublished = false;
     let address: Awaited<ReturnType<ShowBridgeAdapter["listen"]>>;
     try {
       address = await this.options.host.runWithDeadline(5_000, () => bridge.listen());
     } catch (error) {
-      await bridge.close().catch(() => undefined);
-      throw error;
+      return await this.failBridgeStart(bridge, error);
     }
     if (address.host !== "127.0.0.1" || !this.isCurrentLifecycle(epoch, signal)) {
-      await bridge.close().catch(() => undefined);
-      throw new Error(
-        !this.isCurrentLifecycle(epoch, signal)
-          ? "bridge-start-aborted"
-          : "bridge-not-ipv4-loopback",
+      return await this.failBridgeStart(
+        bridge,
+        new Error(
+          !this.isCurrentLifecycle(epoch, signal)
+            ? "bridge-start-aborted"
+            : "bridge-not-ipv4-loopback",
+        ),
       );
     }
     let disposeDisconnect: () => void;
     try {
       disposeDisconnect = bridge.onAgentDisconnected(() => {
-        if (this.bridge !== bridge || !this.isCurrentLifecycle(epoch)) return;
+        if (
+          !bridgePublished ||
+          this.bridge !== bridge ||
+          !this.isCurrentLifecycle(epoch)
+        ) {
+          return;
+        }
         for (const listener of [...this.faultListeners]) {
           listener("agent-disconnected");
         }
       });
     } catch (error) {
-      await bridge.close().catch(() => undefined);
-      throw error;
+      return await this.failBridgeStart(bridge, error);
     }
     if (!this.isCurrentLifecycle(epoch, signal)) {
-      disposeDisconnect();
-      await bridge.close().catch(() => undefined);
-      throw new Error("bridge-start-aborted");
+      return await this.failBridgeStart(
+        bridge,
+        new Error("bridge-start-aborted"),
+        disposeDisconnect,
+      );
     }
     this.bridge = bridge;
     this.disposeBridgeDisconnect = disposeDisconnect;
     this.bridgeToken = token;
     this.bridgePort = address.port;
     this.options.logger.addSecret(token);
+    bridgePublished = true;
   }
 
   public async launchJanVim(signal: AbortSignal): Promise<void> {
@@ -2005,6 +2015,35 @@ class RuntimeShowSession implements ShowRunSession {
   private requireBridge(): ShowBridgeAdapter {
     if (this.bridge === undefined) throw new Error("show-bridge-unavailable");
     return this.bridge;
+  }
+
+  private async failBridgeStart(
+    bridge: ShowBridgeAdapter,
+    startupError: unknown,
+    disposeDisconnect?: () => void,
+  ): Promise<never> {
+    this.bridge = bridge;
+    if (disposeDisconnect !== undefined) {
+      this.disposeBridgeDisconnect = disposeDisconnect;
+      try {
+        disposeDisconnect();
+        if (this.disposeBridgeDisconnect === disposeDisconnect) {
+          this.disposeBridgeDisconnect = undefined;
+        }
+      } catch {
+        // Retain the disposer so later bounded session cleanup can retry it.
+      }
+    }
+    try {
+      await this.options.host.runWithDeadline(5_000, () => bridge.close());
+      if (this.disposeBridgeDisconnect === disposeDisconnect) {
+        this.disposeBridgeDisconnect = undefined;
+      }
+      if (this.bridge === bridge) this.bridge = undefined;
+    } catch {
+      // Keep the exact bridge owned so bounded session cleanup can retry it.
+    }
+    throw startupError;
   }
 
   private requireToken(): string {
