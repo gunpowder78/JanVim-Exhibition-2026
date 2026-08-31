@@ -329,6 +329,50 @@ describe("strict show-run evidence schema", () => {
     },
   );
 
+  it("fails online-age-out acceptance when the retained Show snapshot tail is entirely offline", () => {
+    const record = cloneRecord(validShowRecord());
+    const lastSampledAtMs = record.offlineSnapshots.at(-1)!.sampledAtMs;
+    record.aggregate.completedLoops = 8;
+    record.offlineSnapshots = [
+      ...record.offlineSnapshots,
+      ...Array.from({ length: 3 }, (_, index) => ({
+        sampledAtMs: lastSampledAtMs + index + 1,
+        activeExternalDefaultRoutes: 0,
+        connectedExternalProfiles: 0,
+        offline: true,
+      })),
+    ];
+    record.aggregate.offlineSampleCount = 9;
+    record.aggregate.onlineSampleCount = 1;
+    record.aggregate.acceptanceOutcome = "pass";
+
+    expect(record.offlineSnapshots).toHaveLength(8);
+    expect(record.offlineSnapshots.every((snapshot) => snapshot.offline)).toBe(
+      true,
+    );
+    const allOffline = cloneRecord(record);
+    allOffline.aggregate.offlineSampleCount = 10;
+    allOffline.aggregate.onlineSampleCount = 0;
+    allOffline.offlineVerified = true;
+    expect(
+      evaluateShowAcceptance(allOffline, {
+        requestedResultOk: true,
+        diagnosticConnected: false,
+      }),
+    ).toBe("pass");
+    expect(
+      evaluateShowAcceptance(record, {
+        requestedResultOk: true,
+        diagnosticConnected: false,
+      }),
+    ).toBe("fail");
+
+    record.aggregate.acceptanceOutcome = "fail";
+    expect(parseShowRunEvidence(record).aggregate.acceptanceOutcome).toBe(
+      "fail",
+    );
+  });
+
   it.each([
     ["network samples", "network"],
     ["resource-incomplete loops", "resources"],

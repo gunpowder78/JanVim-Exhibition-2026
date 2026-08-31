@@ -2221,6 +2221,82 @@ describe("real Task 9 show runtime adapters", () => {
     expect(evidence.offlineSnapshots).toHaveLength(5);
   });
 
+  it("carries aged-out run-wide failures from CoordinatorDiagnostics into schema-2 acceptance", async () => {
+    const harness = createStartupHarness();
+    const coordinator = await bootAndStartRuntimeHarness(harness);
+    const dependencies = (
+      coordinator as unknown as { dependencies: ShowRunCoordinatorDependencies }
+    ).dependencies;
+
+    try {
+      const cueDeltasMs = [5_001, 7_001, 33_001, 10_001, 23_001, 12_001];
+      for (let loopNumber = 1; loopNumber <= 3; loopNumber += 1) {
+        for (const deltaMs of cueDeltasMs) {
+          harness.timers.advanceBy(deltaMs);
+          await harness.timers.fireInterval(16);
+          await settlePromises();
+        }
+        expect(coordinator.diagnostics().completedLoops).toBe(loopNumber);
+      }
+
+      const diagnostics = structuredClone(coordinator.diagnostics());
+      const lastSnapshot = diagnostics.offlineSnapshots.at(-1)!;
+      diagnostics.completedLoops = 8;
+      diagnostics.aggregate.completedLoops = 8;
+      diagnostics.aggregate.offlineSampleCount = 9;
+      diagnostics.aggregate.onlineSampleCount = 1;
+      diagnostics.aggregate.resourceIncompleteLoopCount = 1;
+      diagnostics.aggregate.runtimeCountGrowthLoopCount = 1;
+      diagnostics.offlineSnapshots = [
+        ...diagnostics.offlineSnapshots,
+        ...Array.from(
+          { length: 8 - diagnostics.offlineSnapshots.length },
+          (_, index) => ({
+            ...lastSnapshot,
+            sampledAtMs: lastSnapshot.sampledAtMs + index + 1,
+          }),
+        ),
+      ];
+      diagnostics.shutdown = {
+        requestedReason: "operator-stop",
+        failures: [],
+        childSettled: true,
+        leaseRemoved: true,
+        forcedTermination: false,
+      };
+
+      await expect(
+        dependencies.finalizeEvidence(
+          { ok: true, reason: "operator-stop" },
+          diagnostics,
+          new AbortController().signal,
+        ),
+      ).resolves.toBe("fail");
+      expect(harness.evidenceWrites).toHaveLength(1);
+      const evidence = harness.evidenceWrites[0]!.value as ReturnType<
+        typeof parseShowRunEvidence
+      >;
+      expect(evidence).toMatchObject({
+        schema: 2,
+        offlineVerified: false,
+        aggregate: {
+          offlineSampleCount: 9,
+          onlineSampleCount: 1,
+          resourceIncompleteLoopCount: 1,
+          runtimeCountGrowthLoopCount: 1,
+          acceptanceOutcome: "fail",
+        },
+      });
+      expect(evidence.offlineSnapshots).toHaveLength(8);
+      expect(
+        evidence.offlineSnapshots.every((snapshot) => snapshot.offline),
+      ).toBe(true);
+    } finally {
+      await coordinator.requestEmergencyStop("sigint");
+      await coordinator.completion;
+    }
+  });
+
   it("keeps an early log failure sticky after the bridge token is installed", async () => {
     const harness = createStartupHarness({
       logStorage: new FailFirstLogStorage(),
