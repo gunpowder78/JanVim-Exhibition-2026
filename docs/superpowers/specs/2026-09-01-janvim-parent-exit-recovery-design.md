@@ -1,6 +1,6 @@
 # JanVim parent-exit recovery design
 
-- Status: approach approved by owner on 2026-09-01; written review pending
+- Status: approved by owner on 2026-09-01
 - Date: 2026-09-01
 - Parent plan: `docs/plans/2026-08-28-four-day-dual-projector-delivery.md`, Task 9
 - Parent design: `docs/superpowers/specs/2026-08-29-task9-recovery-offline-soak-design.md`
