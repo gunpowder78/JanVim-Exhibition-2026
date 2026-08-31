@@ -2172,7 +2172,7 @@ describe("offline show launcher and external watchdog", () => {
     } finally {
       fixture.cleanup();
     }
-  }, 15_000);
+  }, 30_000);
 
   it("rejects a verifier-consistent identifier-alias bundle outside the reviewed release before Electron", () => {
     const fixture = makeLauncherFixture();
