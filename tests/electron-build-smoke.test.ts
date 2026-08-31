@@ -6,25 +6,37 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   realpathSync,
   rmSync,
-  symlinkSync,
-  truncateSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, relative, sep } from "node:path";
+import { dirname, join, relative, sep } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
 const repositoryRoot = process.cwd();
+const bundleRelativePath = "apps/controller/dist/main/electron-main.js";
 const temporaryRoots: string[] = [];
+
+interface BundleManifest {
+  schema: number;
+  status: string;
+  files: Array<{ relativePath: string; bytes: number; sha256: string }>;
+  runtimeImports: string[];
+}
 
 afterEach(() => {
   for (const root of temporaryRoots.splice(0)) {
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+function writeText(path: string, source: string): void {
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, source, "utf8");
+}
 
 function runVerifier(root: string) {
   return spawnSync(
@@ -39,457 +51,161 @@ function runVerifier(root: string) {
 }
 
 function createVerifierFixture(
-  files: Readonly<Record<string, string>> = {},
-): { root: string; dist: string } {
-  const root = mkdtempSync(join(tmpdir(), "janvim-module-graph-"));
+  candidateSource = "export const electronMain = true;\n",
+  extraBundleFiles: Readonly<Record<string, string>> = {},
+): { root: string; bundle: string; mainSentinel: string; adapterSentinel: string } {
+  const root = mkdtempSync(join(tmpdir(), "janvim-main-bundle-"));
   temporaryRoots.push(root);
-  const scripts = join(root, "scripts");
-  const dist = join(root, "apps", "controller", "dist", "src");
-  mkdirSync(scripts, { recursive: true });
-  mkdirSync(dist, { recursive: true });
+  const verifier = join(root, "scripts", "verify-electron-module-graph.mjs");
+  const parser = join(root, "node_modules", "typescript", "lib", "typescript.js");
+  const bundle = join(root, ...bundleRelativePath.split("/"));
+  const legacyDist = join(root, "apps", "controller", "dist", "src");
+  const mainSentinel = join(root, "candidate-executed");
+  const adapterSentinel = join(root, "adapter-executed");
+
+  writeText(bundle, candidateSource);
+  writeText(join(legacyDist, "electron-main.js"), candidateSource);
+  writeText(join(legacyDist, "g2-runtime-adapters.js"), "export const g2 = true;\n");
+  writeText(join(legacyDist, "show-runtime-adapters.js"), [
+    'import { writeFileSync } from "node:fs";',
+    'writeFileSync("adapter-executed", "unsafe");',
+    "",
+  ].join("\n"));
+  for (const [relativePath, source] of Object.entries(extraBundleFiles)) {
+    writeText(join(dirname(bundle), ...relativePath.split("/")), source);
+    writeText(join(legacyDist, ...relativePath.split("/")), source);
+  }
+
+  mkdirSync(dirname(verifier), { recursive: true });
   copyFileSync(
     join(repositoryRoot, "scripts", "verify-electron-module-graph.mjs"),
-    join(scripts, "verify-electron-module-graph.mjs"),
+    verifier,
   );
-  const parserImplementation = join(
-    root,
-    "node_modules",
-    "typescript",
-    "lib",
-    "typescript.js",
-  );
-  mkdirSync(join(parserImplementation, ".."), { recursive: true });
+  mkdirSync(dirname(parser), { recursive: true });
   copyFileSync(
     join(repositoryRoot, "node_modules", "typescript", "lib", "typescript.js"),
-    parserImplementation,
+    parser,
   );
-  const completeFiles = {
-    "electron-main.js": "export const electronMain = true;\n",
-    "g2-runtime-adapters.js": "export const g2 = true;\n",
-    "show-runtime-adapters.js": "export const show = true;\n",
-    ...files,
-  };
-  for (const [relativePath, source] of Object.entries(completeFiles)) {
-    const path = join(dist, ...relativePath.split("/"));
-    mkdirSync(join(path, ".."), { recursive: true });
-    writeFileSync(path, source);
-  }
-  return { root, dist };
+  return { root, bundle, mainSentinel, adapterSentinel };
 }
 
-function manifestPaths(stdout: string): string[] {
-  const output = JSON.parse(stdout) as {
-    files: Array<{ relativePath: string }>;
-  };
-  return output.files.map((file) => file.relativePath);
+function readManifest(stdout: string): BundleManifest {
+  return JSON.parse(stdout) as BundleManifest;
 }
 
-describe("compiled Electron module graph", () => {
-  it("emits the bounded canonical sorted and hashed real electron-main graph", () => {
+describe("compiled Electron main bundle", () => {
+  it("emits one bounded canonical hashed production bundle with sorted runtime imports", () => {
     const result = runVerifier(repositoryRoot);
 
     expect(result.status, result.stderr || result.error?.message).toBe(0);
     expect(result.stdout.endsWith("\n")).toBe(true);
-    const output = JSON.parse(result.stdout) as {
-      schema: number;
-      status: string;
-      files: Array<{ relativePath: string; bytes: number; sha256: string }>;
-    };
-    expect(Object.keys(output)).toEqual(["schema", "status", "files"]);
-    expect(output.schema).toBe(1);
-    expect(output.status).toBe("compiled-electron-main-graph-verified");
-    expect(output.files.length).toBeGreaterThan(0);
-    expect(output.files.length).toBeLessThanOrEqual(256);
+    const output = readManifest(result.stdout);
+    expect(Object.keys(output)).toEqual([
+      "schema",
+      "status",
+      "files",
+      "runtimeImports",
+    ]);
+    expect(output.schema).toBe(2);
+    expect(output.status).toBe("compiled-electron-main-bundle-verified");
+    expect(output.files).toHaveLength(1);
+    expect(output.runtimeImports).toEqual(
+      [...new Set(output.runtimeImports)].sort(),
+    );
+    expect(output.runtimeImports.length).toBeGreaterThan(0);
+    expect(output.runtimeImports.length).toBeLessThanOrEqual(64);
+    expect(output.runtimeImports).toContain("electron");
 
-    const relativePaths = output.files.map((file) => file.relativePath);
-    expect(relativePaths).toEqual([...relativePaths].sort());
-    expect(new Set(relativePaths).size).toBe(relativePaths.length);
-    expect(relativePaths).toContain("apps/controller/dist/src/electron-main.js");
+    const [file] = output.files;
+    expect(file).toBeDefined();
+    expect(Object.keys(file!)).toEqual(["relativePath", "bytes", "sha256"]);
+    expect(file!.relativePath).toBe(bundleRelativePath);
     const canonicalRepositoryRoot = realpathSync.native(repositoryRoot);
-    for (const file of output.files) {
-      expect(Object.keys(file)).toEqual(["relativePath", "bytes", "sha256"]);
-      expect(file.relativePath).toMatch(
-        /^apps\/controller\/dist\/src\/(?:[^/]+\/)*(?:[^/]+\.(?:js|mjs|cjs))$/u,
-      );
-      expect(file.relativePath).not.toContain("\\");
-      const canonicalPath = realpathSync.native(
-        join(repositoryRoot, ...file.relativePath.split("/")),
-      );
-      expect(relative(canonicalRepositoryRoot, canonicalPath).split(sep).join("/")).toBe(
-        file.relativePath,
-      );
-      const bytes = readFileSync(canonicalPath);
-      expect(file.bytes).toBeGreaterThan(0);
-      expect(file.bytes).toBeLessThanOrEqual(16 * 1024 * 1024);
-      expect(file.bytes).toBe(bytes.byteLength);
-      expect(file.sha256).toBe(
-        createHash("sha256").update(bytes).digest("hex"),
-      );
-    }
+    const canonicalBundle = realpathSync.native(
+      join(repositoryRoot, ...file!.relativePath.split("/")),
+    );
+    expect(relative(canonicalRepositoryRoot, canonicalBundle).split(sep).join("/"))
+      .toBe(bundleRelativePath);
+    const bytes = readFileSync(canonicalBundle);
+    expect(file!.bytes).toBe(bytes.byteLength);
+    expect(file!.bytes).toBeGreaterThan(0);
+    expect(file!.bytes).toBeLessThanOrEqual(16 * 1024 * 1024);
+    expect(file!.sha256).toBe(
+      createHash("sha256").update(bytes).digest("hex"),
+    );
+    expect(readdirSync(dirname(canonicalBundle))).toEqual(["electron-main.js"]);
   });
 
-  it("rejects a nested TypeScript import reachable only from electron-main", () => {
-    const fixture = createVerifierFixture({
-      "electron-main.js": 'import "./nested.js";\nexport const entry = true;\n',
-      "nested.js": 'import "./source.ts";\nexport const nested = true;\n',
-    });
+  it("rejects a non-electron bare package import", () => {
+    const fixture = createVerifierFixture('import "left-pad";\n');
 
     const result = runVerifier(fixture.root);
 
     expect(result.status).not.toBe(0);
-    expect(result.stderr).toContain("TypeScript source extension");
+    expect(result.stderr).toContain("Unsupported Electron-main runtime import");
   });
 
-  it("discovers a comment-separated side-effect import", () => {
-    const fixture = createVerifierFixture({
-      "electron-main.js": 'import/* bounded comment */"./comment-child.js";\n',
-      "comment-child.js": "export const commentChild = true;\n",
-    });
+  it("never executes the candidate bundle or legacy adapters while verifying", () => {
+    const fixture = createVerifierFixture([
+      'import { writeFileSync } from "node:fs";',
+      'writeFileSync("candidate-executed", "unsafe");',
+      "",
+    ].join("\n"));
 
     const result = runVerifier(fixture.root);
 
     expect(result.status, result.stderr).toBe(0);
-    expect(manifestPaths(result.stdout)).toEqual([
-      "apps/controller/dist/src/comment-child.js",
-      "apps/controller/dist/src/electron-main.js",
-    ]);
+    expect(existsSync(fixture.mainSentinel)).toBe(false);
+    expect(existsSync(fixture.adapterSentinel)).toBe(false);
   });
 
-  it("discovers a compact export-from edge", () => {
-    const fixture = createVerifierFixture({
-      "electron-main.js": 'export{value}from"./export-child.js";\n',
-      "export-child.js": "export const value = true;\n",
-    });
+  it("records exact electron and valid node builtins as sorted unique externals", () => {
+    const fixture = createVerifierFixture([
+      'import { app } from "electron";',
+      'import { readFileSync } from "node:fs";',
+      'import { resolve } from "node:path";',
+      "void app; void readFileSync; void resolve;",
+      "",
+    ].join("\n"));
 
     const result = runVerifier(fixture.root);
 
     expect(result.status, result.stderr).toBe(0);
-    expect(manifestPaths(result.stdout)).toEqual([
-      "apps/controller/dist/src/electron-main.js",
-      "apps/controller/dist/src/export-child.js",
-    ]);
-  });
-
-  it("discovers a literal local require in a reachable cjs module", () => {
-    const fixture = createVerifierFixture({
-      "electron-main.js": 'import "./parent.cjs";\n',
-      "parent.cjs": 'module.exports = require("./required-child.cjs");\n',
-      "required-child.cjs": "module.exports = true;\n",
+    expect(readManifest(result.stdout)).toMatchObject({
+      schema: 2,
+      status: "compiled-electron-main-bundle-verified",
+      files: [{ relativePath: bundleRelativePath }],
+      runtimeImports: ["electron", "node:fs", "node:path"],
     });
-
-    const result = runVerifier(fixture.root);
-
-    expect(result.status, result.stderr).toBe(0);
-    expect(manifestPaths(result.stdout)).toEqual([
-      "apps/controller/dist/src/electron-main.js",
-      "apps/controller/dist/src/parent.cjs",
-      "apps/controller/dist/src/required-child.cjs",
-    ]);
-  });
-
-  it("discovers a Windows-backslash local require in a reachable cjs module", () => {
-    const fixture = createVerifierFixture({
-      "electron-main.js": 'import "./windows-cjs-parent.cjs";\n',
-      "windows-cjs-parent.cjs":
-        'module.exports = require(".\\\\windows-cjs-child.cjs");\n',
-      "windows-cjs-child.cjs": "module.exports = true;\n",
-    });
-
-    const result = runVerifier(fixture.root);
-
-    expect(result.status, result.stderr).toBe(0);
-    expect(manifestPaths(result.stdout)).toEqual([
-      "apps/controller/dist/src/electron-main.js",
-      "apps/controller/dist/src/windows-cjs-child.cjs",
-      "apps/controller/dist/src/windows-cjs-parent.cjs",
-    ]);
-  });
-
-  it("discovers a normalized escaped bare require identifier", () => {
-    const fixture = createVerifierFixture({
-      "electron-main.js": 'import "./escaped-require-parent.cjs";\n',
-      "escaped-require-parent.cjs":
-        'module.exports = requ\\u0069re("./escaped-require-child.cjs");\n',
-      "escaped-require-child.cjs": "module.exports = true;\n",
-    });
-
-    const result = runVerifier(fixture.root);
-
-    expect(result.status, result.stderr).toBe(0);
-    expect(manifestPaths(result.stdout)).toEqual([
-      "apps/controller/dist/src/electron-main.js",
-      "apps/controller/dist/src/escaped-require-child.cjs",
-      "apps/controller/dist/src/escaped-require-parent.cjs",
-    ]);
-  });
-
-  it("ignores import-like text in comments, strings, regexes, and template raw text", () => {
-    const fixture = createVerifierFixture({
-      "electron-main.js": [
-        'import "./real-child.js";',
-        '// import("./line-comment-child.js");',
-        '/* export { value } from "./block-comment-child.js"; */',
-        'const text = \'require("./string-child.cjs") import("./string-dynamic.js")\';',
-        'const pattern = /import\\(["\']\\.\\/regex-child\\.js["\']\\)/u;',
-        'const template = `export * from "./template-export.js"; import("./template-child.js")`;',
-        "void text; void pattern; void template;",
-        "",
-      ].join("\n"),
-      "real-child.js": "export const real = true;\n",
-    });
-
-    const result = runVerifier(fixture.root);
-
-    expect(result.status, result.stderr).toBe(0);
-    expect(manifestPaths(result.stdout)).toEqual([
-      "apps/controller/dist/src/electron-main.js",
-      "apps/controller/dist/src/real-child.js",
-    ]);
-  });
-
-  it("discovers literal dynamic imports inside executable template expressions", () => {
-    const fixture = createVerifierFixture({
-      "electron-main.js":
-        'const value = `loaded:${await import("./template-expression-child.js")}`;\nvoid value;\n',
-      "template-expression-child.js": "export const child = true;\n",
-    });
-
-    const result = runVerifier(fixture.root);
-
-    expect(result.status, result.stderr).toBe(0);
-    expect(manifestPaths(result.stdout)).toEqual([
-      "apps/controller/dist/src/electron-main.js",
-      "apps/controller/dist/src/template-expression-child.js",
-    ]);
   });
 
   it.each([
-    ["a control block", "if (true) {}"],
-    ["a function body", "function boundedFunction() {}"],
-    ["a class body", "class BoundedClass {}"],
-  ] as const)("treats a regex after %s as inert text", (_label, prefix) => {
-    const fixture = createVerifierFixture({
-      "electron-main.js": [
-        `${prefix} /import\\("\\.\\/regex-decoy\\.js"\\)/u.test("");`,
-        'import "./regex-real-child.js";',
-        "",
-      ].join("\n"),
-      "regex-real-child.js": "export const child = true;\n",
-    });
-
-    const result = runVerifier(fixture.root);
-
-    expect(result.status, result.stderr).toBe(0);
-    expect(manifestPaths(result.stdout)).toEqual([
-      "apps/controller/dist/src/electron-main.js",
-      "apps/controller/dist/src/regex-real-child.js",
-    ]);
-  });
-
-  it("treats a slash after an object literal as division", () => {
-    const fixture = createVerifierFixture({
-      "electron-main.js": [
-        "const ratio = { valueOf() { return 8; } } /",
-        '  import("./division-child.js");',
-        "void ratio;",
-        "",
-      ].join("\n"),
-      "division-child.js": "export const child = true;\n",
-    });
-
-    const result = runVerifier(fixture.root);
-
-    expect(result.status, result.stderr).toBe(0);
-    expect(manifestPaths(result.stdout)).toEqual([
-      "apps/controller/dist/src/division-child.js",
-      "apps/controller/dist/src/electron-main.js",
-    ]);
-  });
-
-  it("discovers dynamic imports in class, function, and arrow expression division", () => {
-    const fixture = createVerifierFixture({
-      "electron-main.js": [
-        'void (class {} / import(".\\/class-expression-child.js") / 1);',
-        'void (function () {} / import(".\\/function-expression-child.js") / 1);',
-        'void (() => function () {} / import(".\\/arrow-expression-child.js") / 1)();',
-        "",
-      ].join("\n"),
-      "class-expression-child.js": "export const child = true;\n",
-      "function-expression-child.js": "export const child = true;\n",
-      "arrow-expression-child.js": "export const child = true;\n",
-    });
-
-    const result = runVerifier(fixture.root);
-
-    expect(result.status, result.stderr).toBe(0);
-    expect(manifestPaths(result.stdout)).toEqual([
-      "apps/controller/dist/src/arrow-expression-child.js",
-      "apps/controller/dist/src/class-expression-child.js",
-      "apps/controller/dist/src/electron-main.js",
-      "apps/controller/dist/src/function-expression-child.js",
-    ]);
-  });
-
-  it("discovers a static import carrying attributes", () => {
-    const fixture = createVerifierFixture({
-      "electron-main.js":
-        'import value from "./attribute-child.js" with { type: "json" };\nvoid value;\n',
-      "attribute-child.js": "export default true;\n",
-    });
-
-    const result = runVerifier(fixture.root);
-
-    expect(result.status, result.stderr).toBe(0);
-    expect(manifestPaths(result.stdout)).toEqual([
-      "apps/controller/dist/src/attribute-child.js",
-      "apps/controller/dist/src/electron-main.js",
-    ]);
-  });
-
-  it("discovers executable local edges inside bounded dynamic import options", () => {
-    const fixture = createVerifierFixture({
-      "electron-main.js": 'import "./options-parent.cjs";\n',
-      "options-parent.cjs": [
-        'void import("./options-child.js", {',
-        "  with: {",
-        '    type: (require("./nested-option.cjs"), "json"),',
-        '    mode: (import("./nested-option.js"), "bounded"),',
-        "  },",
-        "});",
-        "",
-      ].join("\n"),
-      "options-child.js": "export default true;\n",
-      "nested-option.cjs": "module.exports = true;\n",
-      "nested-option.js": "export const nested = true;\n",
-    });
-
-    const result = runVerifier(fixture.root);
-
-    expect(result.status, result.stderr).toBe(0);
-    expect(manifestPaths(result.stdout)).toEqual([
-      "apps/controller/dist/src/electron-main.js",
-      "apps/controller/dist/src/nested-option.cjs",
-      "apps/controller/dist/src/nested-option.js",
-      "apps/controller/dist/src/options-child.js",
-      "apps/controller/dist/src/options-parent.cjs",
-    ]);
-  });
-
-  it.each([
-    [
-      "computed dynamic import",
-      {
-        "electron-main.js":
-          'const child = "./computed-child.js";\nawait import(child);\n',
-      },
-      "Unsupported ambiguous dynamic import",
-    ],
-    [
-      "computed cjs require",
-      {
-        "electron-main.js": 'import "./computed-parent.cjs";\n',
-        "computed-parent.cjs":
-          'const child = "./computed-child.cjs";\nmodule.exports = require(child);\n',
-      },
-      "Unsupported ambiguous require",
-    ],
-    [
-      "unterminated block comment",
-      { "electron-main.js": "/* import-like text never closes" },
-      "Malformed emitted JavaScript",
-    ],
-  ] as const)("fails closed on %s", (_label, files, reason) => {
-    const fixture = createVerifierFixture(files);
-
-    const result = runVerifier(fixture.root);
-
-    expect(result.status).not.toBe(0);
-    expect(result.stderr).toContain(reason);
-  });
-
-  it("rejects a local import that escapes the canonical controller dist root", () => {
-    const fixture = createVerifierFixture({
-      "electron-main.js": 'import "../../../../escaped.js";\n',
+    ["relative chunk import", 'import "./chunk.js";\n'],
+    ["literal dynamic import", 'await import("node:fs");\n'],
+    ["ambiguous dynamic import", 'const id = "node:fs"; await import(id);\n'],
+    ["CommonJS require", 'require("node:fs");\n'],
+    ["non-electron bare import", 'import "zod";\n'],
+    ["invalid node namespace", 'import "node:not-a-real-builtin";\n'],
+  ] as const)("fails closed on %s", (_label, source) => {
+    const fixture = createVerifierFixture(source, {
+      "chunk.js": "export const chunk = true;\n",
     });
 
     const result = runVerifier(fixture.root);
 
     expect(result.status).not.toBe(0);
-    expect(result.stderr).toContain("escaped controller dist");
   });
 
-  it("rejects a missing local emitted module", () => {
-    const fixture = createVerifierFixture({
-      "electron-main.js": 'import "./missing.js";\n',
-    });
+  it("rejects a missing or oversized one-file candidate", () => {
+    const missing = createVerifierFixture();
+    rmSync(missing.bundle);
+    const missingResult = runVerifier(missing.root);
+    expect(missingResult.status).not.toBe(0);
 
-    const result = runVerifier(fixture.root);
-
-    expect(result.status).not.toBe(0);
-    expect(result.stderr).toContain("Missing emitted local module");
-  });
-
-  it("rejects distinct local paths that resolve to one canonical module", () => {
-    const fixture = createVerifierFixture({
-      "electron-main.js": [
-        'import "./shared/module.js";',
-        'import "./alias/module.js";',
-        "",
-      ].join("\n"),
-      "shared/module.js": "export const shared = true;\n",
-    });
-    symlinkSync(join(fixture.dist, "shared"), join(fixture.dist, "alias"), "junction");
-
-    const result = runVerifier(fixture.root);
-
-    expect(result.status).not.toBe(0);
-    expect(result.stderr).toContain("Duplicate canonical emitted module path");
-  });
-
-  it("rejects an electron-main graph containing 257 modules", () => {
-    const files: Record<string, string> = {
-      "electron-main.js": 'import "./module-000.js";\n',
-    };
-    for (let index = 0; index < 256; index += 1) {
-      const name = `module-${String(index).padStart(3, "0")}.js`;
-      files[name] =
-        index === 255
-          ? "export const last = true;\n"
-          : `import "./module-${String(index + 1).padStart(3, "0")}.js";\n`;
-    }
-    const fixture = createVerifierFixture(files);
-
-    const result = runVerifier(fixture.root);
-
-    expect(result.status).not.toBe(0);
-    expect(result.stderr).toContain("exceeds 256 modules");
-  });
-
-  it("rejects an emitted module larger than the finite file bound", () => {
-    const fixture = createVerifierFixture({
-      "electron-main.js": 'import "./oversized.js";\n',
-      "oversized.js": "export const oversized = true;\n",
-    });
-    truncateSync(join(fixture.dist, "oversized.js"), 16 * 1024 * 1024 + 1);
-
-    const result = runVerifier(fixture.root);
-
-    expect(result.status).not.toBe(0);
-    expect(result.stderr).toContain("module size is outside the finite bound");
-  });
-
-  it("statically verifies electron-main without executing it", () => {
-    const fixture = createVerifierFixture({
-      "electron-main.js": [
-        'import { writeFileSync } from "node:fs";',
-        'writeFileSync("electron-main-executed", "unsafe");',
-        "",
-      ].join("\n"),
-    });
-
-    const result = runVerifier(fixture.root);
-
-    expect(result.status, result.stderr).toBe(0);
-    expect(existsSync(join(fixture.root, "electron-main-executed"))).toBe(false);
+    const oversized = createVerifierFixture();
+    writeFileSync(oversized.bundle, Buffer.alloc(16 * 1024 * 1024 + 1, 0x61));
+    const oversizedResult = runVerifier(oversized.root);
+    expect(oversizedResult.status).not.toBe(0);
+    expect(oversizedResult.stderr).toContain("bundle size is outside the finite bound");
   });
 });

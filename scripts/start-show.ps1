@@ -45,14 +45,26 @@ $windowCloseHelperTimeoutMilliseconds = 2000
 $windowCloseHelperMaximumOutputBytes = 4096
 $maximumEvidenceBytes = 262144
 $maximumGraphManifestBytes = 262144
-$maximumGraphModules = 256
-$maximumCompiledModuleBytes = 16777216L
+$maximumRuntimeImports = 64
+$maximumMainBundleBytes = 16777216L
 $maximumLaunchFileBytes = 268435456L
 $maximumRuntimeExecutableBytes = 268435456L
 $maximumTypeScriptParserBytes = 9144216L
 $maximumTypeScriptPackageMetadataBytes = 65536L
 $crashWindowMilliseconds = 600000L
 $restartDelaysMilliseconds = @(1000, 2000, 4000)
+$allowedElectronMainRuntimeImports = @(
+    'electron'
+    'node:child_process'
+    'node:crypto'
+    'node:fs'
+    'node:fs/promises'
+    'node:net'
+    'node:path'
+    'node:perf_hooks'
+    'node:url'
+    'node:util'
+)
 
 $boundedOutputTypeName = 'JanVimExhibitionBoundedOutputV1'
 if ($null -eq ($boundedOutputTypeName -as [type])) {
@@ -752,9 +764,7 @@ function Read-StrictElectronModuleGraph {
     param(
         [Parameter(Mandatory = $true)][string]$Text,
         [Parameter(Mandatory = $true)][string]$RepositoryRoot,
-        [Parameter(Mandatory = $true)][string]$ControllerDistRoot,
-        [Parameter(Mandatory = $true)][string]$CompiledEntry,
-        [Parameter(Mandatory = $true)][string]$ShowAdapterEntry
+        [Parameter(Mandatory = $true)][string]$CompiledEntry
     )
 
     try {
@@ -768,13 +778,13 @@ function Read-StrictElectronModuleGraph {
     }
     Assert-ExactPropertySet `
         -InputObject $manifest `
-        -ExpectedNames @('schema', 'status', 'files') `
+        -ExpectedNames @('schema', 'status', 'files', 'runtimeImports') `
         -Reason 'electron-module-graph-invalid'
     if (
         -not (Test-ExactJsonInteger `
             -Value (Get-RequiredPropertyValue -InputObject $manifest -Name 'schema' -Reason 'electron-module-graph-invalid') `
-            -Expected 1) -or
-        (Get-RequiredPropertyValue -InputObject $manifest -Name 'status' -Reason 'electron-module-graph-invalid') -cne 'compiled-electron-main-graph-verified'
+            -Expected 2) -or
+        (Get-RequiredPropertyValue -InputObject $manifest -Name 'status' -Reason 'electron-module-graph-invalid') -cne 'compiled-electron-main-bundle-verified'
     ) {
         throw 'electron-module-graph-invalid'
     }
@@ -786,75 +796,84 @@ function Read-StrictElectronModuleGraph {
         throw 'electron-module-graph-invalid'
     }
     $files = @($filesValue)
-    if ($files.Count -lt 1 -or $files.Count -gt $maximumGraphModules) {
+    if ($files.Count -ne 1) {
         throw 'electron-module-graph-invalid'
     }
 
-    $seenPaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
-    $specifications = [Collections.Generic.List[object]]::new()
-    $previousRelativePath = $null
-    $compiledEntrySeen = $false
-    $showAdapterSeen = $false
-    foreach ($file in $files) {
-        if ($file -isnot [pscustomobject]) {
-            throw 'electron-module-graph-invalid'
-        }
-        Assert-ExactPropertySet `
-            -InputObject $file `
-            -ExpectedNames @('relativePath', 'bytes', 'sha256') `
-            -Reason 'electron-module-graph-invalid'
-        $relativePath = Get-RequiredPropertyValue `
-            -InputObject $file `
-            -Name 'relativePath' `
-            -Reason 'electron-module-graph-invalid'
-        $bytes = Get-RequiredPropertyValue `
-            -InputObject $file `
-            -Name 'bytes' `
-            -Reason 'electron-module-graph-invalid'
-        $sha256 = Get-RequiredPropertyValue `
-            -InputObject $file `
-            -Name 'sha256' `
-            -Reason 'electron-module-graph-invalid'
-        if (
-            $relativePath -isnot [string] -or
-            $relativePath -cnotmatch '^apps/controller/dist/src/(?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]+\.(?:js|mjs|cjs)$' -or
-            -not (Test-PositiveInteger -Value $bytes) -or
-            [long]$bytes -gt $maximumCompiledModuleBytes -or
-            -not (Test-HashValue -Value $sha256) -or
-            ($null -ne $previousRelativePath -and [string]::CompareOrdinal($previousRelativePath, $relativePath) -ge 0) -or
-            -not $seenPaths.Add($relativePath)
-        ) {
-            throw 'electron-module-graph-invalid'
-        }
-        $path = Resolve-ShowFullPath `
-            -Path (Join-Path $RepositoryRoot $relativePath) `
-            -Label 'electron-module-graph-path'
-        if (
-            -not (Test-ShowAtOrBelow -Candidate $path -Root $ControllerDistRoot) -or
-            ([IO.Path]::GetRelativePath($RepositoryRoot, $path).Replace('\', '/')) -cne $relativePath
-        ) {
-            throw 'electron-module-graph-invalid'
-        }
-        Assert-RequiredLeaf -Path $path -Reason 'electron-module-graph-invalid'
-        Assert-NoReparseTraversal -Path $path -Reason 'electron-module-graph-invalid'
-        if (Test-ShowPathEqual -Left $path -Right $CompiledEntry) {
-            $compiledEntrySeen = $true
-        }
-        if (Test-ShowPathEqual -Left $path -Right $ShowAdapterEntry) {
-            $showAdapterSeen = $true
-        }
-        $specifications.Add([pscustomobject]@{
-            Path = $path
-            ExpectedBytes = [long]$bytes
-            MaximumBytes = $maximumCompiledModuleBytes
-            ExpectedSha256 = $sha256
-        })
-        $previousRelativePath = $relativePath
-    }
-    if (-not $compiledEntrySeen -or -not $showAdapterSeen) {
+    $file = $files[0]
+    if ($file -isnot [pscustomobject]) {
         throw 'electron-module-graph-invalid'
     }
-    return $specifications.ToArray()
+    Assert-ExactPropertySet `
+        -InputObject $file `
+        -ExpectedNames @('relativePath', 'bytes', 'sha256') `
+        -Reason 'electron-module-graph-invalid'
+    $relativePath = Get-RequiredPropertyValue -InputObject $file -Name 'relativePath' -Reason 'electron-module-graph-invalid'
+    $bytes = Get-RequiredPropertyValue -InputObject $file -Name 'bytes' -Reason 'electron-module-graph-invalid'
+    $sha256 = Get-RequiredPropertyValue -InputObject $file -Name 'sha256' -Reason 'electron-module-graph-invalid'
+    if (
+        $relativePath -isnot [string] -or
+        $relativePath -cne 'apps/controller/dist/main/electron-main.js' -or
+        -not (Test-PositiveInteger -Value $bytes) -or
+        [long]$bytes -gt $maximumMainBundleBytes -or
+        -not (Test-HashValue -Value $sha256)
+    ) {
+        throw 'electron-module-graph-invalid'
+    }
+    $path = Resolve-ShowFullPath -Path (Join-Path $RepositoryRoot $relativePath) -Label 'electron-module-graph-path'
+    if (
+        -not (Test-ShowPathEqual -Left $path -Right $CompiledEntry) -or
+        ([IO.Path]::GetRelativePath($RepositoryRoot, $path).Replace('\', '/')) -cne $relativePath
+    ) {
+        throw 'electron-module-graph-invalid'
+    }
+    Assert-RequiredLeaf -Path $path -Reason 'electron-module-graph-invalid'
+    Assert-NoReparseTraversal -Path $path -Reason 'electron-module-graph-invalid'
+
+    $runtimeImportsValue = Get-RequiredPropertyValue `
+        -InputObject $manifest `
+        -Name 'runtimeImports' `
+        -Reason 'electron-module-graph-invalid'
+    if ($runtimeImportsValue -isnot [array]) {
+        throw 'electron-module-graph-invalid'
+    }
+    $runtimeImports = @($runtimeImportsValue)
+    if ($runtimeImports.Count -lt 1 -or $runtimeImports.Count -gt $maximumRuntimeImports) {
+        throw 'electron-module-graph-invalid'
+    }
+    $allowedImports = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($allowedImport in $allowedElectronMainRuntimeImports) {
+        [void]$allowedImports.Add($allowedImport)
+    }
+    $seenImports = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $previousImport = $null
+    $electronSeen = $false
+    foreach ($runtimeImport in $runtimeImports) {
+        if (
+            $runtimeImport -isnot [string] -or
+            $runtimeImport.Length -lt 1 -or
+            $runtimeImport.Length -gt 128 -or
+            -not $allowedImports.Contains($runtimeImport) -or
+            -not $seenImports.Add($runtimeImport) -or
+            ($null -ne $previousImport -and [string]::CompareOrdinal($previousImport, $runtimeImport) -ge 0)
+        ) {
+            throw 'electron-module-graph-invalid'
+        }
+        if ($runtimeImport -ceq 'electron') {
+            $electronSeen = $true
+        }
+        $previousImport = $runtimeImport
+    }
+    if (-not $electronSeen) {
+        throw 'electron-module-graph-invalid'
+    }
+
+    return [pscustomobject]@{
+        Path = $path
+        ExpectedBytes = [long]$bytes
+        MaximumBytes = $maximumMainBundleBytes
+        ExpectedSha256 = $sha256
+    }
 }
 
 function Test-JsonInteger {
@@ -1947,11 +1966,9 @@ if ($primaryDisplay.displayId -ceq $secondaryDisplay.displayId) {
 
 $controllerPackage = Join-Path $repositoryRoot 'apps\controller'
 $controllerPackageManifestPath = Join-Path $controllerPackage 'package.json'
-$controllerDistRoot = Join-Path $controllerPackage 'dist\src'
 $electronCommand = Join-Path $repositoryRoot 'node_modules\.bin\electron.cmd'
 $electronExecutable = Join-Path $repositoryRoot 'node_modules\electron\dist\electron.exe'
-$compiledEntry = Join-Path $controllerPackage 'dist\src\electron-main.js'
-$showAdapterEntry = Join-Path $controllerPackage 'dist\src\show-runtime-adapters.js'
+$compiledEntry = Join-Path $controllerPackage 'dist\main\electron-main.js'
 $moduleGraphVerifier = Join-Path $repositoryRoot 'scripts\verify-electron-module-graph.mjs'
 $typescriptParser = Join-Path $repositoryRoot 'node_modules\typescript\lib\typescript.js'
 $typescriptPackageManifest = Join-Path $repositoryRoot 'node_modules\typescript\package.json'
@@ -1969,7 +1986,6 @@ foreach ($requiredFile in @(
     $electronExecutable,
     $controllerPackageManifestPath,
     $compiledEntry,
-    $showAdapterEntry,
     $moduleGraphVerifier,
     $typescriptParser,
     $typescriptPackageManifest,
@@ -2015,7 +2031,19 @@ $nodeCandidates = @(Get-Command -Name 'node' -CommandType Application -ErrorActi
 if ($nodeCandidates.Count -lt 1) {
     throw 'node-command-missing'
 }
-$nodeCommand = $nodeCandidates[0].Source
+$nodeCommand = Resolve-ShowFullPath -Path $nodeCandidates[0].Source -Label 'node-command'
+Assert-RequiredLeaf -Path $nodeCommand -Reason 'node-command-missing'
+Assert-NoReparseTraversal -Path $nodeCommand -Reason 'node-command-reparse-rejected'
+$nodeClaimSpecifications = @(
+    New-FrozenInputClaimSpecification `
+        -Path $nodeCommand `
+        -MaximumBytes $maximumLaunchFileBytes `
+        -Reason 'node-executable-snapshot-failed'
+)
+$nodeClaims = Open-FrozenInputClaims -Specifications $nodeClaimSpecifications
+foreach ($nodeClaim in $nodeClaims) {
+    $frozenInputClaims.Add($nodeClaim)
+}
 $nodeVersionResult = Invoke-BoundedProcess `
     -FilePath $nodeCommand `
     -Arguments @('--version') `
@@ -2047,9 +2075,7 @@ if (
 $moduleGraphSpecifications = @(Read-StrictElectronModuleGraph `
     -Text $moduleGraphResult.Stdout `
     -RepositoryRoot $repositoryRoot `
-    -ControllerDistRoot $controllerDistRoot `
-    -CompiledEntry $compiledEntry `
-    -ShowAdapterEntry $showAdapterEntry)
+    -CompiledEntry $compiledEntry)
 
 $controllerPackageSnapshot = Read-BoundedJsonSnapshot `
     -Path $controllerPackageManifestPath `
@@ -2057,7 +2083,7 @@ $controllerPackageSnapshot = Read-BoundedJsonSnapshot `
     -Reason 'controller-package-invalid'
 $controllerPackageManifest = $controllerPackageSnapshot.Value
 if (
-    (Get-RequiredPropertyValue -InputObject $controllerPackageManifest -Name 'main' -Reason 'controller-package-invalid') -cne 'dist/src/electron-main.js' -or
+    (Get-RequiredPropertyValue -InputObject $controllerPackageManifest -Name 'main' -Reason 'controller-package-invalid') -cne 'dist/main/electron-main.js' -or
     (Get-RequiredPropertyValue -InputObject $controllerPackageManifest -Name 'type' -Reason 'controller-package-invalid') -cne 'module'
 ) {
     throw 'controller-package-invalid'

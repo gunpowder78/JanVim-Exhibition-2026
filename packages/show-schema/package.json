@@ -19,7 +19,7 @@
     "build": "tsc -b",
     "test": "vitest run"
   },
-  "devDependencies": {
+  "dependencies": {
     "zod": "4.4.3"
   }
 }

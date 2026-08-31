@@ -69,6 +69,27 @@ using System.Threading;
 
 public static class JanVimShowFakeNode
 {
+    private static void ScheduleNodeMutationAfterExit()
+    {
+        if (Environment.GetEnvironmentVariable("SHOW_TEST_NODE_MUTATION") != "attempt-after-graph-verifier") {
+            return;
+        }
+        ProcessStartInfo startInfo = new ProcessStartInfo();
+        startInfo.FileName = "pwsh";
+        startInfo.UseShellExecute = false;
+        startInfo.CreateNoWindow = true;
+        startInfo.ArgumentList.Add("-NoProfile");
+        startInfo.ArgumentList.Add("-NonInteractive");
+        startInfo.ArgumentList.Add("-File");
+        startInfo.ArgumentList.Add(Environment.GetEnvironmentVariable("SHOW_TEST_NODE_MUTATION_HELPER"));
+        startInfo.ArgumentList.Add(Process.GetCurrentProcess().Id.ToString());
+        startInfo.ArgumentList.Add(Environment.ProcessPath);
+        startInfo.ArgumentList.Add(Environment.GetEnvironmentVariable("SHOW_TEST_NODE_MUTATION_LOG"));
+        Process mutator = Process.Start(startInfo);
+        if (mutator == null) throw new InvalidOperationException("node mutator failed to start");
+        mutator.Dispose();
+    }
+
     private static void AttemptParserPackageMutation()
     {
         if (Environment.GetEnvironmentVariable("SHOW_TEST_PARSER_PACKAGE_MUTATION") != "attempt-before-graph-verifier") {
@@ -144,9 +165,7 @@ public static class JanVimShowFakeNode
             if (parserExit != 0) return parserExit;
             string root = Environment.CurrentDirectory;
             string[] relativePaths = new[] {
-                "apps/controller/dist/src/electron-main.js",
-                "apps/controller/dist/src/runtime-adapter-common.js",
-                "apps/controller/dist/src/show-runtime-adapters.js"
+                "apps/controller/dist/main/electron-main.js"
             };
             object[] files = new object[relativePaths.Length];
             for (int index = 0; index < relativePaths.Length; index++) {
@@ -160,9 +179,16 @@ public static class JanVimShowFakeNode
                 };
             }
             string graphOutput = JsonSerializer.Serialize(new {
-                schema = 1,
-                status = "compiled-electron-main-graph-verified",
-                files
+                schema = 2,
+                status = "compiled-electron-main-bundle-verified",
+                files,
+                runtimeImports = new[] {
+                    "electron",
+                    "node:child_process",
+                    "node:fs",
+                    "node:path",
+                    "node:url"
+                }
             });
             string graphOutputOverride = Environment.GetEnvironmentVariable("SHOW_TEST_GRAPH_OUTPUT_OVERRIDE");
             if (!String.IsNullOrWhiteSpace(graphOutputOverride)) {
@@ -184,6 +210,7 @@ public static class JanVimShowFakeNode
                     File.AppendAllText(sequenceLog, "graph-mutated" + Environment.NewLine);
                 }
             }
+            ScheduleNodeMutationAfterExit();
             return 0;
         }
         if (arguments[0] != "--version") return 91;
@@ -291,6 +318,7 @@ interface LauncherFixture {
   parserMutationLog: string;
   parserPackageMutationLog: string;
   parserExecutionLog: string;
+  nodeMutationLog: string;
   terminalMarker: string;
   leasePath: string;
   evidencePath: string;
@@ -298,9 +326,8 @@ interface LauncherFixture {
   watchdogAttempts: string;
   electronCommand: string;
   electronExecutable: string;
+  nodeExecutable: string;
   compiledEntry: string;
-  showAdapterEntry: string;
-  transitiveModule: string;
   graphVerifier: string;
   parserImplementation: string;
   parserPackageManifest: string;
@@ -346,8 +373,8 @@ interface RunOptions {
   launchMutation?:
     | "none"
     | "electron-executable"
+    | "node-executable"
     | "electron-main"
-    | "transitive-module"
     | "graph-verifier"
     | "runtime-verifier"
     | "close-helper"
@@ -356,6 +383,7 @@ interface RunOptions {
     | "typescript-package-metadata";
   parserMutation?: "none" | "attempt-before-graph-verifier";
   parserPackageMutation?: "none" | "attempt-before-graph-verifier";
+  nodeMutation?: "none" | "attempt-after-graph-verifier";
   graphOutput?: string;
   graphMutation?: "none" | "same-size-after-output";
   nodeVersion?: string;
@@ -388,6 +416,7 @@ interface RunOptions {
   janvimExecutableRelativePath?: string;
   janvimExecutableSha256?: string;
   janvimHwnd?: string;
+  controllerSleepMs?: number;
   timeoutMs?: number;
 }
 
@@ -400,6 +429,10 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $RemainingArguments = @($env:SHOW_TEST_CONTROLLER_ARGUMENTS | ConvertFrom-Json)
+$controllerSleepMilliseconds = [int]$env:SHOW_TEST_CONTROLLER_SLEEP_MS
+if ($controllerSleepMilliseconds -gt 0) {
+    Start-Sleep -Milliseconds $controllerSleepMilliseconds
+}
 
 function Get-ShowFlag {
     param([Parameter(Mandatory = $true)][string]$Name)
@@ -852,6 +885,40 @@ catch {
 }
 `;
 
+const fakeNodeMutationHelper = String.raw`
+[CmdletBinding()]
+param(
+    [Parameter(Mandatory = $true)][int]$ParentProcessId,
+    [Parameter(Mandatory = $true)][string]$Target,
+    [Parameter(Mandatory = $true)][string]$Log
+)
+
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
+Wait-Process -Id $ParentProcessId -Timeout 5 -ErrorAction SilentlyContinue
+$replacement = "$Target.changed-$PID"
+try {
+    [IO.File]::Copy($Target, $replacement, $false)
+    [IO.File]::AppendAllText(
+        $replacement,
+        ([Environment]::NewLine + 'changed-node-bytes' + [Environment]::NewLine)
+    )
+    [IO.File]::Move($replacement, $Target, $true)
+    Add-Content -LiteralPath $Log -Value 'replaced'
+}
+catch {
+    if (Test-Path -LiteralPath $replacement -PathType Leaf) {
+        [IO.File]::Delete($replacement)
+    }
+    $leafError = $_.Exception
+    while ($null -ne $leafError.InnerException) {
+        $leafError = $leafError.InnerException
+    }
+    $hresult = [uint32]([long]$leafError.HResult -band 0xffffffffL)
+    Add-Content -LiteralPath $Log -Value ('blocked:{0:X8}' -f $hresult)
+}
+`;
+
 const fakeCloseHelper = String.raw`
 [CmdletBinding()]
 param(
@@ -1023,6 +1090,7 @@ function makeLauncherFixture(): LauncherFixture {
   const parserMutationLog = join(root, "parser-mutation.log");
   const parserPackageMutationLog = join(root, "parser-package-mutation.log");
   const parserExecutionLog = join(root, "parser-execution.log");
+  const nodeMutationLog = join(root, "node-mutation.log");
   const terminalMarker = win32.join(externalRoot, "controller-terminal.json");
   const leasePath = win32.join(externalRoot, "run-lease.json");
   const evidencePath = win32.join(externalRoot, "show-run.json");
@@ -1036,22 +1104,14 @@ function makeLauncherFixture(): LauncherFixture {
     "dist",
     "electron.exe",
   );
-  const compiledEntry = join(root, "apps", "controller", "dist", "src", "electron-main.js");
-  const showAdapterEntry = join(
+  const nodeExecutable = join(root, "bin", "node.exe");
+  const compiledEntry = join(
     root,
     "apps",
     "controller",
     "dist",
-    "src",
-    "show-runtime-adapters.js",
-  );
-  const transitiveModule = join(
-    root,
-    "apps",
-    "controller",
-    "dist",
-    "src",
-    "runtime-adapter-common.js",
+    "main",
+    "electron-main.js",
   );
   const graphVerifier = join(root, "scripts", "verify-electron-module-graph.mjs");
   const parserImplementation = join(
@@ -1077,7 +1137,6 @@ function makeLauncherFixture(): LauncherFixture {
     dirname(electronCommand),
     dirname(electronExecutable),
     dirname(compiledEntry),
-    dirname(showAdapterEntry),
     dirname(janvimExecutable),
     join(root, "bin"),
     join(root, "psmodules", "NetTCPIP"),
@@ -1087,9 +1146,6 @@ function makeLauncherFixture(): LauncherFixture {
   }
   copyFileSync(productionScript, script);
   writeText(join(root, "AGENTS.md"), "# JanVim Exhibition 2026 agent instructions\n");
-  writeText(compiledEntry, 'import "./show-runtime-adapters.js";\n');
-  writeText(showAdapterEntry, 'import "./runtime-adapter-common.js";\n');
-  writeText(transitiveModule, "export const runtimeCommon = true;\n");
   writeText(janvimExecutable, "immutable fake runtime payload\n");
   writeText(checkedInMap, '{"schema":1,"mappingStatus":"unconfirmed"}\n');
   const showConfig = copyFixtureFile("show/janvim-show.toml", root);
@@ -1194,7 +1250,11 @@ function makeLauncherFixture(): LauncherFixture {
     join(root, "scripts", "attempt-launch-mutation.ps1"),
     fakeLaunchMutationHelper,
   );
-  linkSync(fakeNodeExecutableTemplate(), join(root, "bin", "node.exe"));
+  writeText(
+    join(root, "scripts", "attempt-node-mutation.ps1"),
+    fakeNodeMutationHelper,
+  );
+  copyFileSync(fakeNodeExecutableTemplate(), nodeExecutable);
   writeText(
     join(root, "psmodules", "NetTCPIP", "NetTCPIP.psm1"),
     fakeNetTcpIpModule,
@@ -1230,6 +1290,7 @@ function makeLauncherFixture(): LauncherFixture {
     parserMutationLog,
     parserPackageMutationLog,
     parserExecutionLog,
+    nodeMutationLog,
     terminalMarker,
     leasePath,
     evidencePath,
@@ -1237,9 +1298,8 @@ function makeLauncherFixture(): LauncherFixture {
     watchdogAttempts,
     electronCommand,
     electronExecutable,
+    nodeExecutable,
     compiledEntry,
-    showAdapterEntry,
-    transitiveModule,
     graphVerifier,
     parserImplementation,
     parserPackageManifest,
@@ -1304,8 +1364,8 @@ function runLauncher(
   const launchMutationTarget = {
     none: fixture.compiledEntry,
     "electron-executable": fixture.electronExecutable,
+    "node-executable": fixture.nodeExecutable,
     "electron-main": fixture.compiledEntry,
-    "transitive-module": fixture.transitiveModule,
     "graph-verifier": fixture.graphVerifier,
     "runtime-verifier": fixture.verifyRuntime,
     "close-helper": fixture.closeHelper,
@@ -1351,7 +1411,14 @@ function runLauncher(
         SHOW_TEST_GRAPH_OUTPUT_OVERRIDE:
           options.graphOutput === undefined ? "" : graphOutputOverride,
         SHOW_TEST_GRAPH_MUTATION: options.graphMutation ?? "none",
-        SHOW_TEST_GRAPH_MUTATION_TARGET: fixture.transitiveModule,
+        SHOW_TEST_GRAPH_MUTATION_TARGET: fixture.compiledEntry,
+        SHOW_TEST_NODE_MUTATION: options.nodeMutation ?? "none",
+        SHOW_TEST_NODE_MUTATION_HELPER: join(
+          fixture.root,
+          "scripts",
+          "attempt-node-mutation.ps1",
+        ),
+        SHOW_TEST_NODE_MUTATION_LOG: fixture.nodeMutationLog,
         SHOW_TEST_PARSER_MUTATION: options.parserMutation ?? "none",
         SHOW_TEST_PARSER_IMPLEMENTATION: fixture.parserImplementation,
         SHOW_TEST_PARSER_MUTATION_LOG: fixture.parserMutationLog,
@@ -1366,6 +1433,7 @@ function runLauncher(
         SHOW_TEST_CONTROLLER_OUTPUT_BYTES: String(
           options.controllerOutputBytes ?? 0,
         ),
+        SHOW_TEST_CONTROLLER_SLEEP_MS: String(options.controllerSleepMs ?? 0),
         SHOW_TEST_NODE_VERSION: options.nodeVersion ?? "v22.23.0",
         SHOW_TEST_NODE_BEHAVIOR: options.nodeBehavior ?? "normal",
         SHOW_TEST_VERIFY_EXIT: String(options.verifyExit ?? 0),
@@ -1465,6 +1533,7 @@ interface GraphManifest {
   schema: number;
   status: string;
   files: GraphFileRecord[];
+  runtimeImports: string[];
 }
 
 function graphFileRecord(path: string, relativePath: string): GraphFileRecord {
@@ -1477,21 +1546,20 @@ function graphFileRecord(path: string, relativePath: string): GraphFileRecord {
 
 function validGraphManifest(fixture: LauncherFixture): GraphManifest {
   return {
-    schema: 1,
-    status: "compiled-electron-main-graph-verified",
+    schema: 2,
+    status: "compiled-electron-main-bundle-verified",
     files: [
       graphFileRecord(
         fixture.compiledEntry,
-        "apps/controller/dist/src/electron-main.js",
+        "apps/controller/dist/main/electron-main.js",
       ),
-      graphFileRecord(
-        fixture.transitiveModule,
-        "apps/controller/dist/src/runtime-adapter-common.js",
-      ),
-      graphFileRecord(
-        fixture.showAdapterEntry,
-        "apps/controller/dist/src/show-runtime-adapters.js",
-      ),
+    ],
+    runtimeImports: [
+      "electron",
+      "node:child_process",
+      "node:fs",
+      "node:path",
+      "node:url",
     ],
   };
 }
@@ -1542,7 +1610,7 @@ const invalidGraphOutputCases: readonly InvalidGraphOutputCase[] = [
     label: "wrong schema",
     reason: "electron-module-graph-invalid",
     output: (fixture) =>
-      changedGraphOutput(fixture, (manifest) => ({ ...manifest, schema: 2 })),
+      changedGraphOutput(fixture, (manifest) => ({ ...manifest, schema: 1 })),
   },
   {
     label: "non-string status",
@@ -1654,7 +1722,7 @@ const invalidGraphOutputCases: readonly InvalidGraphOutputCase[] = [
           manifest.files[2]!,
           graphFileRecord(
             unsupported,
-            "apps/controller/dist/src/unsupported.ts",
+            "apps/controller/dist/main/unsupported.ts",
           ),
         ],
       }));
@@ -1807,12 +1875,57 @@ const invalidGraphOutputCases: readonly InvalidGraphOutputCase[] = [
       })),
   },
   {
-    label: "missing show adapter",
+    label: "missing runtime imports",
+    reason: "electron-module-graph-invalid",
+    output: (fixture) =>
+      changedGraphOutput(
+        fixture,
+        ({ runtimeImports: _runtimeImports, ...manifest }) => manifest,
+      ),
+  },
+  {
+    label: "non-array runtime imports",
     reason: "electron-module-graph-invalid",
     output: (fixture) =>
       changedGraphOutput(fixture, (manifest) => ({
         ...manifest,
-        files: manifest.files.slice(0, 2),
+        runtimeImports: "electron",
+      })),
+  },
+  {
+    label: "empty runtime imports",
+    reason: "electron-module-graph-invalid",
+    output: (fixture) =>
+      changedGraphOutput(fixture, (manifest) => ({
+        ...manifest,
+        runtimeImports: [],
+      })),
+  },
+  {
+    label: "unsorted runtime imports",
+    reason: "electron-module-graph-invalid",
+    output: (fixture) =>
+      changedGraphOutput(fixture, (manifest) => ({
+        ...manifest,
+        runtimeImports: ["node:fs", "electron"],
+      })),
+  },
+  {
+    label: "duplicate runtime import",
+    reason: "electron-module-graph-invalid",
+    output: (fixture) =>
+      changedGraphOutput(fixture, (manifest) => ({
+        ...manifest,
+        runtimeImports: ["electron", "electron"],
+      })),
+  },
+  {
+    label: "unsupported runtime import",
+    reason: "electron-module-graph-invalid",
+    output: (fixture) =>
+      changedGraphOutput(fixture, (manifest) => ({
+        ...manifest,
+        runtimeImports: ["electron", "zod"],
       })),
   },
 ];
@@ -1937,7 +2050,7 @@ describe("offline show launcher and external watchdog", () => {
     expect(source).toMatch(/\$restartDelaysMilliseconds\s*=\s*@\(1000,\s*2000,\s*4000\)/u);
   });
 
-  it("preflights the exact toolchain, frozen inputs, and confirmed external map before launch", () => {
+  it("preflights one strict main bundle and the exact frozen toolchain before launch", () => {
     const fixture = makeLauncherFixture();
     try {
       const result = runLauncher(
@@ -2045,6 +2158,38 @@ describe("offline show launcher and external watchdog", () => {
     }
   }, 15_000);
 
+  it("freezes the exact resolved Node executable before version and graph verification", () => {
+    const fixture = makeLauncherFixture();
+    const originalNodeSha256 = sha256(fixture.nodeExecutable);
+    try {
+      const result = runLauncher(
+        fixture,
+        launcherArguments(fixture, "ValidateOnly"),
+        {
+          behavior: "matching-success",
+          nodeMutation: "attempt-after-graph-verifier",
+          controllerSleepMs: 1_000,
+        },
+      );
+      const mutationDiagnostic = existsSync(fixture.nodeMutationLog)
+        ? readFileSync(fixture.nodeMutationLog, "utf8").trim()
+        : "node-mutation-log-missing";
+      const sequence = existsSync(fixture.sequenceLog)
+        ? readFileSync(fixture.sequenceLog, "utf8").trim().split(/\r?\n/u)
+        : [];
+
+      expect.soft(result.status, output(result)).toBe(0);
+      expect.soft(mutationDiagnostic).toMatch(/^blocked:800700(?:05|20)$/u);
+      expect.soft(sha256(fixture.nodeExecutable)).toBe(originalNodeSha256);
+      expect.soft(sequence.indexOf("graph-verify")).toBeGreaterThanOrEqual(0);
+      expect.soft(sequence.indexOf("electron")).toBeGreaterThan(
+        sequence.indexOf("graph-verify"),
+      );
+    } finally {
+      fixture.cleanup();
+    }
+  }, 15_000);
+
   it.each(invalidGraphOutputCases)(
     "rejects graph verifier output before Electron: $label",
     ({ output: graphOutput, reason }) => {
@@ -2076,8 +2221,8 @@ describe("offline show launcher and external watchdog", () => {
 
   it("rejects a same-size graph file mutation after verifier output before claim opening", () => {
     const fixture = makeLauncherFixture();
-    const originalSize = statSync(fixture.transitiveModule).size;
-    const originalSha256 = sha256(fixture.transitiveModule);
+    const originalSize = statSync(fixture.compiledEntry).size;
+    const originalSha256 = sha256(fixture.compiledEntry);
     try {
       const result = runLauncher(
         fixture,
@@ -2099,8 +2244,8 @@ describe("offline show launcher and external watchdog", () => {
       expect(sequence).toContain("graph-mutated");
       expect(sequence).not.toContain("verify");
       expect(sequence).not.toContain("electron");
-      expect(statSync(fixture.transitiveModule).size).toBe(originalSize);
-      expect(sha256(fixture.transitiveModule)).not.toBe(originalSha256);
+      expect(statSync(fixture.compiledEntry).size).toBe(originalSize);
+      expect(sha256(fixture.compiledEntry)).not.toBe(originalSha256);
     } finally {
       fixture.cleanup();
     }
@@ -2725,8 +2870,8 @@ describe("offline show launcher and external watchdog", () => {
 
   it.each([
     ["electron executable", "electron-executable", (fixture: LauncherFixture) => fixture.electronExecutable],
+    ["resolved Node executable", "node-executable", (fixture: LauncherFixture) => fixture.nodeExecutable],
     ["electron-main.js", "electron-main", (fixture: LauncherFixture) => fixture.compiledEntry],
-    ["transitive module", "transitive-module", (fixture: LauncherFixture) => fixture.transitiveModule],
     ["graph verifier", "graph-verifier", (fixture: LauncherFixture) => fixture.graphVerifier],
     ["TypeScript parser", "typescript-parser", (fixture: LauncherFixture) => fixture.parserImplementation],
     ["TypeScript package metadata", "typescript-package-metadata", (fixture: LauncherFixture) => fixture.parserPackageManifest],

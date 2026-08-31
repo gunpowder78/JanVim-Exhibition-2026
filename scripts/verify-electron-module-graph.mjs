@@ -9,142 +9,23 @@ import {
   readSync,
   realpathSync,
 } from "node:fs";
-import { dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { isBuiltin } from "node:module";
+import { isAbsolute, join, relative, sep } from "node:path";
 import process from "node:process";
-import { URL, fileURLToPath, pathToFileURL } from "node:url";
+import { URL, fileURLToPath } from "node:url";
 
 const repositoryRoot = fileURLToPath(new URL("../", import.meta.url));
-const controllerDistRoot = join(repositoryRoot, "apps", "controller", "dist", "src");
-const electronMainPath = join(controllerDistRoot, "electron-main.js");
-const adapterPaths = [
-  join(controllerDistRoot, "g2-runtime-adapters.js"),
-  join(controllerDistRoot, "show-runtime-adapters.js"),
-];
-const maximumGraphModules = 256;
-const maximumEmittedModuleBytes = 16 * 1024 * 1024;
-const maximumAstNodesPerModule = maximumEmittedModuleBytes + 2;
-const emittedExtensions = new Set([".js", ".mjs", ".cjs"]);
-const TypeScriptSourceExtension = /\.(?:ts|tsx|mts|cts)(?:[?#].*)?$/iu;
+const mainDistRoot = join(repositoryRoot, "apps", "controller", "dist", "main");
+const electronMainPath = join(mainDistRoot, "electron-main.js");
+const electronMainRelativePath =
+  "apps/controller/dist/main/electron-main.js";
+const maximumBundleBytes = 16 * 1024 * 1024;
+const maximumAstNodes = maximumBundleBytes + 2;
+const maximumRuntimeImports = 64;
+const maximumRuntimeImportCharacters = 128;
 
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error);
-}
-
-function parseJavaScript(source, modulePath) {
-  let sourceFile;
-  try {
-    sourceFile = typescript.createSourceFile(
-      modulePath,
-      source,
-      typescript.ScriptTarget.Latest,
-      true,
-      typescript.ScriptKind.JS,
-    );
-  } catch (error) {
-    throw new Error(
-      `JavaScript parser failed: ${modulePath}: ${errorMessage(error)}`,
-      { cause: error },
-    );
-  }
-
-  if (sourceFile.parseDiagnostics.length > 0) {
-    const diagnostic = sourceFile.parseDiagnostics[0];
-    const detail = typescript.flattenDiagnosticMessageText(
-      diagnostic.messageText,
-      " ",
-    );
-    throw new Error(`Malformed emitted JavaScript: ${modulePath}: ${detail}`);
-  }
-  return sourceFile;
-}
-
-function literalCallSpecifier(argument, modulePath, kind) {
-  if (argument === undefined || !typescript.isStringLiteralLike(argument)) {
-    throw new Error(`Unsupported ambiguous ${kind}: ${modulePath}`);
-  }
-  return argument.text;
-}
-
-function discoverModuleSpecifiers(source, modulePath) {
-  const sourceFile = parseJavaScript(source, modulePath);
-  const pending = [sourceFile];
-  const specifiers = [];
-  let nodeCount = 1;
-
-  while (pending.length > 0) {
-    const node = pending.pop();
-
-    if (typescript.isImportDeclaration(node)) {
-      if (!typescript.isStringLiteral(node.moduleSpecifier)) {
-        throw new Error(
-          `Malformed emitted JavaScript: ${modulePath}: import module specifier is not a string`,
-        );
-      }
-      specifiers.push({
-        specifier: node.moduleSpecifier.text,
-        usesCommonJsRequestSemantics: false,
-      });
-    } else if (
-      typescript.isExportDeclaration(node) &&
-      node.moduleSpecifier !== undefined
-    ) {
-      if (!typescript.isStringLiteral(node.moduleSpecifier)) {
-        throw new Error(
-          `Malformed emitted JavaScript: ${modulePath}: export module specifier is not a string`,
-        );
-      }
-      specifiers.push({
-        specifier: node.moduleSpecifier.text,
-        usesCommonJsRequestSemantics: false,
-      });
-    } else if (typescript.isCallExpression(node)) {
-      if (node.expression.kind === typescript.SyntaxKind.ImportKeyword) {
-        specifiers.push({
-          specifier: literalCallSpecifier(
-            node.arguments[0],
-            modulePath,
-            "dynamic import",
-          ),
-          usesCommonJsRequestSemantics: false,
-        });
-      } else if (
-        typescript.isIdentifier(node.expression) &&
-        node.expression.text === "require"
-      ) {
-        specifiers.push({
-          specifier: literalCallSpecifier(
-            node.arguments[0],
-            modulePath,
-            "require",
-          ),
-          usesCommonJsRequestSemantics: true,
-        });
-      }
-    }
-
-    const children = [];
-    try {
-      typescript.forEachChild(node, (child) => {
-        if (nodeCount >= maximumAstNodesPerModule) {
-          throw new Error(
-            `JavaScript AST exceeds ${maximumAstNodesPerModule} nodes: ${modulePath}`,
-          );
-        }
-        nodeCount += 1;
-        children.push(child);
-      });
-    } catch (error) {
-      throw new Error(
-        `JavaScript AST traversal failed: ${modulePath}: ${errorMessage(error)}`,
-        { cause: error },
-      );
-    }
-    for (let index = children.length - 1; index >= 0; index -= 1) {
-      pending.push(children[index]);
-    }
-  }
-
-  return specifiers;
 }
 
 function assertInsideRoot(path, root) {
@@ -154,28 +35,20 @@ function assertInsideRoot(path, root) {
     pathFromRoot.startsWith(`..${sep}`) ||
     isAbsolute(pathFromRoot)
   ) {
-    throw new Error(`Emitted module escaped controller dist: ${path}`);
+    throw new Error(`Electron-main bundle escaped dist/main: ${path}`);
   }
 }
 
-function pathKey(path) {
-  return process.platform === "win32" ? path.toLowerCase() : path;
-}
-
-function canonicalPath(path) {
+function readBoundedBundle(path) {
   if (!existsSync(path)) {
-    throw new Error(`Missing emitted local module: ${path}`);
+    throw new Error(`Missing Electron-main bundle: ${path}`);
   }
-  return realpathSync.native(path);
-}
-
-function readBoundedModule(path) {
   const descriptor = openSync(path, "r");
   const chunks = [];
   let totalBytes = 0;
   try {
-    while (totalBytes <= maximumEmittedModuleBytes) {
-      const remainingBytes = maximumEmittedModuleBytes + 1 - totalBytes;
+    while (totalBytes <= maximumBundleBytes) {
+      const remainingBytes = maximumBundleBytes + 1 - totalBytes;
       const chunk = Buffer.allocUnsafe(Math.min(64 * 1024, remainingBytes));
       const bytesRead = readSync(descriptor, chunk, 0, chunk.byteLength, null);
       if (bytesRead === 0) break;
@@ -185,105 +58,143 @@ function readBoundedModule(path) {
   } finally {
     closeSync(descriptor);
   }
-  if (totalBytes < 1 || totalBytes > maximumEmittedModuleBytes) {
-    throw new Error(`Emitted module size is outside the finite bound: ${path}`);
+  if (totalBytes < 1 || totalBytes > maximumBundleBytes) {
+    throw new Error(
+      `Electron-main bundle size is outside the finite bound: ${path}`,
+    );
   }
   return Buffer.concat(chunks, totalBytes);
 }
 
-function verifyEmittedGraph(entryPath) {
-  const canonicalRepositoryRoot = realpathSync.native(repositoryRoot);
-  const canonicalControllerDistRoot = realpathSync.native(controllerDistRoot);
-  const pending = [entryPath];
-  const visited = new Set();
-  const lexicalPathByCanonicalPath = new Map();
-  const files = [];
-
-  while (pending.length > 0) {
-    const requestedPath = resolve(pending.pop());
-    assertInsideRoot(requestedPath, controllerDistRoot);
-    if (!emittedExtensions.has(extname(requestedPath).toLowerCase())) {
-      throw new Error(`Unsupported emitted local module extension: ${requestedPath}`);
-    }
-    const modulePath = canonicalPath(requestedPath);
-    assertInsideRoot(modulePath, canonicalControllerDistRoot);
-    const canonicalKey = pathKey(modulePath);
-    const lexicalKey = pathKey(requestedPath);
-    const priorLexicalPath = lexicalPathByCanonicalPath.get(canonicalKey);
-    if (priorLexicalPath !== undefined && priorLexicalPath !== lexicalKey) {
-      throw new Error(
-        `Duplicate canonical emitted module path: ${requestedPath} -> ${modulePath}`,
-      );
-    }
-    lexicalPathByCanonicalPath.set(canonicalKey, lexicalKey);
-    if (visited.has(canonicalKey)) continue;
-    if (visited.size >= maximumGraphModules) {
-      throw new Error(`Emitted module graph exceeds ${maximumGraphModules} modules`);
-    }
-    visited.add(canonicalKey);
-
-    const bytes = readBoundedModule(modulePath);
-    const source = bytes.toString("utf8");
-    files.push({
-      relativePath: relative(canonicalRepositoryRoot, modulePath).split(sep).join("/"),
-      bytes: bytes.byteLength,
-      sha256: createHash("sha256").update(bytes).digest("hex"),
-    });
-    for (const {
-      specifier,
-      usesCommonJsRequestSemantics,
-    } of discoverModuleSpecifiers(source, modulePath)) {
-      if (TypeScriptSourceExtension.test(specifier)) {
-        throw new Error(
-          `TypeScript source extension remains in emitted import: ${modulePath} -> ${specifier}`,
-        );
-      }
-      const isLocalSpecifier =
-        specifier.startsWith("./") ||
-        specifier.startsWith("../") ||
-        (process.platform === "win32" &&
-          usesCommonJsRequestSemantics &&
-          (specifier.startsWith(".\\") || specifier.startsWith("..\\")));
-      if (!isLocalSpecifier) continue;
-
-      const dependencyPath = resolve(dirname(modulePath), specifier);
-      assertInsideRoot(dependencyPath, canonicalControllerDistRoot);
-      if (!emittedExtensions.has(extname(dependencyPath).toLowerCase())) {
-        throw new Error(
-          `Unsupported emitted local module extension: ${modulePath} -> ${specifier}`,
-        );
-      }
-      pending.push(dependencyPath);
-    }
-  }
-
-  return files.sort((left, right) =>
-    left.relativePath < right.relativePath
-      ? -1
-      : left.relativePath > right.relativePath
-        ? 1
-        : 0,
+function parseJavaScript(source, modulePath) {
+  const sourceFile = typescript.createSourceFile(
+    modulePath,
+    source,
+    typescript.ScriptTarget.Latest,
+    true,
+    typescript.ScriptKind.JS,
   );
+  if (sourceFile.parseDiagnostics.length > 0) {
+    const diagnostic = sourceFile.parseDiagnostics[0];
+    const detail = typescript.flattenDiagnosticMessageText(
+      diagnostic.messageText,
+      " ",
+    );
+    throw new Error(`Malformed Electron-main bundle: ${detail}`);
+  }
+  return sourceFile;
 }
 
-async function main() {
-  const files = verifyEmittedGraph(electronMainPath);
+function addRuntimeImport(runtimeImports, specifier) {
+  if (
+    typeof specifier !== "string" ||
+    specifier.length < 1 ||
+    specifier.length > maximumRuntimeImportCharacters
+  ) {
+    throw new Error("Electron-main runtime import is outside the finite bound");
+  }
+  if (specifier === "electron") {
+    runtimeImports.add(specifier);
+    return;
+  }
+  if (specifier.startsWith("node:") && isBuiltin(specifier)) {
+    runtimeImports.add(specifier);
+    return;
+  }
+  throw new Error(`Unsupported Electron-main runtime import: ${specifier}`);
+}
 
-  for (const adapterPath of adapterPaths) {
-    await import(pathToFileURL(adapterPath).href);
+function inspectRuntimeImports(source, modulePath) {
+  const sourceFile = parseJavaScript(source, modulePath);
+  const pending = [sourceFile];
+  const runtimeImports = new Set();
+  let nodeCount = 1;
+
+  while (pending.length > 0) {
+    const node = pending.pop();
+    if (typescript.isImportDeclaration(node)) {
+      if (!typescript.isStringLiteral(node.moduleSpecifier)) {
+        throw new Error("Electron-main import specifier is not a string");
+      }
+      addRuntimeImport(runtimeImports, node.moduleSpecifier.text);
+    } else if (
+      typescript.isExportDeclaration(node) &&
+      node.moduleSpecifier !== undefined
+    ) {
+      if (!typescript.isStringLiteral(node.moduleSpecifier)) {
+        throw new Error("Electron-main export specifier is not a string");
+      }
+      addRuntimeImport(runtimeImports, node.moduleSpecifier.text);
+    } else if (typescript.isCallExpression(node)) {
+      if (node.expression.kind === typescript.SyntaxKind.ImportKeyword) {
+        throw new Error("Unsupported Electron-main dynamic import");
+      }
+      if (
+        typescript.isIdentifier(node.expression) &&
+        node.expression.text === "require"
+      ) {
+        throw new Error("Unsupported Electron-main require call");
+      }
+    }
+
+    const children = [];
+    typescript.forEachChild(node, (child) => {
+      if (nodeCount >= maximumAstNodes) {
+        throw new Error(
+          `Electron-main AST exceeds ${maximumAstNodes} nodes`,
+        );
+      }
+      nodeCount += 1;
+      children.push(child);
+    });
+    for (let index = children.length - 1; index >= 0; index -= 1) {
+      pending.push(children[index]);
+    }
   }
 
-  process.stdout.write(
-    `${JSON.stringify({
-      schema: 1,
-      status: "compiled-electron-main-graph-verified",
-      files,
-    })}\n`,
+  const sorted = [...runtimeImports].sort();
+  if (sorted.length < 1 || sorted.length > maximumRuntimeImports) {
+    throw new Error("Electron-main runtime import count is outside the finite bound");
+  }
+  return sorted;
+}
+
+function verifyBundle() {
+  const canonicalRepositoryRoot = realpathSync.native(repositoryRoot);
+  const canonicalMainDistRoot = realpathSync.native(mainDistRoot);
+  const canonicalElectronMainPath = realpathSync.native(electronMainPath);
+  assertInsideRoot(canonicalElectronMainPath, canonicalMainDistRoot);
+  const canonicalRelativePath = relative(
+    canonicalRepositoryRoot,
+    canonicalElectronMainPath,
+  ).split(sep).join("/");
+  if (canonicalRelativePath !== electronMainRelativePath) {
+    throw new Error(
+      `Electron-main bundle path is not canonical: ${canonicalRelativePath}`,
+    );
+  }
+
+  const bytes = readBoundedBundle(canonicalElectronMainPath);
+  const runtimeImports = inspectRuntimeImports(
+    bytes.toString("utf8"),
+    canonicalElectronMainPath,
   );
+  return {
+    schema: 2,
+    status: "compiled-electron-main-bundle-verified",
+    files: [
+      {
+        relativePath: electronMainRelativePath,
+        bytes: bytes.byteLength,
+        sha256: createHash("sha256").update(bytes).digest("hex"),
+      },
+    ],
+    runtimeImports,
+  };
 }
 
 try {
-  await main();
+  process.stdout.write(`${JSON.stringify(verifyBundle())}\n`);
 } catch (error) {
   process.stderr.write(`${errorMessage(error)}\n`);
   process.exitCode = 1;

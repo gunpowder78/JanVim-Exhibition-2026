@@ -4,10 +4,11 @@
   "private": true,
   "type": "module",
   "dependencies": {
-    "@janvim-exhibition/show-schema": "file:../packages/show-schema"
+    "@janvim-exhibition/show-schema": "file:../../packages/show-schema",
+    "zod": "4.4.3"
   },
-  "main": "dist/src/electron-main.js",
+  "main": "dist/main/electron-main.js",
   "scripts": {
-    "build": "tsc -b && vite build --config vite.preload.config.ts"
+    "build": "tsc -b && vite build --config vite.main.config.ts && vite build --config vite.preload.config.ts"
   }
 }
