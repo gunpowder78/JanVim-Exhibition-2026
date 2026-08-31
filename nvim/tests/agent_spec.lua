@@ -319,14 +319,11 @@ run("shutdown closes only the agent connection and accepts no user string", func
   agent:dispose()
 end)
 
-run("init connects only to loopback, frames commands, and closes overlong input", function()
+local function new_connection_fixture(options)
+  options = options or {}
   local exhibition = require("janvim_exhibition")
   local writes = {}
-  local dispatched = {}
-  local wrap_count = 0
-  local timer_stopped = false
-  local timer_closed = false
-  local fake_tcp = { closed = false, reader = nil }
+  local fake_tcp = { closed = false, close_count = 0, reader = nil }
 
   function fake_tcp:connect(host, port, callback)
     equal(host, "127.0.0.1")
@@ -335,10 +332,7 @@ run("init connects only to loopback, frames commands, and closes overlong input"
   end
 
   function fake_tcp:write(payload, callback)
-    table.insert(writes, payload)
-    if callback then
-      callback(nil)
-    end
+    table.insert(writes, { payload = payload, callback = callback })
   end
 
   function fake_tcp:read_start(callback)
@@ -354,26 +348,114 @@ run("init connects only to loopback, frames commands, and closes overlong input"
   end
 
   function fake_tcp:close()
+    self.close_count = self.close_count + 1
     self.closed = true
   end
 
-  local fake_timer = { closed = false }
+  local fake_timer = { closed = false, stopped = false }
   function fake_timer:start(timeout_ms, repeat_ms, callback)
     equal(timeout_ms, 1000)
     equal(repeat_ms, 0)
     self.callback = callback
   end
   function fake_timer:stop()
-    timer_stopped = true
+    self.stopped = true
   end
   function fake_timer:is_closing()
     return self.closed
   end
   function fake_timer:close()
     self.closed = true
-    timer_closed = true
   end
 
+  local connection = exhibition.setup({
+    port = 32123,
+    token = TOKEN,
+    uv = {
+      new_tcp = function()
+        return fake_tcp
+      end,
+      new_timer = function()
+        return fake_timer
+      end,
+    },
+    agent = options.agent,
+    schedule_wrap = options.schedule_wrap or function(callback)
+      return callback
+    end,
+    schedule = options.schedule or function(callback)
+      callback()
+    end,
+    parent_pid = options.parent_pid or 7628,
+    parent_alive = options.parent_alive or function()
+      return true
+    end,
+    exit_backend = options.exit_backend or function() end,
+  })
+
+  return {
+    connection = connection,
+    fake_tcp = fake_tcp,
+    fake_timer = fake_timer,
+    writes = writes,
+  }
+end
+
+run("shutdown flushes its ack before one orphan backend exit", function()
+  local exit_count = 0
+  local fixture = new_connection_fixture({
+    parent_pid = 7628,
+    parent_alive = function(pid)
+      equal(pid, 7628)
+      return false
+    end,
+    exit_backend = function()
+      exit_count = exit_count + 1
+    end,
+  })
+
+  fixture.fake_tcp.reader(nil, vim.json.encode(command("cue-shutdown", { type = "shutdown" })) .. "\n")
+  equal(#fixture.writes, 2)
+  local acknowledgement = vim.json.decode(fixture.writes[2].payload)
+  equal(acknowledgement.schema, 1)
+  equal(acknowledgement.cueId, "cue-shutdown")
+  equal(acknowledgement.outcome, "applied")
+  equal(exit_count, 0)
+  expect(not fixture.fake_tcp.closed, "transport closed before the ACK write completed")
+
+  local complete_write = assert(fixture.writes[2].callback)
+  complete_write(nil)
+  equal(exit_count, 1)
+  expect(fixture.fake_tcp.closed, "transport remained open after the ACK write completed")
+
+  complete_write(nil)
+  equal(exit_count, 1)
+  fixture.connection:close()
+end)
+
+run("shutdown keeps a live-parent backend for normal HWND teardown", function()
+  local exit_count = 0
+  local fixture = new_connection_fixture({
+    parent_alive = function()
+      return true
+    end,
+    exit_backend = function()
+      exit_count = exit_count + 1
+    end,
+  })
+
+  fixture.fake_tcp.reader(nil, vim.json.encode(command("cue-live-parent-shutdown", { type = "shutdown" })) .. "\n")
+  equal(#fixture.writes, 2)
+  expect(not fixture.fake_tcp.closed, "transport closed before the live-parent ACK write completed")
+  assert(fixture.writes[2].callback)(nil)
+  equal(fixture.fake_tcp.close_count, 1)
+  equal(exit_count, 0)
+  fixture.connection:close()
+end)
+
+run("init connects only to loopback, frames commands, and closes overlong input", function()
+  local dispatched = {}
+  local wrap_count = 0
   local fake_agent = { disposed = false }
   function fake_agent:dispatch(value, callback)
     table.insert(dispatched, value.cueId)
@@ -391,17 +473,7 @@ run("init connects only to loopback, frames commands, and closes overlong input"
     self.disposed = true
   end
 
-  local connection = exhibition.setup({
-    port = 32123,
-    token = TOKEN,
-    uv = {
-      new_tcp = function()
-        return fake_tcp
-      end,
-      new_timer = function()
-        return fake_timer
-      end,
-    },
+  local fixture = new_connection_fixture({
     agent = fake_agent,
     schedule_wrap = function(callback)
       wrap_count = wrap_count + 1
@@ -409,22 +481,24 @@ run("init connects only to loopback, frames commands, and closes overlong input"
     end,
   })
 
-  equal(timer_stopped, true)
-  equal(timer_closed, true)
-  local hello = vim.json.decode(writes[1])
+  equal(fixture.fake_timer.stopped, true)
+  equal(fixture.fake_timer.closed, true)
+  local hello = vim.json.decode(fixture.writes[1].payload)
   equal(hello, { schema = 1, type = "hello", token = TOKEN })
   expect(wrap_count >= 2, "uv callbacks were not schedule-wrapped")
 
   local first_line = vim.json.encode(command("cue-wire-1", { type = "status" })) .. "\n"
   local second_line = vim.json.encode(command("cue-wire-2", { type = "status" })) .. "\n"
   local combined = first_line .. second_line
-  local reader = assert(fake_tcp.reader)
+  local reader = assert(fixture.fake_tcp.reader)
   reader(nil, combined:sub(1, 11))
   reader(nil, combined:sub(12))
 
+  equal(dispatched, { "cue-wire-1" })
+  assert(fixture.writes[2].callback)(nil)
   equal(dispatched, { "cue-wire-1", "cue-wire-2" })
-  equal(#writes, 3)
-  equal(vim.json.decode(writes[2]), {
+  equal(#fixture.writes, 3)
+  equal(vim.json.decode(fixture.writes[2].payload), {
     schema = 1,
     loopId = "loop-agent",
     cueId = "cue-wire-1",
@@ -435,9 +509,9 @@ run("init connects only to loopback, frames commands, and closes overlong input"
   })
 
   reader(nil, string.rep("a", 4097))
-  equal(fake_tcp.closed, true)
-  equal(connection:diagnostics().queuedCommands, 0)
-  connection:close()
+  equal(fixture.fake_tcp.closed, true)
+  equal(fixture.connection:diagnostics().queuedCommands, 0)
+  fixture.connection:close()
   equal(fake_agent.disposed, true)
 end)
 

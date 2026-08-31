@@ -29,6 +29,20 @@ function M.setup(options)
   local uv = options.uv or vim.uv or vim.loop
   assert(uv and type(uv.new_tcp) == "function" and type(uv.new_timer) == "function", "Neovim uv TCP support is required")
   local schedule_wrap = options.schedule_wrap or vim.schedule_wrap
+  local parent_pid = options.parent_pid or uv.os_getppid()
+  assert(type(parent_pid) == "number" and parent_pid % 1 == 0 and parent_pid > 0,
+    "JanVim parent PID is required")
+  local parent_alive = options.parent_alive or function(pid)
+    local ok, result = pcall(uv.kill, pid, 0)
+    return ok and result == 0
+  end
+  local schedule = options.schedule or vim.schedule
+  local exit_backend = options.exit_backend or function()
+    vim.cmd("qaall!")
+  end
+  assert(type(parent_alive) == "function", "JanVim parent liveness check is required")
+  assert(type(schedule) == "function", "Neovim scheduler is required")
+  assert(type(exit_backend) == "function", "Neovim backend exit is required")
 
   local self = setmetatable({
     port = port,
@@ -43,13 +57,19 @@ function M.setup(options)
     connected = false,
     transport_closed = false,
     disposed = false,
+    parent_pid = parent_pid,
+    parent_alive = parent_alive,
+    schedule = schedule,
+    exit_backend = exit_backend,
+    shutdown_requested = false,
+    backend_exit_scheduled = false,
   }, Connection)
 
   self.agent = options.agent or actions.new({
     token = token,
     ranges = options.ranges,
     close_connection = function()
-      self:close_transport()
+      self.shutdown_requested = true
     end,
   })
   self:start()
@@ -145,7 +165,7 @@ function Connection:pump()
         self.busy = false
         if write_error then
           self:close_transport()
-        else
+        elseif not self:complete_requested_shutdown() then
           self:pump()
         end
       end))
@@ -155,6 +175,21 @@ function Connection:pump()
     self.busy = false
     self:close_transport()
   end
+end
+
+function Connection:complete_requested_shutdown()
+  if not self.shutdown_requested then
+    return false
+  end
+  self:close_transport()
+  local ok, alive = pcall(self.parent_alive, self.parent_pid)
+  if ok and alive == false and not self.backend_exit_scheduled then
+    self.backend_exit_scheduled = true
+    self.schedule(function()
+      pcall(self.exit_backend)
+    end)
+  end
+  return true
 end
 
 function Connection:stop_connect_timer()
