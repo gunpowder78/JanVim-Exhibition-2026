@@ -1465,6 +1465,7 @@ class RuntimeShowSession implements ShowRunSession {
   private disposed = false;
   private lifecycleEpoch = 0;
   private shutdownRequested = false;
+  private childExited = false;
   private childClosed = false;
   private resolveChildExit!: () => void;
   private readonly childExit: Promise<void>;
@@ -1628,7 +1629,10 @@ class RuntimeShowSession implements ShowRunSession {
     }
     this.child = child;
     this.options.onPid(child.pid);
+    child.once("exit", () => this.observeChildExit());
     child.once("close", () => {
+      this.observeChildExit();
+      if (this.childClosed) return;
       this.childClosed = true;
       this.detachChildStreams?.();
       this.detachChildStreams = undefined;
@@ -1636,9 +1640,6 @@ class RuntimeShowSession implements ShowRunSession {
       this.finishChildStreams = undefined;
       this.resolveChildExit();
       this.beginLeaseRemoval();
-      if (!this.shutdownRequested) {
-        for (const listener of [...this.faultListeners]) listener("janvim-exited");
-      }
     });
     this.childStartedAtUtc = await this.options.host.inspectProcessStartedAtUtc(child.pid);
     if (this.childClosed) {
@@ -2088,6 +2089,14 @@ class RuntimeShowSession implements ShowRunSession {
 
   private requireActive(): void {
     if (this.disposed) throw new Error("show-session-disposed");
+  }
+
+  private observeChildExit(): void {
+    if (this.childExited) return;
+    this.childExited = true;
+    if (!this.shutdownRequested) {
+      for (const listener of [...this.faultListeners]) listener("janvim-exited");
+    }
   }
 
   private captureLifecycle(signal: AbortSignal, reason: string): number {

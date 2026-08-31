@@ -699,7 +699,10 @@ function createComposedHost(options: {
     public readonly stdout = new PassThrough();
     public readonly stderr = new PassThrough();
     public kill(): boolean {
-      queueMicrotask(() => this.emit("close", 1));
+      queueMicrotask(() => {
+        this.emit("exit", 1, null);
+        this.emit("close", 1);
+      });
       return true;
     }
   })();
@@ -831,7 +834,10 @@ function createComposedHost(options: {
         };
       }
       if (args.some((argument) => argument.endsWith("close-janvim-window.ps1"))) {
-        queueMicrotask(() => child.emit("close", 0));
+        queueMicrotask(() => {
+          child.emit("exit", 0, null);
+          child.emit("close", 0);
+        });
         return {
           exitCode: 0,
           stdout: JSON.stringify({

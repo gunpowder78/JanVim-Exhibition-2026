@@ -121,7 +121,15 @@ export interface G2SpawnedChild extends SpawnedProcess {
   pid: number;
   stdout: G2ReadableOutput | null;
   stderr: G2ReadableOutput | null;
+  once(
+    event: "exit",
+    listener: (exitCode: number | null, signal: NodeJS.Signals | null) => void,
+  ): this;
   once(event: "close", listener: (exitCode: number | null) => void): this;
+  off(
+    event: "exit",
+    listener: (exitCode: number | null, signal: NodeJS.Signals | null) => void,
+  ): this;
   off(event: "close", listener: (exitCode: number | null) => void): this;
 }
 

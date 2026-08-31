@@ -670,13 +670,16 @@ function createStartupHarness(options: {
 
     public constructor(public readonly pid: number) {
       super();
-      this.once("close", () => activeChildPids.delete(this.pid));
+      this.once("exit", () => activeChildPids.delete(this.pid));
     }
 
     public readonly kill = vi.fn(() => {
       trace.push("kill-janvim");
       childKilled = true;
-      queueMicrotask(() => this.emit("close", 1));
+      queueMicrotask(() => {
+        this.emit("exit", 1, null);
+        this.emit("close", 1);
+      });
       return true;
     });
   }
@@ -1051,7 +1054,10 @@ function createStartupHarness(options: {
         activeHwndPids.delete(pid);
         if (options.closeChildOnWindowClose !== false) {
           const matchingChild = children.find((candidate) => candidate.pid === pid);
-          queueMicrotask(() => matchingChild?.emit("close", 0));
+          queueMicrotask(() => {
+            matchingChild?.emit("exit", 0, null);
+            matchingChild?.emit("close", 0);
+          });
         }
         return {
           exitCode: 0,
@@ -1430,6 +1436,11 @@ function createStartupHarness(options: {
       for (const gate of timedOutBridgeCloseGates) gate.resolve();
     },
     emitJanVimExit: (childIndex = children.length - 1) => {
+      const target = children[childIndex];
+      if (target === undefined) throw new Error("JanVim child fixture is missing");
+      target.emit("exit", 1, null);
+    },
+    emitJanVimClose: (childIndex = children.length - 1) => {
       const target = children[childIndex];
       if (target === undefined) throw new Error("JanVim child fixture is missing");
       target.emit("close", 1);
@@ -2359,8 +2370,8 @@ describe("real Task 9 show runtime adapters", () => {
     await coordinator.requestEmergencyStop("sigint");
   });
 
-  it("settles the exact old session before publishing a non-overlapping full replacement", async () => {
-    const harness = createStartupHarness();
+  it("invalidates on frontend exit but waits for backend close before replacement", async () => {
+    const harness = createStartupHarness({ closeChildOnWindowClose: false });
     const coordinator = await bootAndStartRuntimeHarness(harness);
     const oldChild = harness.children[0]!;
     const oldLease = harness.leases[0]!.lease;
@@ -2370,7 +2381,16 @@ describe("real Task 9 show runtime adapters", () => {
     expect(coordinator.diagnostics()).toMatchObject({
       state: "black-recovering",
       generationId: 2,
+      currentLoopId: null,
     });
+    expect(harness.spawnInvocationCount()).toBe(1);
+    expect(harness.trace).toContain("agent:shutdown");
+
+    harness.emitJanVimClose(0);
+    await settlePromises();
+    expect(harness.timers.activeTimeouts(1_000)).toBe(1);
+    expect(harness.spawnInvocationCount()).toBe(1);
+
     await harness.timers.fireTimeout(1_000);
     await settlePromises();
 
@@ -2407,7 +2427,11 @@ describe("real Task 9 show runtime adapters", () => {
       generationId: 2,
     });
 
-    await coordinator.requestEmergencyStop("sigint");
+    const stop = coordinator.requestEmergencyStop("sigint");
+    await settlePromises();
+    harness.emitJanVimExit(1);
+    harness.emitJanVimClose(1);
+    await stop;
   });
 
   it("routes an idle authenticated bridge disconnect into immediate session invalidation", async () => {
@@ -2432,6 +2456,7 @@ describe("real Task 9 show runtime adapters", () => {
     const coordinator = await bootAndStartRuntimeHarness(harness);
 
     harness.emitJanVimExit(0);
+    harness.emitJanVimClose(0);
     await settlePromises();
 
     expect(coordinator.diagnostics()).toMatchObject({
