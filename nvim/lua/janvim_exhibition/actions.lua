@@ -41,6 +41,11 @@ local function fallback_status()
   }
 end
 
+local function monotonic_now_ms()
+  local uv = vim.uv or vim.loop
+  return uv.hrtime() / 1000000
+end
+
 local function safe_id(value, key)
   if type(value) == "table" and type(value[key]) == "string" and #value[key] > 0 then
     return value[key]
@@ -85,6 +90,7 @@ function Agent.new(options)
       vim.api.nvim_feedkeys(keys, "ntx", false)
     end,
     defer = options.defer or vim.defer_fn,
+    now = options.now or monotonic_now_ms,
     close_connection = options.close_connection or function() end,
     acknowledgements = {},
     acknowledgement_order = {},
@@ -240,6 +246,7 @@ function Agent:insert(text, chars_per_second, finish)
   local insertion_row = cursor[1] - 1
   local insertion_col = cursor[2]
   self.input("i")
+  local started_at_ms = self.now()
   local index = 1
   local function feed_character()
     local character = characters[index]
@@ -264,8 +271,10 @@ function Agent:insert(text, chars_per_second, finish)
       vim.api.nvim_win_set_cursor(0, { insertion_row + 1, insertion_col })
       insertion_col = insertion_col + #character
     end
+    local target_ms = started_at_ms + index * interval
     index = index + 1
-    self:later(feed_character, interval)
+    local delay_ms = math.max(0, math.ceil(target_ms - self.now()))
+    self:later(feed_character, delay_ms)
   end
   self:later(feed_character, 0)
 end

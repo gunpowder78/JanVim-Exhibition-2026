@@ -135,6 +135,62 @@ run("insert and replace mutate only the tracked exhibition buffer", function()
   end
 end)
 
+run("insert pacing does not accumulate repeated timer lateness beyond the acceptance overhead", function()
+  local now_ms = 0
+  local scheduled = {}
+  local function defer_with_six_ms_lateness(callback, delay_ms)
+    local event = {
+      callback = callback,
+      cancelled = false,
+      due_ms = now_ms + delay_ms + 6,
+    }
+    local handle = { closed = false }
+    function handle:stop()
+      event.cancelled = true
+    end
+    function handle:is_closing()
+      return self.closed
+    end
+    function handle:close()
+      self.closed = true
+    end
+    table.insert(scheduled, event)
+    return handle
+  end
+
+  local agent = new_agent({
+    defer = defer_with_six_ms_lateness,
+    now = function()
+      return now_ms
+    end,
+  })
+  prepare(agent)
+
+  local acknowledgement
+  agent:dispatch(command("cue-paced-insert", {
+    type = "insert",
+    text = "若把诗句视为离散信源，层楼不是终点，而是观察窗口的扩展。",
+    charsPerSecond = 24,
+  }), function(result)
+    acknowledgement = result
+  end)
+
+  while #scheduled > 0 do
+    table.sort(scheduled, function(left, right)
+      return left.due_ms < right.due_ms
+    end)
+    local event = table.remove(scheduled, 1)
+    now_ms = event.due_ms
+    if not event.cancelled then
+      event.callback()
+    end
+  end
+
+  equal(acknowledgement.outcome, "applied")
+  expect(now_ms < 1248, "insert timer lateness exceeded the 100 ms acceptance overhead: " .. now_ms)
+  agent:dispose()
+end)
+
 run("unknown and stale ranges plus unsafe actions are rejected", function()
   local agent = new_agent()
   prepare(agent)
