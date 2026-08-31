@@ -132,6 +132,19 @@ function evaluateConstantString(node) {
       value = candidate.text;
     } else if (typescript.isParenthesizedExpression(candidate)) {
       value = evaluate(candidate.expression, depth + 1);
+    } else if (typescript.isTemplateExpression(candidate)) {
+      evaluatedNodes += 1 + candidate.templateSpans.length * 2;
+      if (evaluatedNodes > maximumConstantStringNodes) {
+        throw new Error(
+          "Electron-main constant string expression exceeds the finite bound",
+        );
+      }
+      value = candidate.head.text;
+      for (const span of candidate.templateSpans) {
+        const substitution = evaluate(span.expression, depth + 1);
+        if (substitution === undefined) return undefined;
+        value += substitution + span.literal.text;
+      }
     } else if (
       typescript.isBinaryExpression(candidate) &&
       candidate.operatorToken.kind === typescript.SyntaxKind.PlusToken

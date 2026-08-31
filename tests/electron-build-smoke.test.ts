@@ -174,6 +174,14 @@ describe("compiled Electron main bundle", () => {
       "Reflect.get concatenated access",
       'import "electron"; const moduleBuiltin = Reflect.get(process, "get" + "BuiltinModule")("module"); Reflect.get(moduleBuiltin, "create" + "Require")(import.meta.url)("zod");\n',
     ],
+    [
+      "templated element access",
+      'import "electron"; process[`get${"Builtin"}Module`]("module")[`create${"Require"}`](import.meta.url)("zod");\n',
+    ],
+    [
+      "Reflect.get templated access",
+      'import "electron"; const runtimeProcess = process; const moduleBuiltin = Reflect.get(runtimeProcess, `get${"Builtin"}Module`)("module"); Reflect.get(moduleBuiltin, `create${"Require"}`)(import.meta.url)("zod");\n',
+    ],
   ] as const)("rejects dynamic loader bypass through %s", (_label, source) => {
     const fixture = createVerifierFixture(source);
 
