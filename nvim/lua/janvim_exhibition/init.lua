@@ -33,8 +33,17 @@ function M.setup(options)
   assert(type(parent_pid) == "number" and parent_pid % 1 == 0 and parent_pid > 0,
     "JanVim parent PID is required")
   local parent_alive = options.parent_alive or function(pid)
-    local ok, result = pcall(uv.kill, pid, 0)
-    return ok and result == 0
+    local ok, result, _, error_name = pcall(uv.kill, pid, 0)
+    if not ok then
+      return nil
+    end
+    if result == 0 then
+      return true
+    end
+    if result == nil and error_name == "ESRCH" then
+      return false
+    end
+    return nil
   end
   local schedule = options.schedule or vim.schedule
   local exit_backend = options.exit_backend or function()

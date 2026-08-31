@@ -144,6 +144,8 @@ Add agent tests with injected parent-liveness and fixed backend-exit callbacks. 
 
 - parent alive: shutdown ACK is applied, transport closes once, backend exit count remains zero;
 - parent absent: shutdown ACK is applied, transport closes once, fixed backend exit runs once;
+- parent probe returns `EPERM`, an unknown error, or throws: transport still closes, but backend
+  exit count remains zero;
 - duplicate shutdown cannot schedule a second exit;
 - shutdown with any user string remains rejected and cannot close or exit anything.
 

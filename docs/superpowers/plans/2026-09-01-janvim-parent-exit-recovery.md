@@ -48,10 +48,12 @@ Vitest 4.1.11, Neovim 0.10.1 Lua/libuv, PowerShell 7.
 
 - Consumes: the existing parameter-free `shutdown` action and `Agent.new({ close_connection })`.
 - Produces: `Connection:complete_requested_shutdown()` and these injectable setup options:
-  `parent_pid: integer`, `parent_alive(pid): boolean`, `schedule(fn): void`, and
+  `parent_pid: integer`, `parent_alive(pid): boolean | nil`, `schedule(fn): void`, and
   `exit_backend(): void`.
-- In production, `parent_pid` is captured once with `uv.os_getppid()`, liveness is exactly
-  `uv.kill(pid, 0) == 0`, and `exit_backend` is the fixed `vim.cmd("qaall!")` operation.
+- In production, `parent_pid` is captured once with `uv.os_getppid()`. Liveness is `true` only
+  when `uv.kill(pid, 0)` returns `0`, `false` only when its error name is exactly `ESRCH`, and
+  `nil` for every other result or thrown probe error. `exit_backend` is the fixed
+  `vim.cmd("qaall!")` operation.
 
 - [ ] **Step 1: Add a failing connection-level test for ACK-before-exit**
 
@@ -126,8 +128,11 @@ assert(type(parent_pid) == "number" and parent_pid % 1 == 0 and parent_pid > 0,
   "JanVim parent PID is required")
 
 local parent_alive = options.parent_alive or function(pid)
-  local ok, result = pcall(uv.kill, pid, 0)
-  return ok and result == 0
+  local ok, result, _, error_name = pcall(uv.kill, pid, 0)
+  if not ok then return nil end
+  if result == 0 then return true end
+  if result == nil and error_name == "ESRCH" then return false end
+  return nil
 end
 local schedule = options.schedule or vim.schedule
 local exit_backend = options.exit_backend or function()

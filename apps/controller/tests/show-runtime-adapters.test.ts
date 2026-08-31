@@ -701,6 +701,7 @@ function createStartupHarness(options: {
   const timedOutBridgeCloseGates: Array<ReturnType<typeof publicationGate>> = [];
   let deadlineOperationDepth = 0;
   const sent: Array<{ channel: string; payload: unknown }> = [];
+  const agentCommands: AgentCommand[] = [];
   const sampledPids: number[] = [];
   const evidenceAttempts: Array<{ path: string; value: unknown }> = [];
   const evidenceWrites: Array<{ path: string; value: unknown }> = [];
@@ -1186,6 +1187,7 @@ function createStartupHarness(options: {
         },
         dispatch: async (command: AgentCommand): Promise<AgentAck> => {
           trace.push(`agent:${command.action.type}`);
+          agentCommands.push(structuredClone(command));
           if (command.action.type === "prepare") {
             prepareDispatches += 1;
             await waitForHostOperation("prepare");
@@ -1350,6 +1352,7 @@ function createStartupHarness(options: {
     trace,
     logStorage,
     leases,
+    agentCommands,
     sent,
     sampledPids,
     evidenceAttempts,
@@ -2385,9 +2388,23 @@ describe("real Task 9 show runtime adapters", () => {
     });
     expect(harness.spawnInvocationCount()).toBe(1);
     expect(harness.trace).toContain("agent:shutdown");
+    expect(harness.timers.activeTimeouts(1_000)).toBe(0);
+    expect(harness.trace).not.toContain("remove-lease");
+    expect(harness.activeResourceCounts().leases).toBe(1);
+    expect(oldChild.stdout?.listenerCount("data")).toBe(1);
+    expect(oldChild.stderr?.listenerCount("data")).toBe(1);
 
     harness.emitJanVimClose(0);
     await settlePromises();
+    expect(oldChild.stdout?.listenerCount("data")).toBe(0);
+    expect(oldChild.stderr?.listenerCount("data")).toBe(0);
+    expect(harness.trace.filter((entry) => entry === "remove-lease")).toHaveLength(1);
+    expect(harness.activeResourceCounts()).toEqual({
+      bridges: 0,
+      children: 0,
+      hwnds: 0,
+      leases: 0,
+    });
     expect(harness.timers.activeTimeouts(1_000)).toBe(1);
     expect(harness.spawnInvocationCount()).toBe(1);
 
@@ -2426,12 +2443,47 @@ describe("real Task 9 show runtime adapters", () => {
       state: "running",
       generationId: 2,
     });
+    const prepareCommands = harness.agentCommands.filter(
+      (command) => command.action.type === "prepare",
+    );
+    expect(prepareCommands.at(-1)?.action).toEqual({
+      type: "prepare",
+      poem: "白日依山尽\n黄河入海流\n欲穷千里目\n更上一层楼\n",
+      expectedSha256:
+        "b699de273f5bbaedb08241495f52ce863d3e8e1851275ce3b6251484d75190a8",
+    });
 
     const stop = coordinator.requestEmergencyStop("sigint");
     await settlePromises();
     harness.emitJanVimExit(1);
     harness.emitJanVimClose(1);
     await stop;
+  });
+
+  it("uses close as the frontend-exit fallback and settles the old session once", async () => {
+    const harness = createStartupHarness();
+    const coordinator = await bootAndStartRuntimeHarness(harness);
+
+    harness.emitJanVimClose(0);
+    harness.emitJanVimClose(0);
+    await settlePromises();
+
+    expect(coordinator.diagnostics()).toMatchObject({
+      state: "black-recovering",
+      generationId: 2,
+      currentLoopId: null,
+    });
+    expect(harness.trace.filter((entry) => entry === "remove-lease")).toHaveLength(1);
+    expect(harness.timers.activeTimeouts(1_000)).toBe(1);
+    expect(harness.spawnInvocationCount()).toBe(1);
+
+    await harness.timers.fireTimeout(1_000);
+    await settlePromises();
+    expect(coordinator.diagnostics()).toMatchObject({
+      state: "running",
+      generationId: 2,
+    });
+    await coordinator.requestEmergencyStop("sigint");
   });
 
   it("routes an idle authenticated bridge disconnect into immediate session invalidation", async () => {

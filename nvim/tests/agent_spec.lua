@@ -378,6 +378,14 @@ local function new_connection_fixture(options)
       new_timer = function()
         return fake_timer
       end,
+      os_getppid = function()
+        return options.parent_pid or 7628
+      end,
+      kill = options.kill or function(pid, signal)
+        equal(pid, options.parent_pid or 7628)
+        equal(signal, 0)
+        return 0
+      end,
     },
     agent = options.agent,
     schedule_wrap = options.schedule_wrap or function(callback)
@@ -387,9 +395,7 @@ local function new_connection_fixture(options)
       callback()
     end,
     parent_pid = options.parent_pid or 7628,
-    parent_alive = options.parent_alive or function()
-      return true
-    end,
+    parent_alive = options.parent_alive,
     exit_backend = options.exit_backend or function() end,
   })
 
@@ -431,6 +437,57 @@ run("shutdown flushes its ack before one orphan backend exit", function()
   complete_write(nil)
   equal(exit_count, 1)
   fixture.connection:close()
+end)
+
+run("shutdown exits only when the default parent probe proves ESRCH", function()
+  local cases = {
+    {
+      name = "live parent",
+      kill = function()
+        return 0
+      end,
+      expected_exit_count = 0,
+    },
+    {
+      name = "absent parent",
+      kill = function()
+        return nil, "ESRCH: no such process", "ESRCH"
+      end,
+      expected_exit_count = 1,
+    },
+    {
+      name = "permission denied",
+      kill = function()
+        return nil, "EPERM: operation not permitted", "EPERM"
+      end,
+      expected_exit_count = 0,
+    },
+    {
+      name = "probe threw",
+      kill = function()
+        error("injected parent probe failure")
+      end,
+      expected_exit_count = 0,
+    },
+  }
+
+  for _, case in ipairs(cases) do
+    local exit_count = 0
+    local fixture = new_connection_fixture({
+      kill = case.kill,
+      exit_backend = function()
+        exit_count = exit_count + 1
+      end,
+    })
+    fixture.fake_tcp.reader(nil, vim.json.encode(command(
+      "cue-default-parent-probe-" .. case.name,
+      { type = "shutdown" }
+    )) .. "\n")
+    assert(fixture.writes[2].callback)(nil)
+    equal(exit_count, case.expected_exit_count, case.name)
+    equal(fixture.fake_tcp.close_count, 1, case.name)
+    fixture.connection:close()
+  end
 end)
 
 run("shutdown keeps a live-parent backend for normal HWND teardown", function()
