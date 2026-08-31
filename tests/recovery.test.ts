@@ -82,6 +82,9 @@ const fixturePluginInit = readFileSync(
     "init.lua",
   ),
 );
+const fixtureJanVimCore = readFileSync(
+  join(repositoryRoot, "runtime", "janvim", "janvim-core.exe"),
+);
 
 async function settle(): Promise<void> {
   for (let index = 0; index < 64; index += 1) await Promise.resolve();
@@ -705,6 +708,15 @@ function createComposedHost(options: {
       fixturePluginInit,
     ],
     [
+      win32.join(
+        composedRepositoryRoot,
+        "runtime",
+        "janvim",
+        "janvim-core.exe",
+      ),
+      fixtureJanVimCore,
+    ],
+    [
       composedDisplayMapPath,
       Buffer.from(`${JSON.stringify(confirmedDisplayMap)}\n`, "utf8"),
     ],
@@ -1023,6 +1035,30 @@ function markdownSections(markdown: string): Map<string, string> {
   );
 }
 
+function powershellBlocks(markdownSection: string): Map<string, string> {
+  const matches = [...markdownSection.matchAll(
+    /```powershell[ \t]*\r?\n# block: ([a-z][a-z0-9-]{0,31})\r?\n([\s\S]*?)\r?\n```/gu,
+  )];
+  const blocks = new Map<string, string>();
+  for (const match of matches) {
+    const label = match[1]!;
+    if (blocks.has(label)) throw new Error(`duplicate PowerShell block label: ${label}`);
+    blocks.set(label, match[2]!.trim());
+  }
+  return blocks;
+}
+
+function normalizedPowershell(block: string): string {
+  return block.replace(/`\r?\n[ \t]*/gu, " ").replace(/\s+/gu, " ").trim();
+}
+
+function processCommandLines(block: string, command: string): string[] {
+  return block
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith(command));
+}
+
 function markdownCells(row: string): string[] {
   return row
     .slice(1, -1)
@@ -1285,6 +1321,170 @@ describe("Task 9 recovery operations", () => {
     ]) {
       expect(incidentTemplate).toContain(statement);
     }
+  });
+
+  it("publishes complete public launcher command blocks with isolated run roots", () => {
+    const runbook = readFileSync(runbookPath, "utf8");
+    const sections = markdownSections(runbook);
+    const setupBlocks = powershellBlocks(sections.get("Preflight")!);
+    expect([...setupBlocks.keys()]).toEqual(["setup"]);
+    const setup = setupBlocks.get("setup")!;
+    expect(setup).toContain("$repo = (Get-Location).Path");
+    expect(setup).toContain(
+      "$runId = \"g3-monitor-$([DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss'))\"",
+    );
+    expect(setup).toContain(
+      "$root = \"D:\\VirtualData\\JanVim-Exhibition-Rehearsals\\$runId\"",
+    );
+    expect(setup).toContain("$map = \"$root\\display-map.json\"");
+    expect(setup).toContain("$runId -cnotmatch '^[A-Za-z0-9._-]{1,64}$'");
+    expect(setup).toContain("Test-Path -LiteralPath $root");
+    expect(setup).toContain("Test-Path -LiteralPath $map");
+
+    const displayBlocks = powershellBlocks(
+      sections.get("Display Capture and Confirmation")!,
+    );
+    expect([...displayBlocks.keys()]).toEqual(["capture", "confirm"]);
+    expect(normalizedPowershell(displayBlocks.get("capture")!)).toContain(
+      'pwsh -NoProfile -File "$repo\\scripts\\start-g2-rehearsal.ps1" -Mode Capture -RehearsalRoot $root -DisplayMapPath $map',
+    );
+    const confirm = normalizedPowershell(displayBlocks.get("confirm")!);
+    expect(confirm).toContain("$primaryDisplayId = Read-Host");
+    expect(confirm).toContain("$secondaryDisplayId = Read-Host");
+    expect(confirm).toContain(
+      'pwsh -NoProfile -File "$repo\\scripts\\start-g2-rehearsal.ps1" -Mode Confirm -RehearsalRoot $root -DisplayMapPath $map -PrimaryDisplayId $primaryDisplayId -SecondaryDisplayId $secondaryDisplayId',
+    );
+
+    const launchContracts = [
+      ["ValidateOnly", "ValidateOnly"],
+      ["Soak3", "Soak3"],
+      ["Show", "Show"],
+    ] as const;
+    for (const [section, mode] of launchContracts) {
+      const launch = normalizedPowershell(
+        powershellBlocks(sections.get(section)!).get("launch")!,
+      );
+      expect(launch).toContain(
+        `pwsh -NoProfile -File "$repo\\scripts\\start-show.ps1" -Mode ${mode} -RehearsalRoot $root -DisplayMapPath $map -RunId $runId -NetworkPolicy OfflineRequired`,
+      );
+    }
+
+    const validateBlocks = powershellBlocks(sections.get("ValidateOnly")!);
+    expect([...validateBlocks.keys()]).toEqual(["launch", "diagnostic-connected"]);
+    expect(normalizedPowershell(validateBlocks.get("diagnostic-connected")!)).toContain(
+      'pwsh -NoProfile -File "$repo\\scripts\\start-show.ps1" -Mode ValidateOnly -RehearsalRoot $root -DisplayMapPath $map -RunId $runId -NetworkPolicy DiagnosticConnected',
+    );
+    const connectedBlocks = [...sections.entries()].flatMap(([section, body]) =>
+      [...powershellBlocks(body).entries()]
+        .filter(([, block]) => block.includes("DiagnosticConnected"))
+        .map(([label]) => `${section}:${label}`),
+    );
+    expect(connectedBlocks).toEqual(["ValidateOnly:diagnostic-connected"]);
+  });
+
+  it("documents bounded exact-identity secondary, JanVim, and controller faults", () => {
+    const sections = markdownSections(readFileSync(runbookPath, "utf8"));
+    const secondary = powershellBlocks(sections.get("Secondary Fault")!).get(
+      "fault-secondary",
+    )!;
+    const janvim = powershellBlocks(sections.get("JanVim Fault")!).get(
+      "fault-janvim",
+    )!;
+    const controller = powershellBlocks(sections.get("Controller Fault")!).get(
+      "fault-controller",
+    )!;
+
+    expect(secondary).toContain("$root\\run-lease.json");
+    for (const fixedLog of [
+      "show-run.log.controller",
+      "show-run.log.controller.1",
+      "show-run.log.controller.2",
+      "show-run.log.controller.3",
+    ]) {
+      expect(secondary).toContain(fixedLog);
+    }
+    for (const contract of [
+      "secondary-opened",
+      "runId",
+      "controllerRunId",
+      "generationId",
+      "rendererPid",
+      "Assert-ExactPropertySet",
+      "Assert-NoDuplicateJsonProperties",
+      "Get-Process -Id $rendererPid",
+      "FileShare]::Read",
+      "$maximumControllerLogBytes = 8 * 1024 * 1024",
+      "$maximumControllerLogRecords = 8192",
+    ]) {
+      expect(secondary).toContain(contract);
+    }
+    expect(processCommandLines(secondary, "Stop-Process")).toEqual([
+      "Stop-Process -Id $rendererPid",
+    ]);
+
+    for (const contract of [
+      "$root\\run-lease.json",
+      "$maximumLeaseBytes = 4096",
+      "Assert-ExactPropertySet",
+      "Assert-NoDuplicateJsonProperties",
+      "executableRelativePath",
+      "executableSha256",
+      "janvim-core.exe",
+      "$repo\\runtime\\janvim",
+      "Get-Process -Id $janvimPid",
+      "StartTime",
+      "MainWindowHandle",
+      "Get-FileHash -LiteralPath $janvimExecutable",
+      "coreBytes",
+      "coreSha256",
+      "FileShare]::Read",
+    ]) {
+      expect(janvim).toContain(contract);
+    }
+    expect(processCommandLines(janvim, "Stop-Process")).toEqual([
+      "Stop-Process -Id $janvimPid",
+    ]);
+
+    for (const contract of [
+      "$root\\run-lease.json",
+      "$maximumLeaseBytes = 4096",
+      "Assert-ExactPropertySet",
+      "Assert-NoDuplicateJsonProperties",
+      "$lease.runId -cne $runId",
+      "$lease.controllerRunId",
+      "$lease.generationId",
+      "Get-Process -Id $controllerPid",
+      "StartTime",
+      "FileShare]::Read",
+    ]) {
+      expect(controller).toContain(contract);
+    }
+    expect(processCommandLines(controller, "Stop-Process")).toEqual([
+      "Stop-Process -Id $controllerPid",
+    ]);
+
+    for (const block of [secondary, janvim, controller]) {
+      expect(block).toMatch(/\$maximum[A-Za-z]+Bytes = [1-9][0-9]*/u);
+      for (const line of processCommandLines(block, "Get-Process")) {
+        expect(line).toMatch(/^Get-Process -Id \$[A-Za-z][A-Za-z0-9]* -ErrorAction Stop$/u);
+      }
+      expect(block).not.toMatch(
+        /Invoke-Expression|Invoke-Command|Start-Process|Get-CimInstance|Get-WmiObject|MainWindowTitle|&\s*\$|\.command\b|\.shell\b|\.script\b/iu,
+      );
+    }
+  });
+
+  it("keeps operator blocks on public entry points and rejects broad control", () => {
+    const runbook = readFileSync(runbookPath, "utf8");
+    expect(runbook).not.toMatch(
+      /--show-mode|--network-policy|--controller-run-id|electron-main\.js|node_modules[\\/]\.bin[\\/]electron/iu,
+    );
+    expect(runbook).not.toMatch(
+      /taskkill\s+\/IM|SendKeys|AutoHotkey|Get-Process\s+-Name|Stop-Process\s+-Name|MainWindowTitle|FindWindow|EnumWindows|mouse_event|keybd_event/iu,
+    );
+    expect(runbook).not.toMatch(
+      /D:\\github\\JanVim(?:[\\/]|\b)|\.nvimlog|janvim-root-export-quarantine|janvim-task5-cached|janvim-task5-physical-cached|content[\\/]fixture[\\/]poem\.txt|content[\\/]poem\.txt/iu,
+    );
   });
 
   it("composes an idle authenticated bridge disconnect into immediate invalidation", async () => {
