@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { readFileSync } from "node:fs";
 import { join, win32 } from "node:path";
@@ -1059,6 +1060,201 @@ function processCommandLines(block: string, command: string): string[] {
     .filter((line) => line.startsWith(command));
 }
 
+type PowerShellAstCommand = {
+  name: string | null;
+  elements: string[];
+  startOffset: number;
+  endOffset: number;
+};
+
+type PowerShellAstMemberInvocation = {
+  name: string;
+  startOffset: number;
+  endOffset: number;
+};
+
+type PowerShellAstSummary = {
+  key: string;
+  parseErrors: string[];
+  commands: PowerShellAstCommand[];
+  memberInvocations: PowerShellAstMemberInvocation[];
+};
+
+const powershellAstInspector = String.raw`
+$ErrorActionPreference = 'Stop'
+$payloadText = [Console]::In.ReadToEnd()
+$payload = ConvertFrom-Json -InputObject $payloadText -Depth 8 -DateKind String -NoEnumerate
+$summaries = foreach ($item in @($payload)) {
+    $tokens = $null
+    $parseErrors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseInput(
+        [string]$item.text,
+        [ref]$tokens,
+        [ref]$parseErrors
+    )
+    $commands = @($ast.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.CommandAst]
+    }, $true) | ForEach-Object {
+        [pscustomobject]@{
+            name = $_.GetCommandName()
+            elements = @($_.CommandElements | ForEach-Object { $_.Extent.Text })
+            startOffset = $_.Extent.StartOffset
+            endOffset = $_.Extent.EndOffset
+        }
+    })
+    $memberInvocations = @($ast.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.InvokeMemberExpressionAst]
+    }, $true) | ForEach-Object {
+        [pscustomobject]@{
+            name = $_.Member.Extent.Text
+            startOffset = $_.Extent.StartOffset
+            endOffset = $_.Extent.EndOffset
+        }
+    })
+    [pscustomobject]@{
+        key = [string]$item.key
+        parseErrors = @($parseErrors | ForEach-Object { $_.Message })
+        commands = $commands
+        memberInvocations = $memberInvocations
+    }
+}
+@($summaries) | ConvertTo-Json -Depth 8 -Compress
+`;
+
+function allPowershellBlocks(markdown: string): Map<string, string> {
+  const flattened = new Map<string, string>();
+  for (const [section, body] of markdownSections(markdown)) {
+    for (const [label, block] of powershellBlocks(body)) {
+      flattened.set(section + ":" + label, block);
+    }
+  }
+  return flattened;
+}
+
+function parsePowershellAst(
+  blocks: ReadonlyMap<string, string>,
+): Map<string, PowerShellAstSummary> {
+  const payload = [...blocks].map(([key, text]) => ({ key, text }));
+  const result = spawnSync(
+    "pwsh",
+    ["-NoProfile", "-NonInteractive", "-Command", powershellAstInspector],
+    {
+      input: JSON.stringify(payload),
+      encoding: "utf8",
+      maxBuffer: 1024 * 1024,
+      timeout: 10_000,
+      windowsHide: true,
+    },
+  );
+  if (result.error !== undefined) throw result.error;
+  if (result.status !== 0) {
+    throw new Error("PowerShell AST inspection failed: " + result.stderr);
+  }
+  const value = JSON.parse(result.stdout) as
+    | PowerShellAstSummary
+    | PowerShellAstSummary[];
+  const summaries = Array.isArray(value) ? value : [value];
+  return new Map(summaries.map((summary) => [summary.key, summary]));
+}
+
+function commandsNamed(
+  summary: PowerShellAstSummary,
+  name: string,
+): PowerShellAstCommand[] {
+  return summary.commands.filter(
+    (command) => command.name?.toLowerCase() === name.toLowerCase(),
+  );
+}
+
+function expectTextOrder(block: string, markers: readonly string[]): void {
+  let priorOffset = -1;
+  for (const marker of markers) {
+    const offset = block.indexOf(marker, priorOffset + 1);
+    expect(
+      offset,
+      "missing or out-of-order PowerShell marker: " + marker,
+    ).toBeGreaterThan(priorOffset);
+    priorOffset = offset;
+  }
+}
+
+const safePowerShellCommands = new Set(
+  [
+    "Assert-ExactPropertySet",
+    "Assert-NoDuplicateJsonProperties",
+    "Complete-StrictControllerLogRecord",
+    "Convert-StrictUtcInstant",
+    "ConvertFrom-Json",
+    "Format-List",
+    "Get-FileHash",
+    "Get-Item",
+    "Get-Location",
+    "Get-Process",
+    "pwsh",
+    "Read-BoundedControllerLogRecords",
+    "Read-BoundedUtf8Text",
+    "Read-Host",
+    "Read-StrictCurrentLease",
+    "Set-StrictMode",
+    "Stop-Process",
+    "Test-LowerSha256",
+    "Test-NonEmptyString",
+    "Test-Path",
+    "Test-PositiveSafeInteger",
+    "Write-Warning",
+  ].map((name) => name.toLowerCase()),
+);
+
+const safePowerShellMembers = new Set(
+  [
+    "Add",
+    "Append",
+    "Clear",
+    "Combine",
+    "Dispose",
+    "EnumerateArray",
+    "EnumerateObject",
+    "Equals",
+    "GetDirectoryName",
+    "GetFullPath",
+    "IsNullOrWhiteSpace",
+    "new",
+    "Open",
+    "Parse",
+    "Pop",
+    "Push",
+    "Read",
+    "ReadToEnd",
+    "Substring",
+    "ToInt64",
+    "ToLowerInvariant",
+    "ToString",
+    "ToUInt64",
+    "ToUniversalTime",
+    "ToUnixTimeMilliseconds",
+    "TrimEnd",
+    "TryParse",
+  ].map((name) => name.toLowerCase()),
+);
+
+function unsafePowerShellAstReasons(summary: PowerShellAstSummary): string[] {
+  return [
+    ...summary.commands.flatMap((command) => {
+      const name = command.name?.toLowerCase();
+      return name !== undefined && safePowerShellCommands.has(name)
+        ? []
+        : ["command:" + (command.name ?? "<dynamic>")];
+    }),
+    ...summary.memberInvocations.flatMap((member) =>
+      safePowerShellMembers.has(member.name.toLowerCase())
+        ? []
+        : ["member:" + member.name],
+    ),
+  ];
+}
+
 function markdownCells(row: string): string[] {
   return row
     .slice(1, -1)
@@ -1380,6 +1576,399 @@ describe("Task 9 recovery operations", () => {
         .map(([label]) => `${section}:${label}`),
     );
     expect(connectedBlocks).toEqual(["ValidateOnly:diagnostic-connected"]);
+  });
+
+  it("preserves lease dates as strings and validates both process timestamps", () => {
+    const runbook = readFileSync(runbookPath, "utf8");
+    const blocks = allPowershellBlocks(runbook);
+    const summaries = parsePowershellAst(blocks);
+    for (const key of [
+      "Secondary Fault:fault-secondary",
+      "JanVim Fault:fault-janvim",
+      "Controller Fault:fault-controller",
+    ]) {
+      const block = blocks.get(key)!;
+      const summary = summaries.get(key)!;
+      expect(summary.parseErrors, key).toEqual([]);
+      const leaseAssignment = block.indexOf("$lease = $leaseText |");
+      const leaseGuard = block.indexOf("if ($lease -isnot", leaseAssignment);
+      const leaseParsers = commandsNamed(summary, "ConvertFrom-Json").filter(
+        (command) =>
+          command.startOffset > leaseAssignment && command.startOffset < leaseGuard,
+      );
+      expect(leaseParsers, key).toHaveLength(1);
+      expect(leaseParsers[0]!.elements, key).toEqual([
+        "ConvertFrom-Json",
+        "-Depth",
+        "8",
+        "-DateKind",
+        "String",
+        "-NoEnumerate",
+      ]);
+
+      const timestampTargets = commandsNamed(
+        summary,
+        "Convert-StrictUtcInstant",
+      ).flatMap((command) => {
+        const valueIndex = command.elements.indexOf("-Value");
+        return valueIndex < 0 ? [] : [command.elements[valueIndex + 1]];
+      });
+      expect(timestampTargets, key).toContain("$lease.controller.startedAtUtc");
+      expect(timestampTargets, key).toContain("$lease.janvim.startedAtUtc");
+    }
+  });
+
+  it("streams controller JSONL with character and physical-record bounds before parsing", () => {
+    const sections = markdownSections(readFileSync(runbookPath, "utf8"));
+    const secondary = powershellBlocks(sections.get("Secondary Fault")!).get(
+      "fault-secondary",
+    )!;
+    expect(secondary).not.toMatch(/\s-split\s/iu);
+    expect(secondary).not.toMatch(/\.ReadLine\s*\(/iu);
+    expect(secondary).toContain("$maximumControllerLogBytes = 8 * 1024 * 1024");
+    expect(secondary).toContain("$maximumControllerLogLineCharacters = 16384");
+    expect(secondary).toContain("$maximumControllerLogRecords = 8192");
+
+    const readerStart = secondary.indexOf(
+      "function Read-BoundedControllerLogRecords",
+    );
+    const readerEnd = secondary.indexOf(
+      "function Read-StrictCurrentLease",
+      readerStart,
+    );
+    expect(readerStart).toBeGreaterThan(-1);
+    expect(readerEnd).toBeGreaterThan(readerStart);
+    const reader = secondary.slice(readerStart, readerEnd);
+    expect(reader).toContain("$reader.Read()");
+    expectTextOrder(reader, [
+      "$State.PhysicalRecordCount += 1",
+      "$State.PhysicalRecordCount -gt $MaximumRecords",
+      "$lineBuilder.Length -ge $MaximumLineCharacters",
+      "[void]$lineBuilder.Append($character)",
+    ]);
+    expect(reader.indexOf("Complete-StrictControllerLogRecord")).toBeGreaterThan(
+      reader.indexOf("$State.PhysicalRecordCount -gt $MaximumRecords"),
+    );
+
+    const completeStart = secondary.indexOf(
+      "function Complete-StrictControllerLogRecord",
+    );
+    expect(completeStart).toBeGreaterThan(-1);
+    const complete = secondary.slice(completeStart, readerStart);
+    expectTextOrder(complete, [
+      "Assert-NoDuplicateJsonProperties -Text $Line",
+      "$record = $Line | ConvertFrom-Json",
+    ]);
+    expect(
+      secondary.indexOf("Stop-Process -Id $rendererPid"),
+    ).toBeGreaterThan(readerEnd);
+  });
+
+  it("mirrors safe lease, event, token, and complete frozen artifact-lock schemas", () => {
+    const sections = markdownSections(readFileSync(runbookPath, "utf8"));
+    const faults = [
+      powershellBlocks(sections.get("Secondary Fault")!).get("fault-secondary")!,
+      powershellBlocks(sections.get("JanVim Fault")!).get("fault-janvim")!,
+      powershellBlocks(sections.get("Controller Fault")!).get("fault-controller")!,
+    ];
+    for (const fault of faults) {
+      expect(fault).not.toMatch(/\$leaseText\s+-cmatch/iu);
+      expect(fault).toContain(
+        "$lease.runId -cmatch '[0-9A-Fa-f]{48}'",
+      );
+      expect(fault).toContain(
+        "$lease.controllerRunId -cmatch '[0-9A-Fa-f]{48}'",
+      );
+      expect(fault).toContain(
+        "$lease.generationId -gt 9007199254740991",
+      );
+    }
+
+    const secondary = faults[0]!;
+    expect(secondary).toContain(
+      "$record.runId -cmatch '[0-9A-Fa-f]{48}'",
+    );
+    expect(secondary).toContain(
+      "$record.controllerRunId -cmatch '[0-9A-Fa-f]{48}'",
+    );
+    expect(secondary).toContain(
+      "$record.generationId -gt 9007199254740991",
+    );
+
+    const janvim = faults[1]!;
+    for (const field of [
+      "archive",
+      "checksum",
+      "runtimeLua",
+      "artifactConfig",
+      "provenanceKind",
+      "provenanceReference",
+      "provenanceRecord",
+      "evidenceRecord",
+    ]) {
+      expect(janvim, field).toContain(
+        "Test-NonEmptyString -Value $artifactLock." + field,
+      );
+    }
+    for (const field of ["archiveBytes", "coreBytes"]) {
+      expect(janvim, field).toContain(
+        "Test-PositiveSafeInteger -Value $artifactLock." + field,
+      );
+    }
+    for (const field of [
+      "archiveSha256",
+      "checksumSha256",
+      "coreSha256",
+      "runtimeLuaSha256",
+      "artifactConfigSha256",
+      "configSha256",
+      "provenanceSha256",
+      "evidenceSha256",
+      "pluginLabConfigSha256",
+    ]) {
+      expect(janvim, field).toContain(
+        "Test-LowerSha256 -Value $artifactLock." + field,
+      );
+    }
+    for (const literal of [
+      "$artifactLock.sourceRepository -cne 'D:/github/JanVim'",
+      "$artifactLock.tag -cne 'v0.10.1-gmk.4'",
+      "$artifactLock.commit -cne 'e95633101d93f8448b0f906e918b5d836ab95273'",
+      "$artifactLock.core -cne 'janvim-core.exe'",
+      "$artifactLock.coreBytes -ne 18866688",
+      "$artifactLock.coreSha256 -cne '224b3457d89fbc6cf946359683632f29f9262bae08b6f0d2e3043a3a7a6d83b3'",
+      "$artifactLock.config -cne 'show/janvim-show.toml'",
+      "$artifactLock.layoutEngine -cne 'orthogonal'",
+      "$artifactLock.role -cne 'primary-projector'",
+      "$artifactLock.pluginLabConfig -cne 'runtime/user-root/plugin-lab/config/init.lua'",
+    ]) {
+      expect(janvim).toContain(literal);
+    }
+  });
+
+  it("allowlists parsed commands and enforces exact launcher and PID-stop topology", () => {
+    const malicious = parsePowershellAst(
+      new Map([
+        [
+          "malicious",
+          [
+            "gps -Id 1 | kill",
+            "spps -Id 1",
+            "$process.Kill()",
+            "$process.CloseMainWindow()",
+          ].join("\n"),
+        ],
+      ]),
+    ).get("malicious")!;
+    expect(malicious.parseErrors).toEqual([]);
+    expect(unsafePowerShellAstReasons(malicious)).toEqual([
+      "command:gps",
+      "command:kill",
+      "command:spps",
+      "member:Kill",
+      "member:CloseMainWindow",
+    ]);
+
+    const blocks = allPowershellBlocks(readFileSync(runbookPath, "utf8"));
+    expect([...blocks.keys()]).toEqual([
+      "Preflight:setup",
+      "Display Capture and Confirmation:capture",
+      "Display Capture and Confirmation:confirm",
+      "ValidateOnly:launch",
+      "ValidateOnly:diagnostic-connected",
+      "Soak3:launch",
+      "Show:launch",
+      "Secondary Fault:fault-secondary",
+      "JanVim Fault:fault-janvim",
+      "Controller Fault:fault-controller",
+    ]);
+    const summaries = parsePowershellAst(blocks);
+    for (const [key, summary] of summaries) {
+      expect(summary.parseErrors, key).toEqual([]);
+      expect(unsafePowerShellAstReasons(summary), key).toEqual([]);
+    }
+
+    const launchers = new Map<string, string[]>([
+      [
+        "Display Capture and Confirmation:capture",
+        [
+          "pwsh",
+          "-NoProfile",
+          "-File",
+          '"$repo\\scripts\\start-g2-rehearsal.ps1"',
+          "-Mode",
+          "Capture",
+          "-RehearsalRoot",
+          "$root",
+          "-DisplayMapPath",
+          "$map",
+        ],
+      ],
+      [
+        "Display Capture and Confirmation:confirm",
+        [
+          "pwsh",
+          "-NoProfile",
+          "-File",
+          '"$repo\\scripts\\start-g2-rehearsal.ps1"',
+          "-Mode",
+          "Confirm",
+          "-RehearsalRoot",
+          "$root",
+          "-DisplayMapPath",
+          "$map",
+          "-PrimaryDisplayId",
+          "$primaryDisplayId",
+          "-SecondaryDisplayId",
+          "$secondaryDisplayId",
+        ],
+      ],
+      ...[
+        ["ValidateOnly:launch", "ValidateOnly", "OfflineRequired"],
+        [
+          "ValidateOnly:diagnostic-connected",
+          "ValidateOnly",
+          "DiagnosticConnected",
+        ],
+        ["Soak3:launch", "Soak3", "OfflineRequired"],
+        ["Show:launch", "Show", "OfflineRequired"],
+      ].map(([key, mode, policy]) => [
+        key,
+        [
+          "pwsh",
+          "-NoProfile",
+          "-File",
+          '"$repo\\scripts\\start-show.ps1"',
+          "-Mode",
+          mode,
+          "-RehearsalRoot",
+          "$root",
+          "-DisplayMapPath",
+          "$map",
+          "-RunId",
+          "$runId",
+          "-NetworkPolicy",
+          policy,
+        ],
+      ] as [string, string[]]),
+    ]);
+    for (const [key, expectedElements] of launchers) {
+      const commands = commandsNamed(summaries.get(key)!, "pwsh");
+      expect(commands, key).toHaveLength(1);
+      expect(commands[0]!.elements, key).toEqual(expectedElements);
+    }
+    expect(
+      [...summaries.values()].flatMap((summary) =>
+        commandsNamed(summary, "pwsh"),
+      ),
+    ).toHaveLength(6);
+
+    const faultContracts = new Map<
+      string,
+      { pid: string; getProcessPids: string[] }
+    >([
+      [
+        "Secondary Fault:fault-secondary",
+        {
+          pid: "$rendererPid",
+          getProcessPids: ["$controllerPid", "$rendererPid"],
+        },
+      ],
+      [
+        "JanVim Fault:fault-janvim",
+        {
+          pid: "$janvimPid",
+          getProcessPids: ["$controllerPid", "$janvimPid"],
+        },
+      ],
+      [
+        "Controller Fault:fault-controller",
+        { pid: "$controllerPid", getProcessPids: ["$controllerPid"] },
+      ],
+    ]);
+    for (const [key, contract] of faultContracts) {
+      const summary = summaries.get(key)!;
+      const stops = commandsNamed(summary, "Stop-Process");
+      expect(stops, key).toHaveLength(1);
+      expect(stops[0]!.elements, key).toEqual([
+        "Stop-Process",
+        "-Id",
+        contract.pid,
+      ]);
+      const gets = commandsNamed(summary, "Get-Process");
+      expect(
+        gets.map((command) => command.elements),
+        key,
+      ).toEqual(
+        contract.getProcessPids.map((pid) => [
+          "Get-Process",
+          "-Id",
+          pid,
+          "-ErrorAction",
+          "Stop",
+        ]),
+      );
+      expect(
+        stops[0]!.startOffset,
+        key,
+      ).toBeGreaterThan(Math.max(...gets.map((command) => command.endOffset)));
+    }
+
+    const secondary = summaries.get("Secondary Fault:fault-secondary")!;
+    const boundedReaders = commandsNamed(
+      secondary,
+      "Read-BoundedControllerLogRecords",
+    );
+    expect(boundedReaders).toHaveLength(1);
+    expect(boundedReaders[0]!.elements).toEqual([
+      "Read-BoundedControllerLogRecords",
+      "-Path",
+      "$controllerLogPath",
+      "-MaximumBytes",
+      "$maximumControllerLogBytes",
+      "-MaximumLineCharacters",
+      "$maximumControllerLogLineCharacters",
+      "-MaximumRecords",
+      "$maximumControllerLogRecords",
+      "-State",
+      "$logState",
+      "-RunId",
+      "$runId",
+      "-ControllerRunId",
+      "$lease.controllerRunId",
+      "-GenerationId",
+      "$lease.generationId",
+    ]);
+
+    expectTextOrder(blocks.get("Secondary Fault:fault-secondary")!, [
+      "$lease.generationId -gt 9007199254740991",
+      "Convert-StrictUtcInstant -Value $lease.janvim.startedAtUtc",
+      "Get-Process -Id $controllerPid -ErrorAction Stop",
+      "$actualControllerStartMs",
+      "Read-BoundedControllerLogRecords -Path $controllerLogPath",
+      "$logState.MatchingCount -ne 1",
+      "Get-Process -Id $rendererPid -ErrorAction Stop",
+      "$rendererProcess.Handle",
+      "Stop-Process -Id $rendererPid",
+    ]);
+    expectTextOrder(blocks.get("JanVim Fault:fault-janvim")!, [
+      "$lease.generationId -gt 9007199254740991",
+      "Test-LowerSha256 -Value $artifactLock.pluginLabConfigSha256",
+      "$janvimExecutableItem.Length -ne $artifactLock.coreBytes",
+      "$janvimExecutableSha256 -cne $artifactLock.coreSha256",
+      "Get-Process -Id $janvimPid -ErrorAction Stop",
+      "$actualJanVimStartTicks",
+      "$actualJanVimPath",
+      "$actualHwnd",
+      "Stop-Process -Id $janvimPid",
+    ]);
+    expectTextOrder(blocks.get("Controller Fault:fault-controller")!, [
+      "$lease.generationId -gt 9007199254740991",
+      "Convert-StrictUtcInstant -Value $lease.janvim.startedAtUtc",
+      "Get-Process -Id $controllerPid -ErrorAction Stop",
+      "$actualControllerStartMs",
+      "Stop-Process -Id $controllerPid",
+    ]);
   });
 
   it("documents bounded exact-identity secondary, JanVim, and controller faults", () => {

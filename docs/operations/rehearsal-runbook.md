@@ -402,15 +402,161 @@ function Convert-StrictUtcInstant {
     return $parsed.ToUniversalTime()
 }
 
+function Complete-StrictControllerLogRecord {
+    param(
+        [Parameter(Mandatory = $true)][string]$Line,
+        [Parameter(Mandatory = $true)][psobject]$State,
+        [Parameter(Mandatory = $true)][string]$RunId,
+        [Parameter(Mandatory = $true)][string]$ControllerRunId,
+        [Parameter(Mandatory = $true)][long]$GenerationId
+    )
+    if ([string]::IsNullOrWhiteSpace($Line)) {
+        return
+    }
+    $State.ParsedRecordCount += 1
+    try {
+        Assert-NoDuplicateJsonProperties -Text $Line
+        $record = $Line | ConvertFrom-Json -Depth 8 -DateKind String -NoEnumerate
+    }
+    catch {
+        throw 'controller-log-json-invalid'
+    }
+    if ($record -isnot [pscustomobject]) {
+        throw 'controller-log-object-required'
+    }
+    $typeProperty = $record.PSObject.Properties['type']
+    if ($null -eq $typeProperty -or $record.type -isnot [string]) {
+        throw 'controller-log-type-invalid'
+    }
+    if ($record.type -cne 'secondary-opened') {
+        return
+    }
+    Assert-ExactPropertySet -InputObject $record -ExpectedNames @(
+        'type', 'runId', 'controllerRunId', 'generationId', 'rendererPid'
+    )
+    if (
+        $record.runId -isnot [string] -or
+        $record.runId -cnotmatch '^[A-Za-z0-9._-]{1,64}$' -or
+        $record.runId -cmatch '[0-9A-Fa-f]{48}' -or
+        $record.controllerRunId -isnot [string] -or
+        $record.controllerRunId -cnotmatch '^[A-Za-z0-9._-]{1,96}$' -or
+        $record.controllerRunId -cmatch '[0-9A-Fa-f]{48}' -or
+        $record.generationId -isnot [long] -or
+        $record.generationId -le 0 -or
+        $record.generationId -gt 9007199254740991 -or
+        $record.rendererPid -isnot [long] -or
+        $record.rendererPid -le 0 -or
+        $record.rendererPid -gt [int]::MaxValue
+    ) {
+        throw 'secondary-opened-scalar-invalid'
+    }
+    if (
+        $record.runId -ceq $RunId -and
+        $record.controllerRunId -ceq $ControllerRunId -and
+        $record.generationId -eq $GenerationId
+    ) {
+        $State.MatchingCount += 1
+        if ($State.MatchingCount -gt 1) {
+            throw 'current-secondary-identity-not-unique'
+        }
+        $State.MatchingEvent = $record
+    }
+}
+
+function Read-BoundedControllerLogRecords {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][long]$MaximumBytes,
+        [Parameter(Mandatory = $true)][int]$MaximumLineCharacters,
+        [Parameter(Mandatory = $true)][int]$MaximumRecords,
+        [Parameter(Mandatory = $true)][psobject]$State,
+        [Parameter(Mandatory = $true)][string]$RunId,
+        [Parameter(Mandatory = $true)][string]$ControllerRunId,
+        [Parameter(Mandatory = $true)][long]$GenerationId
+    )
+    $stream = [IO.File]::Open(
+        $Path,
+        [IO.FileMode]::Open,
+        [IO.FileAccess]::Read,
+        [IO.FileShare]::Read
+    )
+    try {
+        if ($stream.Length -lt 1 -or $stream.Length -gt $MaximumBytes) {
+            throw "bounded-file-size-invalid:$Path"
+        }
+        $encoding = [Text.UTF8Encoding]::new($false, $true)
+        $reader = [IO.StreamReader]::new($stream, $encoding, $false, 4096, $true)
+        $lineBuilder = [Text.StringBuilder]::new($MaximumLineCharacters)
+        $lineOpen = $false
+        $previousWasCarriageReturn = $false
+        try {
+            while ($true) {
+                $codePoint = $reader.Read()
+                if ($codePoint -eq -1) {
+                    break
+                }
+                $character = [char]$codePoint
+                if ($character -eq [char]13) {
+                    if (-not $lineOpen) {
+                        $State.PhysicalRecordCount += 1
+                        if ($State.PhysicalRecordCount -gt $MaximumRecords) {
+                            throw 'controller-log-record-bound-exceeded'
+                        }
+                    }
+                    Complete-StrictControllerLogRecord -Line $lineBuilder.ToString() -State $State -RunId $RunId -ControllerRunId $ControllerRunId -GenerationId $GenerationId
+                    [void]$lineBuilder.Clear()
+                    $lineOpen = $false
+                    $previousWasCarriageReturn = $true
+                    continue
+                }
+                if ($character -eq [char]10) {
+                    if ($previousWasCarriageReturn) {
+                        $previousWasCarriageReturn = $false
+                        continue
+                    }
+                    if (-not $lineOpen) {
+                        $State.PhysicalRecordCount += 1
+                        if ($State.PhysicalRecordCount -gt $MaximumRecords) {
+                            throw 'controller-log-record-bound-exceeded'
+                        }
+                    }
+                    Complete-StrictControllerLogRecord -Line $lineBuilder.ToString() -State $State -RunId $RunId -ControllerRunId $ControllerRunId -GenerationId $GenerationId
+                    [void]$lineBuilder.Clear()
+                    $lineOpen = $false
+                    continue
+                }
+                $previousWasCarriageReturn = $false
+                if (-not $lineOpen) {
+                    $State.PhysicalRecordCount += 1
+                    if ($State.PhysicalRecordCount -gt $MaximumRecords) {
+                        throw 'controller-log-record-bound-exceeded'
+                    }
+                    $lineOpen = $true
+                }
+                if ($lineBuilder.Length -ge $MaximumLineCharacters) {
+                    throw 'controller-log-line-bound-exceeded'
+                }
+                [void]$lineBuilder.Append($character)
+            }
+            if ($lineOpen) {
+                Complete-StrictControllerLogRecord -Line $lineBuilder.ToString() -State $State -RunId $RunId -ControllerRunId $ControllerRunId -GenerationId $GenerationId
+            }
+        }
+        finally {
+            $reader.Dispose()
+        }
+    }
+    finally {
+        $stream.Dispose()
+    }
+}
+
 function Read-StrictCurrentLease {
     $leasePath = "$root\run-lease.json"
     $leaseText = Read-BoundedUtf8Text -Path $leasePath -MaximumBytes $maximumLeaseBytes
     Assert-NoDuplicateJsonProperties -Text $leaseText
-    if ($leaseText -cmatch '(?<![0-9A-Fa-f])[0-9A-Fa-f]{48}(?![0-9A-Fa-f])') {
-        throw 'run-lease-token-rejected'
-    }
     try {
-        $lease = $leaseText | ConvertFrom-Json -Depth 8 -NoEnumerate
+        $lease = $leaseText | ConvertFrom-Json -Depth 8 -DateKind String -NoEnumerate
     }
     catch {
         throw 'run-lease-json-invalid'
@@ -432,10 +578,16 @@ function Read-StrictCurrentLease {
     )
     if (
         $lease.schema -isnot [long] -or $lease.schema -ne 1 -or
-        $lease.runId -isnot [string] -or $lease.runId -cne $runId -or
+        $lease.runId -isnot [string] -or
+        $lease.runId -cnotmatch '^[A-Za-z0-9._-]{1,64}$' -or
+        $lease.runId -cmatch '[0-9A-Fa-f]{48}' -or
+        $lease.runId -cne $runId -or
         $lease.controllerRunId -isnot [string] -or
         $lease.controllerRunId -cnotmatch '^[A-Za-z0-9._-]{1,96}$' -or
-        $lease.generationId -isnot [long] -or $lease.generationId -le 0 -or
+        $lease.controllerRunId -cmatch '[0-9A-Fa-f]{48}' -or
+        $lease.generationId -isnot [long] -or
+        $lease.generationId -le 0 -or
+        $lease.generationId -gt 9007199254740991 -or
         $lease.controller.pid -isnot [long] -or $lease.controller.pid -le 0 -or
         $lease.controller.pid -gt [int]::MaxValue -or
         $lease.janvim.pid -isnot [long] -or $lease.janvim.pid -le 0 -or
@@ -474,76 +626,28 @@ try {
         "$root\show-run.log.controller.2",
         "$root\show-run.log.controller.3"
     )
-    $matchingEvents = [Collections.Generic.List[object]]::new()
-    $recordCount = 0
+    $logState = [pscustomobject]@{
+        PhysicalRecordCount = 0
+        ParsedRecordCount = 0
+        MatchingCount = 0
+        MatchingEvent = $null
+    }
     $existingLogCount = 0
     foreach ($controllerLogPath in $controllerLogPaths) {
         if (-not (Test-Path -LiteralPath $controllerLogPath -PathType Leaf)) {
             continue
         }
         $existingLogCount += 1
-        $logText = Read-BoundedUtf8Text `
-            -Path $controllerLogPath `
-            -MaximumBytes $maximumControllerLogBytes
-        foreach ($line in ($logText -split '\r?\n')) {
-            if ([string]::IsNullOrWhiteSpace($line)) {
-                continue
-            }
-            $recordCount += 1
-            if (
-                $recordCount -gt $maximumControllerLogRecords -or
-                $line.Length -gt $maximumControllerLogLineCharacters
-            ) {
-                throw 'controller-log-record-bound-exceeded'
-            }
-            try {
-                Assert-NoDuplicateJsonProperties -Text $line
-                $record = $line | ConvertFrom-Json -Depth 8 -NoEnumerate
-            }
-            catch {
-                throw 'controller-log-json-invalid'
-            }
-            if ($record -isnot [pscustomobject]) {
-                throw 'controller-log-object-required'
-            }
-            $typeProperty = $record.PSObject.Properties['type']
-            if ($null -eq $typeProperty -or $record.type -isnot [string]) {
-                throw 'controller-log-type-invalid'
-            }
-            if ($record.type -cne 'secondary-opened') {
-                continue
-            }
-            Assert-ExactPropertySet -InputObject $record -ExpectedNames @(
-                'type', 'runId', 'controllerRunId', 'generationId', 'rendererPid'
-            )
-            if (
-                $record.runId -isnot [string] -or
-                $record.controllerRunId -isnot [string] -or
-                $record.generationId -isnot [long] -or
-                $record.generationId -le 0 -or
-                $record.rendererPid -isnot [long] -or
-                $record.rendererPid -le 0 -or
-                $record.rendererPid -gt [int]::MaxValue
-            ) {
-                throw 'secondary-opened-scalar-invalid'
-            }
-            if (
-                $record.runId -ceq $runId -and
-                $record.controllerRunId -ceq $lease.controllerRunId -and
-                $record.generationId -eq $lease.generationId
-            ) {
-                [void]$matchingEvents.Add($record)
-            }
-        }
+        Read-BoundedControllerLogRecords -Path $controllerLogPath -MaximumBytes $maximumControllerLogBytes -MaximumLineCharacters $maximumControllerLogLineCharacters -MaximumRecords $maximumControllerLogRecords -State $logState -RunId $runId -ControllerRunId $lease.controllerRunId -GenerationId $lease.generationId
     }
-    if ($existingLogCount -lt 1 -or $recordCount -lt 1) {
+    if ($existingLogCount -lt 1 -or $logState.ParsedRecordCount -lt 1) {
         throw 'controller-log-missing'
     }
-    if ($matchingEvents.Count -ne 1) {
+    if ($logState.MatchingCount -ne 1 -or $null -eq $logState.MatchingEvent) {
         throw 'current-secondary-identity-not-unique'
     }
 
-    $rendererPid = [int]$matchingEvents[0].rendererPid
+    $rendererPid = [int]$logState.MatchingEvent.rendererPid
     $rendererProcess = Get-Process -Id $rendererPid -ErrorAction Stop
     [void]$rendererProcess.Handle
     Stop-Process -Id $rendererPid
@@ -702,14 +806,30 @@ function Convert-StrictUtcInstant {
     return $parsed.ToUniversalTime()
 }
 
+function Test-PositiveSafeInteger {
+    param([Parameter(Mandatory = $true)][object]$Value)
+    return (
+        $Value -is [long] -and
+        $Value -gt 0 -and
+        $Value -le 9007199254740991
+    )
+}
+
+function Test-NonEmptyString {
+    param([Parameter(Mandatory = $true)][object]$Value)
+    return $Value -is [string] -and $Value.Length -gt 0
+}
+
+function Test-LowerSha256 {
+    param([Parameter(Mandatory = $true)][object]$Value)
+    return $Value -is [string] -and $Value -cmatch '^[0-9a-f]{64}$'
+}
+
 $leasePath = "$root\run-lease.json"
 $leaseText = Read-BoundedUtf8Text -Path $leasePath -MaximumBytes $maximumLeaseBytes
 Assert-NoDuplicateJsonProperties -Text $leaseText
-if ($leaseText -cmatch '(?<![0-9A-Fa-f])[0-9A-Fa-f]{48}(?![0-9A-Fa-f])') {
-    throw 'run-lease-token-rejected'
-}
 try {
-    $lease = $leaseText | ConvertFrom-Json -Depth 8 -NoEnumerate
+    $lease = $leaseText | ConvertFrom-Json -Depth 8 -DateKind String -NoEnumerate
 }
 catch {
     throw 'run-lease-json-invalid'
@@ -731,10 +851,16 @@ Assert-ExactPropertySet -InputObject $lease.janvim -ExpectedNames @(
 )
 if (
     $lease.schema -isnot [long] -or $lease.schema -ne 1 -or
-    $lease.runId -isnot [string] -or $lease.runId -cne $runId -or
+    $lease.runId -isnot [string] -or
+    $lease.runId -cnotmatch '^[A-Za-z0-9._-]{1,64}$' -or
+    $lease.runId -cmatch '[0-9A-Fa-f]{48}' -or
+    $lease.runId -cne $runId -or
     $lease.controllerRunId -isnot [string] -or
     $lease.controllerRunId -cnotmatch '^[A-Za-z0-9._-]{1,96}$' -or
-    $lease.generationId -isnot [long] -or $lease.generationId -le 0 -or
+    $lease.controllerRunId -cmatch '[0-9A-Fa-f]{48}' -or
+    $lease.generationId -isnot [long] -or
+    $lease.generationId -le 0 -or
+    $lease.generationId -gt 9007199254740991 -or
     $lease.controller.pid -isnot [long] -or $lease.controller.pid -le 0 -or
     $lease.controller.pid -gt [int]::MaxValue -or
     $lease.janvim.pid -isnot [long] -or $lease.janvim.pid -le 0 -or
@@ -757,7 +883,7 @@ $artifactLockText =
     Read-BoundedUtf8Text -Path $artifactLockPath -MaximumBytes $maximumArtifactLockBytes
 Assert-NoDuplicateJsonProperties -Text $artifactLockText
 try {
-    $artifactLock = $artifactLockText | ConvertFrom-Json -Depth 8 -NoEnumerate
+    $artifactLock = $artifactLockText | ConvertFrom-Json -Depth 8 -DateKind String -NoEnumerate
 }
 catch {
     throw 'artifact-lock-json-invalid'
@@ -797,11 +923,42 @@ Assert-ExactPropertySet -InputObject $artifactLock -ExpectedNames @(
 )
 if (
     $artifactLock.schema -isnot [long] -or $artifactLock.schema -ne 1 -or
+    $artifactLock.sourceRepository -isnot [string] -or
+    $artifactLock.sourceRepository -cne 'D:/github/JanVim' -or
+    $artifactLock.tag -isnot [string] -or
+    $artifactLock.tag -cne 'v0.10.1-gmk.4' -or
+    $artifactLock.commit -isnot [string] -or
+    $artifactLock.commit -cne 'e95633101d93f8448b0f906e918b5d836ab95273' -or
+    -not (Test-NonEmptyString -Value $artifactLock.archive) -or
+    -not (Test-PositiveSafeInteger -Value $artifactLock.archiveBytes) -or
+    -not (Test-LowerSha256 -Value $artifactLock.archiveSha256) -or
+    -not (Test-NonEmptyString -Value $artifactLock.checksum) -or
+    -not (Test-LowerSha256 -Value $artifactLock.checksumSha256) -or
     $artifactLock.core -isnot [string] -or $artifactLock.core -cne 'janvim-core.exe' -or
-    $artifactLock.coreBytes -isnot [long] -or
+    -not (Test-PositiveSafeInteger -Value $artifactLock.coreBytes) -or
     $artifactLock.coreBytes -ne 18866688 -or
-    $artifactLock.coreSha256 -isnot [string] -or
+    -not (Test-LowerSha256 -Value $artifactLock.coreSha256) -or
     $artifactLock.coreSha256 -cne '224b3457d89fbc6cf946359683632f29f9262bae08b6f0d2e3043a3a7a6d83b3' -or
+    -not (Test-NonEmptyString -Value $artifactLock.runtimeLua) -or
+    -not (Test-LowerSha256 -Value $artifactLock.runtimeLuaSha256) -or
+    -not (Test-NonEmptyString -Value $artifactLock.artifactConfig) -or
+    -not (Test-LowerSha256 -Value $artifactLock.artifactConfigSha256) -or
+    $artifactLock.config -isnot [string] -or
+    $artifactLock.config -cne 'show/janvim-show.toml' -or
+    -not (Test-LowerSha256 -Value $artifactLock.configSha256) -or
+    $artifactLock.layoutEngine -isnot [string] -or
+    $artifactLock.layoutEngine -cne 'orthogonal' -or
+    $artifactLock.role -isnot [string] -or
+    $artifactLock.role -cne 'primary-projector' -or
+    -not (Test-NonEmptyString -Value $artifactLock.provenanceKind) -or
+    -not (Test-NonEmptyString -Value $artifactLock.provenanceReference) -or
+    -not (Test-NonEmptyString -Value $artifactLock.provenanceRecord) -or
+    -not (Test-LowerSha256 -Value $artifactLock.provenanceSha256) -or
+    -not (Test-NonEmptyString -Value $artifactLock.evidenceRecord) -or
+    -not (Test-LowerSha256 -Value $artifactLock.evidenceSha256) -or
+    $artifactLock.pluginLabConfig -isnot [string] -or
+    $artifactLock.pluginLabConfig -cne 'runtime/user-root/plugin-lab/config/init.lua' -or
+    -not (Test-LowerSha256 -Value $artifactLock.pluginLabConfigSha256) -or
     $lease.janvim.executableSha256 -cne $artifactLock.coreSha256
 ) {
     throw 'artifact-lock-core-identity-invalid'
@@ -1026,11 +1183,8 @@ function Convert-StrictUtcInstant {
 $leasePath = "$root\run-lease.json"
 $leaseText = Read-BoundedUtf8Text -Path $leasePath -MaximumBytes $maximumLeaseBytes
 Assert-NoDuplicateJsonProperties -Text $leaseText
-if ($leaseText -cmatch '(?<![0-9A-Fa-f])[0-9A-Fa-f]{48}(?![0-9A-Fa-f])') {
-    throw 'run-lease-token-rejected'
-}
 try {
-    $lease = $leaseText | ConvertFrom-Json -Depth 8 -NoEnumerate
+    $lease = $leaseText | ConvertFrom-Json -Depth 8 -DateKind String -NoEnumerate
 }
 catch {
     throw 'run-lease-json-invalid'
@@ -1052,10 +1206,16 @@ Assert-ExactPropertySet -InputObject $lease.janvim -ExpectedNames @(
 )
 if (
     $lease.schema -isnot [long] -or $lease.schema -ne 1 -or
-    $lease.runId -isnot [string] -or $lease.runId -cne $runId -or
+    $lease.runId -isnot [string] -or
+    $lease.runId -cnotmatch '^[A-Za-z0-9._-]{1,64}$' -or
+    $lease.runId -cmatch '[0-9A-Fa-f]{48}' -or
+    $lease.runId -cne $runId -or
     $lease.controllerRunId -isnot [string] -or
     $lease.controllerRunId -cnotmatch '^[A-Za-z0-9._-]{1,96}$' -or
-    $lease.generationId -isnot [long] -or $lease.generationId -le 0 -or
+    $lease.controllerRunId -cmatch '[0-9A-Fa-f]{48}' -or
+    $lease.generationId -isnot [long] -or
+    $lease.generationId -le 0 -or
+    $lease.generationId -gt 9007199254740991 -or
     $lease.controller.pid -isnot [long] -or $lease.controller.pid -le 0 -or
     $lease.controller.pid -gt [int]::MaxValue -or
     $lease.janvim.pid -isnot [long] -or $lease.janvim.pid -le 0 -or
@@ -1072,6 +1232,7 @@ if (
 }
 
 $expectedControllerStart = Convert-StrictUtcInstant -Value $lease.controller.startedAtUtc
+[void](Convert-StrictUtcInstant -Value $lease.janvim.startedAtUtc)
 $controllerRunId = [string]$lease.controllerRunId
 $currentGenerationId = [long]$lease.generationId
 $controllerPid = [int]$lease.controller.pid
