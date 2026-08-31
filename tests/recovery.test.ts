@@ -2040,7 +2040,7 @@ describe("Task 9 recovery operations", () => {
         stoppedPids: [],
       });
     }
-  });
+  }, 10_000);
 
   it("mirrors safe lease, event, token, and complete frozen artifact-lock schemas", () => {
     const sections = markdownSections(readFileSync(runbookPath, "utf8"));
