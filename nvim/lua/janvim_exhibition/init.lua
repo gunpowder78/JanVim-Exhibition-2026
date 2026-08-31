@@ -8,6 +8,8 @@ Connection.__index = Connection
 local HOST = "127.0.0.1"
 local CONNECT_TIMEOUT_MS = 1000
 local MAX_QUEUED_COMMANDS = 32
+local PARENT_RECHECK_DELAY_MS = 100
+local MAX_PARENT_RECHECKS = 20
 
 local function valid_port(value)
   return type(value) == "number" and value % 1 == 0 and value >= 1 and value <= 65535
@@ -46,11 +48,13 @@ function M.setup(options)
     return nil
   end
   local schedule = options.schedule or vim.schedule
+  local defer = options.defer or vim.defer_fn
   local exit_backend = options.exit_backend or function()
     vim.cmd("qaall!")
   end
   assert(type(parent_alive) == "function", "JanVim parent liveness check is required")
   assert(type(schedule) == "function", "Neovim scheduler is required")
+  assert(type(defer) == "function", "Neovim deferred scheduler is required")
   assert(type(exit_backend) == "function", "Neovim backend exit is required")
 
   local self = setmetatable({
@@ -69,8 +73,11 @@ function M.setup(options)
     parent_pid = parent_pid,
     parent_alive = parent_alive,
     schedule = schedule,
+    defer = defer,
     exit_backend = exit_backend,
     shutdown_requested = false,
+    shutdown_probe_started = false,
+    parent_recheck_scheduled = false,
     backend_exit_scheduled = false,
   }, Connection)
 
@@ -191,14 +198,36 @@ function Connection:complete_requested_shutdown()
     return false
   end
   self:close_transport()
+  if not self.shutdown_probe_started then
+    self.shutdown_probe_started = true
+    self:probe_parent_after_shutdown(MAX_PARENT_RECHECKS)
+  end
+  return true
+end
+
+function Connection:probe_parent_after_shutdown(remaining_rechecks)
+  if self.disposed or self.backend_exit_scheduled then
+    return
+  end
   local ok, alive = pcall(self.parent_alive, self.parent_pid)
   if ok and alive == false and not self.backend_exit_scheduled then
     self.backend_exit_scheduled = true
     self.schedule(function()
       pcall(self.exit_backend)
     end)
+  elseif remaining_rechecks > 0
+      and not self.parent_recheck_scheduled then
+    self.parent_recheck_scheduled = true
+    local fired = false
+    self.defer(function()
+      if fired then
+        return
+      end
+      fired = true
+      self.parent_recheck_scheduled = false
+      self:probe_parent_after_shutdown(remaining_rechecks - 1)
+    end, PARENT_RECHECK_DELAY_MS)
   end
-  return true
 end
 
 function Connection:stop_connect_timer()

@@ -8,8 +8,9 @@ fully settled original-poem generation.
 
 **Architecture:** `RuntimeShowSession` treats child `exit` as the immediate fault signal and child
 `close` as the final process-tree/output settlement signal. The exhibition Lua connection delays
-shutdown transport closure until its ACK write completes and performs one fixed self-exit only when
-its captured JanVim parent PID is no longer alive.
+shutdown transport closure until its ACK write completes. It checks only its captured JanVim parent
+PID, rechecks live or uncertain results every 100 ms at most 20 times, and performs one fixed
+self-exit only after a probe confirms the parent is no longer alive.
 
 **Tech Stack:** Windows 11, Node.js 22.23.0 child processes, Electron 44.0.0, TypeScript 7.0.2,
 Vitest 4.1.11, Neovim 0.10.1 Lua/libuv, PowerShell 7.
@@ -431,6 +432,26 @@ Invoke `superpowers:requesting-code-review`. Give the reviewer the approved desi
 failed rehearsal evidence summary, both implementation commits, and exact gate output. Require
 explicit Critical/Important/Minor findings and a merge-readiness verdict. Apply any accepted finding
 through `superpowers:receiving-code-review`, with a new RED test before every behavior change.
+
+---
+
+### Task 3A: Bound the Windows parent-retirement race found by physical fault injection
+
+The fresh run `g3-janvim-fault-20260901-035135` proved that the frontend `exit` and authenticated
+shutdown ACK can precede Windows reporting the captured parent PID as absent. The one-shot Lua
+probe therefore left the exact Neovim backend alive, correctly blocked child `close`, and produced
+`old-session-unsettled` rather than an unsafe replacement. The owner approved this bounded
+amendment on 2026-09-01.
+
+- [ ] Add deterministic RED tests for live-then-`ESRCH`, duplicate deferred callbacks, exactly 20
+  live rechecks, and uncertain/throwing probes that later confirm `ESRCH`.
+- [ ] Inject `defer(callback, 100)` with production `vim.defer_fn`; start only one probe chain after
+  the shutdown ACK, decrement a literal 20-recheck budget, and keep the fixed backend exit
+  idempotent.
+- [ ] Treat only confirmed `alive == false` as permission to exit. Every other result consumes one
+  finite recheck and exhaustion remains fail-closed.
+- [ ] Synchronize only `nvim/lua/janvim_exhibition/init.lua` to the ignored prepared runtime, rerun
+  all repository gates, request independent review, and repeat Task 4 from new external roots.
 
 ---
 

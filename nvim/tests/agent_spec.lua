@@ -323,6 +323,7 @@ local function new_connection_fixture(options)
   options = options or {}
   local exhibition = require("janvim_exhibition")
   local writes = {}
+  local deferred = {}
   local fake_tcp = { closed = false, close_count = 0, reader = nil }
 
   function fake_tcp:connect(host, port, callback)
@@ -394,6 +395,9 @@ local function new_connection_fixture(options)
     schedule = options.schedule or function(callback)
       callback()
     end,
+    defer = options.defer or function(callback, delay_ms)
+      table.insert(deferred, { callback = callback, delay_ms = delay_ms })
+    end,
     parent_pid = options.parent_pid or 7628,
     parent_alive = options.parent_alive,
     exit_backend = options.exit_backend or function() end,
@@ -404,6 +408,7 @@ local function new_connection_fixture(options)
     fake_tcp = fake_tcp,
     fake_timer = fake_timer,
     writes = writes,
+    deferred = deferred,
   }
 end
 
@@ -437,6 +442,126 @@ run("shutdown flushes its ack before one orphan backend exit", function()
   complete_write(nil)
   equal(exit_count, 1)
   fixture.connection:close()
+end)
+
+run("shutdown rechecks a briefly live parent and exits once after ESRCH", function()
+  local probes = { true, false }
+  local probe_count = 0
+  local exit_count = 0
+  local fixture = new_connection_fixture({
+    parent_alive = function(pid)
+      equal(pid, 7628)
+      probe_count = probe_count + 1
+      return probes[probe_count]
+    end,
+    exit_backend = function()
+      exit_count = exit_count + 1
+    end,
+  })
+
+  fixture.fake_tcp.reader(nil, vim.json.encode(command(
+    "cue-parent-race-shutdown",
+    { type = "shutdown" }
+  )) .. "\n")
+  assert(fixture.writes[2].callback)(nil)
+
+  equal(probe_count, 1)
+  equal(exit_count, 0)
+  equal(#fixture.deferred, 1)
+  equal(fixture.deferred[1].delay_ms, 100)
+
+  local recheck = fixture.deferred[1].callback
+  recheck()
+  equal(probe_count, 2)
+  equal(exit_count, 1)
+
+  recheck()
+  equal(probe_count, 2)
+  equal(exit_count, 1)
+  fixture.connection:close()
+end)
+
+run("shutdown bounds a live parent to twenty deferred rechecks", function()
+  local probe_count = 0
+  local exit_count = 0
+  local fixture = new_connection_fixture({
+    parent_alive = function()
+      probe_count = probe_count + 1
+      return true
+    end,
+    exit_backend = function()
+      exit_count = exit_count + 1
+    end,
+  })
+
+  fixture.fake_tcp.reader(nil, vim.json.encode(command(
+    "cue-live-parent-bounded-shutdown",
+    { type = "shutdown" }
+  )) .. "\n")
+  assert(fixture.writes[2].callback)(nil)
+  equal(probe_count, 1)
+
+  for recheck_index = 1, 20 do
+    equal(#fixture.deferred, recheck_index)
+    equal(fixture.deferred[recheck_index].delay_ms, 100)
+    fixture.deferred[recheck_index].callback()
+    equal(probe_count, recheck_index + 1)
+    equal(exit_count, 0)
+  end
+
+  equal(#fixture.deferred, 20)
+  fixture.deferred[20].callback()
+  equal(probe_count, 21)
+  equal(exit_count, 0)
+  fixture.connection:close()
+end)
+
+run("shutdown rechecks uncertain parent probes until ESRCH", function()
+  local cases = {
+    {
+      name = "nil result",
+      first_probe = function()
+        return nil
+      end,
+    },
+    {
+      name = "thrown probe",
+      first_probe = function()
+        error("injected transient parent probe failure")
+      end,
+    },
+  }
+
+  for _, case in ipairs(cases) do
+    local probe_count = 0
+    local exit_count = 0
+    local fixture = new_connection_fixture({
+      parent_alive = function()
+        probe_count = probe_count + 1
+        if probe_count == 1 then
+          return case.first_probe()
+        end
+        return false
+      end,
+      exit_backend = function()
+        exit_count = exit_count + 1
+      end,
+    })
+
+    fixture.fake_tcp.reader(nil, vim.json.encode(command(
+      "cue-uncertain-parent-shutdown-" .. case.name,
+      { type = "shutdown" }
+    )) .. "\n")
+    assert(fixture.writes[2].callback)(nil)
+    equal(probe_count, 1, case.name)
+    equal(exit_count, 0, case.name)
+    equal(#fixture.deferred, 1, case.name)
+
+    fixture.deferred[1].callback()
+    equal(probe_count, 2, case.name)
+    equal(exit_count, 1, case.name)
+    fixture.connection:close()
+  end
 end)
 
 run("shutdown exits only when the default parent probe proves ESRCH", function()

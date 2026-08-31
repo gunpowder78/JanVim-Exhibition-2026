@@ -1,10 +1,11 @@
 # JanVim parent-exit recovery design
 
-- Status: approved by owner on 2026-09-01
+- Status: approved by owner on 2026-09-01; bounded parent-recheck amendment approved on 2026-09-01
 - Date: 2026-09-01
 - Parent plan: `docs/plans/2026-08-28-four-day-dual-projector-delivery.md`, Task 9
 - Parent design: `docs/superpowers/specs/2026-08-29-task9-recovery-offline-soak-design.md`
 - Failed rehearsal: `g3-janvim-fault-20260831-221012`
+- Parent-recheck race rehearsal: `g3-janvim-fault-20260901-035135`
 
 ## 1. Problem and evidence
 
@@ -56,8 +57,9 @@ JanVim frontend `exit`
   -> invalidate generation and stop old cue dispatch
   -> send authenticated parameter-free shutdown to the old show agent
   -> agent checks its captured original parent PID
-       parent alive   -> existing connection-only shutdown
-       parent absent  -> ACK, close transport, schedule fixed backend exit
+       parent absent         -> ACK, close transport, schedule fixed backend exit
+       parent alive/unknown  -> recheck every 100 ms, at most 20 times
+       still unproven        -> stop rechecking and fail closed
   -> Neovim backend exits and releases inherited streams
   -> child `close`
   -> finalize bounded stdout/stderr and remove exact run lease
@@ -92,17 +94,21 @@ The show-only Lua connection captures its original parent PID once through the N
 libuv API. The existing `shutdown` action still accepts no fields.
 
 On authenticated shutdown, the agent first completes the normal ACK and closes its transport. A
-fixed injected predicate then checks whether the captured parent PID still exists:
+fixed injected predicate then checks whether the captured parent PID still exists. The first check
+may race Windows process-object retirement after the frontend `exit`, so a live or uncertain result
+starts one finite chain of at most 20 rechecks at fixed 100 ms intervals:
 
-- if the parent exists, no backend-exit callback runs; normal Stop Show remains connection-only and
-  the exact HWND close lets JanVim own its ordinary frontend/backend teardown;
 - if the parent is absent, the agent schedules one fixed backend-exit callback after ACK handling;
-  production wiring performs only the hard-coded Neovim exit operation.
+  production wiring performs only the hard-coded Neovim exit operation;
+- if a recheck reports the parent absent, the same one fixed callback runs and the remaining chain
+  stops;
+- if all 20 rechecks remain live or uncertain, the chain stops without exiting the backend.
 
 No controller-provided string reaches the exit callback. Tests continue to reject `command`, Ex,
-Lua, shell, and unknown shutdown fields. Failure or uncertainty in the parent check fails closed:
-the backend is not exited by that check, `close` does not settle, and the controller enters bounded
-`safe-ready` rather than launching over an unproven old session.
+Lua, shell, and unknown shutdown fields. A single failed or uncertain parent check cannot be treated
+as death; it consumes only one bounded recheck. Exhaustion still fails closed: the backend is not
+exited, `close` does not settle, and the controller enters bounded `safe-ready` rather than
+launching over an unproven old session.
 
 ## 4. Error handling and safety
 
@@ -112,6 +118,8 @@ the backend is not exited by that check, `close` does not settle, and the contro
 - The agent records no user path or token and does not enumerate or kill processes.
 - Parent-liveness checking uses only the PID captured at agent construction; it never accepts a PID
   from a cue.
+- Parent rechecks are one-shot callbacks, fixed at 100 ms, bounded to 20, and stop after confirmed
+  absence or exhaustion.
 - The fixed backend exit runs at most once and only after authenticated shutdown plus confirmed
   parent absence.
 - If backend exit does not lead to `close` before the existing cleanup deadline, recovery records
@@ -142,10 +150,12 @@ The existing `close`-only fixtures must be split so they can emit `exit` and `cl
 
 Add agent tests with injected parent-liveness and fixed backend-exit callbacks. Assert that:
 
-- parent alive: shutdown ACK is applied, transport closes once, backend exit count remains zero;
+- parent briefly alive then absent: one 100 ms recheck confirms absence and exits exactly once;
+- parent remains alive: exactly 20 deferred rechecks occur and backend exit count remains zero;
 - parent absent: shutdown ACK is applied, transport closes once, fixed backend exit runs once;
-- parent probe returns `EPERM`, an unknown error, or throws: transport still closes, but backend
-  exit count remains zero;
+- parent probe returns `EPERM`, an unknown error, or throws: the finite chain continues but cannot
+  exit until a later probe confirms `ESRCH`;
+- duplicate deferred callbacks cannot probe or exit twice;
 - duplicate shutdown cannot schedule a second exit;
 - shutdown with any user string remains rejected and cannot close or exit anything.
 
