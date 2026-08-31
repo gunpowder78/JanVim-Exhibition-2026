@@ -23,6 +23,12 @@ const maximumBundleBytes = 16 * 1024 * 1024;
 const maximumAstNodes = maximumBundleBytes + 2;
 const maximumRuntimeImports = 64;
 const maximumRuntimeImportCharacters = 128;
+const dangerousDynamicLoaderNames = new Set([
+  "createRequire",
+  "eval",
+  "getBuiltinModule",
+  "require",
+]);
 
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error);
@@ -104,6 +110,38 @@ function addRuntimeImport(runtimeImports, specifier) {
   throw new Error(`Unsupported Electron-main runtime import: ${specifier}`);
 }
 
+function dangerousDynamicLoaderName(node) {
+  if (
+    typescript.isIdentifier(node) &&
+    dangerousDynamicLoaderNames.has(node.text)
+  ) {
+    return node.text;
+  }
+  if (
+    typescript.isPropertyAccessExpression(node) &&
+    dangerousDynamicLoaderNames.has(node.name.text)
+  ) {
+    return node.name.text;
+  }
+  if (
+    typescript.isElementAccessExpression(node) &&
+    typescript.isStringLiteralLike(node.argumentExpression) &&
+    dangerousDynamicLoaderNames.has(node.argumentExpression.text)
+  ) {
+    return node.argumentExpression.text;
+  }
+  return undefined;
+}
+
+function assertNoDynamicLoaderBypass(node) {
+  const dangerousName = dangerousDynamicLoaderName(node);
+  if (dangerousName !== undefined) {
+    throw new Error(
+      `Unsupported Electron-main dynamic loader reference: ${dangerousName}`,
+    );
+  }
+}
+
 function inspectRuntimeImports(source, modulePath) {
   const sourceFile = parseJavaScript(source, modulePath);
   const pending = [sourceFile];
@@ -112,6 +150,7 @@ function inspectRuntimeImports(source, modulePath) {
 
   while (pending.length > 0) {
     const node = pending.pop();
+    assertNoDynamicLoaderBypass(node);
     if (typescript.isImportDeclaration(node)) {
       if (!typescript.isStringLiteral(node.moduleSpecifier)) {
         throw new Error("Electron-main import specifier is not a string");
@@ -128,12 +167,6 @@ function inspectRuntimeImports(source, modulePath) {
     } else if (typescript.isCallExpression(node)) {
       if (node.expression.kind === typescript.SyntaxKind.ImportKeyword) {
         throw new Error("Unsupported Electron-main dynamic import");
-      }
-      if (
-        typescript.isIdentifier(node.expression) &&
-        node.expression.text === "require"
-      ) {
-        throw new Error("Unsupported Electron-main require call");
       }
     }
 

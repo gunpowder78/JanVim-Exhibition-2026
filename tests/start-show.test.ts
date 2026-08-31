@@ -343,6 +343,7 @@ interface LauncherFixture {
 }
 
 interface RunOptions {
+  additionalNodePath?: string;
   behavior?:
     | "matching-success"
     | "matching-failure"
@@ -1358,8 +1359,29 @@ function runLauncher(
   const childEnvironment = { ...process.env };
   for (const name of Object.keys(childEnvironment)) {
     if (name.toLowerCase() === "psmodulepath") delete childEnvironment[name];
+    if (name.toLowerCase() === "path") delete childEnvironment[name];
   }
   childEnvironment.PSModulePath = modulePath;
+  const executableExtensions = [
+    "",
+    ...(process.env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD")
+      .split(";")
+      .filter(Boolean),
+  ];
+  const inheritedPathWithoutNode = (process.env.PATH ?? "")
+    .split(";")
+    .filter(Boolean)
+    .filter((pathEntry) => {
+      const directory = pathEntry.replace(/^"|"$/gu, "");
+      return !executableExtensions.some((extension) =>
+        existsSync(join(directory, `node${extension}`)),
+      );
+    });
+  childEnvironment.PATH = [
+    dirname(fixture.nodeExecutable),
+    options.additionalNodePath,
+    ...inheritedPathWithoutNode,
+  ].filter((value): value is string => Boolean(value)).join(";");
   const launchMutation = options.launchMutation ?? "none";
   const launchMutationTarget = {
     none: fixture.compiledEntry,
@@ -1388,7 +1410,6 @@ function runLauncher(
       windowsHide: true,
       env: {
         ...childEnvironment,
-        PATH: `${join(fixture.root, "bin")};${process.env.PATH ?? ""}`,
         SHOW_TEST_BEHAVIOR: options.behavior ?? "crash",
         SHOW_TEST_REPOSITORY_ROOT: fixture.root,
         SHOW_TEST_CLOSE_OUTPUT_BYTES: String(options.closeOutputBytes ?? 0),
@@ -1570,6 +1591,41 @@ function changedGraphOutput(
 ): string {
   return JSON.stringify(change(validGraphManifest(fixture)));
 }
+
+function rawGraphManifestParts(fixture: LauncherFixture): {
+  file: GraphFileRecord;
+  runtimeImports: string;
+} {
+  const manifest = validGraphManifest(fixture);
+  return {
+    file: manifest.files[0]!,
+    runtimeImports: JSON.stringify(manifest.runtimeImports),
+  };
+}
+
+const duplicateGraphOutputCases = [
+  {
+    label: "duplicate top-level schema",
+    output: (fixture: LauncherFixture) => {
+      const { file, runtimeImports } = rawGraphManifestParts(fixture);
+      return `{"schema":2,"schema":2,"status":"compiled-electron-main-bundle-verified","files":[${JSON.stringify(file)}],"runtimeImports":${runtimeImports}}`;
+    },
+  },
+  {
+    label: "duplicate nested file hash",
+    output: (fixture: LauncherFixture) => {
+      const { file, runtimeImports } = rawGraphManifestParts(fixture);
+      return `{"schema":2,"status":"compiled-electron-main-bundle-verified","files":[{"relativePath":${JSON.stringify(file.relativePath)},"bytes":${file.bytes},"sha256":${JSON.stringify(file.sha256)},"sha256":${JSON.stringify(file.sha256)}}],"runtimeImports":${runtimeImports}}`;
+    },
+  },
+  {
+    label: "duplicate top-level runtime imports",
+    output: (fixture: LauncherFixture) => {
+      const { file, runtimeImports } = rawGraphManifestParts(fixture);
+      return `{"schema":2,"status":"compiled-electron-main-bundle-verified","files":[${JSON.stringify(file)}],"runtimeImports":${runtimeImports},"runtimeImports":${runtimeImports}}`;
+    },
+  },
+] as const;
 
 interface InvalidGraphOutputCase {
   label: string;
@@ -2190,6 +2246,38 @@ describe("offline show launcher and external watchdog", () => {
     }
   }, 15_000);
 
+  it("rejects two distinct Node application paths before version or graph verification", () => {
+    const fixture = makeLauncherFixture();
+    const alternateNodeDirectory = join(fixture.root, "alternate-node");
+    mkdirSync(alternateNodeDirectory);
+    copyFileSync(
+      fixture.nodeExecutable,
+      join(alternateNodeDirectory, "node.exe"),
+    );
+    try {
+      const result = runLauncher(
+        fixture,
+        launcherArguments(fixture, "ValidateOnly"),
+        {
+          additionalNodePath: alternateNodeDirectory,
+          behavior: "matching-success",
+        },
+      );
+      const sequence = existsSync(fixture.sequenceLog)
+        ? readFileSync(fixture.sequenceLog, "utf8").trim().split(/\r?\n/u)
+        : [];
+
+      expect(result.status, output(result)).not.toBe(0);
+      expect(output(result)).toContain("node-command-ambiguous");
+      expect(sequence).not.toContain("parser-executed:original");
+      expect(sequence).not.toContain("graph-verify");
+      expect(sequence).not.toContain("electron");
+      expect(invocations(fixture)).toHaveLength(0);
+    } finally {
+      fixture.cleanup();
+    }
+  }, 15_000);
+
   it.each(invalidGraphOutputCases)(
     "rejects graph verifier output before Electron: $label",
     ({ output: graphOutput, reason }) => {
@@ -2210,6 +2298,34 @@ describe("offline show launcher and external watchdog", () => {
 
         expect(result.status, diagnostic).not.toBe(0);
         expect(diagnostic).toContain(reason);
+        expect(invocations(fixture)).toHaveLength(0);
+        expect(sequence).not.toContain("electron");
+      } finally {
+        fixture.cleanup();
+      }
+    },
+    15_000,
+  );
+
+  it.each(duplicateGraphOutputCases)(
+    "rejects raw graph manifest with $label before Electron",
+    ({ output: graphOutput }) => {
+      const fixture = makeLauncherFixture();
+      try {
+        const result = runLauncher(
+          fixture,
+          launcherArguments(fixture, "ValidateOnly"),
+          {
+            behavior: "matching-success",
+            graphOutput: graphOutput(fixture),
+          },
+        );
+        const sequence = existsSync(fixture.sequenceLog)
+          ? readFileSync(fixture.sequenceLog, "utf8").trim().split(/\r?\n/u)
+          : [];
+
+        expect(result.status, output(result)).not.toBe(0);
+        expect(output(result)).toContain("electron-module-graph-invalid");
         expect(invocations(fixture)).toHaveLength(0);
         expect(sequence).not.toContain("electron");
       } finally {

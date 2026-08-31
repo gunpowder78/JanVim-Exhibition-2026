@@ -760,6 +760,46 @@ function Test-HashValue {
     return $Value -is [string] -and $Value -cmatch '^[0-9a-f]{64}$'
 }
 
+function Assert-NoDuplicateJsonPropertyNames {
+    param([Parameter(Mandatory = $true)][string]$Text)
+
+    $document = $null
+    try {
+        $options = [System.Text.Json.JsonDocumentOptions]::new()
+        $options.AllowTrailingCommas = $false
+        $options.CommentHandling = [System.Text.Json.JsonCommentHandling]::Disallow
+        $options.MaxDepth = 8
+        $document = [System.Text.Json.JsonDocument]::Parse($Text, $options)
+        $pending = [Collections.Generic.Stack[System.Text.Json.JsonElement]]::new()
+        $pending.Push($document.RootElement)
+        while ($pending.Count -gt 0) {
+            $element = $pending.Pop()
+            if ($element.ValueKind -eq [System.Text.Json.JsonValueKind]::Object) {
+                $propertyNames = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+                foreach ($property in $element.EnumerateObject()) {
+                    if (-not $propertyNames.Add($property.Name)) {
+                        throw 'duplicate-json-property'
+                    }
+                    $pending.Push($property.Value)
+                }
+            }
+            elseif ($element.ValueKind -eq [System.Text.Json.JsonValueKind]::Array) {
+                foreach ($item in $element.EnumerateArray()) {
+                    $pending.Push($item)
+                }
+            }
+        }
+    }
+    catch {
+        throw 'electron-module-graph-invalid'
+    }
+    finally {
+        if ($null -ne $document) {
+            $document.Dispose()
+        }
+    }
+}
+
 function Read-StrictElectronModuleGraph {
     param(
         [Parameter(Mandatory = $true)][string]$Text,
@@ -767,6 +807,7 @@ function Read-StrictElectronModuleGraph {
         [Parameter(Mandatory = $true)][string]$CompiledEntry
     )
 
+    Assert-NoDuplicateJsonPropertyNames -Text $Text
     try {
         $manifest = $Text | ConvertFrom-Json -Depth 8 -DateKind String
     }
@@ -2027,13 +2068,30 @@ $watchdogAttemptsStream = $null
 $watchdogAttemptsWriter = $null
 try {
 
-$nodeCandidates = @(Get-Command -Name 'node' -CommandType Application -ErrorAction Stop)
-if ($nodeCandidates.Count -lt 1) {
+$nodeCandidates = @(Get-Command -Name 'node' -CommandType Application -All -ErrorAction SilentlyContinue)
+$normalizedNodeCommands = [Collections.Generic.List[string]]::new()
+$seenNodeCommands = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+foreach ($nodeCandidate in $nodeCandidates) {
+    if ($nodeCandidate.Source -isnot [string] -or [string]::IsNullOrWhiteSpace($nodeCandidate.Source)) {
+        throw 'node-command-invalid'
+    }
+    $normalizedNodeCommand = Resolve-ShowFullPath -Path $nodeCandidate.Source -Label 'node-command'
+    Assert-RequiredLeaf -Path $normalizedNodeCommand -Reason 'node-command-missing'
+    Assert-NoReparseTraversal -Path $normalizedNodeCommand -Reason 'node-command-reparse-rejected'
+    $normalizedNodeCommand = [IO.Path]::GetFullPath(
+        (Get-Item -LiteralPath $normalizedNodeCommand -Force -ErrorAction Stop).FullName
+    )
+    if ($seenNodeCommands.Add($normalizedNodeCommand)) {
+        $normalizedNodeCommands.Add($normalizedNodeCommand)
+    }
+}
+if ($normalizedNodeCommands.Count -lt 1) {
     throw 'node-command-missing'
 }
-$nodeCommand = Resolve-ShowFullPath -Path $nodeCandidates[0].Source -Label 'node-command'
-Assert-RequiredLeaf -Path $nodeCommand -Reason 'node-command-missing'
-Assert-NoReparseTraversal -Path $nodeCommand -Reason 'node-command-reparse-rejected'
+if ($normalizedNodeCommands.Count -ne 1) {
+    throw 'node-command-ambiguous'
+}
+$nodeCommand = $normalizedNodeCommands[0]
 $nodeClaimSpecifications = @(
     New-FrozenInputClaimSpecification `
         -Path $nodeCommand `

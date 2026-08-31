@@ -145,6 +145,36 @@ describe("compiled Electron main bundle", () => {
     expect(result.stderr).toContain("Unsupported Electron-main runtime import");
   });
 
+  it.each([
+    [
+      "process.getBuiltinModule createRequire",
+      'import "electron"; const load = process.getBuiltinModule("module").createRequire(import.meta.url); load("zod");\n',
+    ],
+    [
+      "imported createRequire",
+      'import "electron"; import { createRequire } from "node:module"; const load = createRequire(import.meta.url); load("zod");\n',
+    ],
+    ["module.require", 'import "electron"; module.require("zod");\n'],
+    ["computed module require", 'import "electron"; module["require"]("zod");\n'],
+    ["direct require reference", 'import "electron"; const load = require; load("zod");\n'],
+    ["direct require call", 'import "electron"; require("zod");\n'],
+    [
+      "eval reconstruction",
+      'import "electron"; eval(\'process.getBuiltinModule("module").createRequire(import.meta.url)("zod")\');\n',
+    ],
+    [
+      "computed getBuiltinModule",
+      'import "electron"; process["getBuiltinModule"]("module").createRequire(import.meta.url)("zod");\n',
+    ],
+  ] as const)("rejects dynamic loader bypass through %s", (_label, source) => {
+    const fixture = createVerifierFixture(source);
+
+    const result = runVerifier(fixture.root);
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("dynamic loader");
+  });
+
   it("never executes the candidate bundle or legacy adapters while verifying", () => {
     const fixture = createVerifierFixture([
       'import { writeFileSync } from "node:fs";',
