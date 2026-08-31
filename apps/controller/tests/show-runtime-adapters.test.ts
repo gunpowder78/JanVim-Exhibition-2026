@@ -566,6 +566,7 @@ function createStartupHarness(options: {
   };
   removeRunLeaseResult?: boolean;
   replaceRunLeaseFailure?: boolean;
+  rejectBridgeClose?: boolean;
   closeChildAfterSecondIdentityInspection?: boolean;
   cleanupFailures?: readonly (
     | "close-listener"
@@ -1144,6 +1145,9 @@ function createStartupHarness(options: {
         },
         close: async () => {
           trace.push("bridge-close");
+          if (options.rejectBridgeClose === true) {
+            throw new Error("injected bridge close rejection");
+          }
           if (!closed && listening) activeBridges -= 1;
           closed = true;
           disconnectListeners.clear();
@@ -2262,6 +2266,7 @@ describe("real Task 9 show runtime adapters", () => {
         failures: [],
         childSettled: true,
         leaseRemoved: true,
+        bridgeClosed: true,
         forcedTermination: false,
       };
 
@@ -2291,6 +2296,41 @@ describe("real Task 9 show runtime adapters", () => {
       expect(
         evidence.offlineSnapshots.every((snapshot) => snapshot.offline),
       ).toBe(true);
+    } finally {
+      await coordinator.requestEmergencyStop("sigint");
+      await coordinator.completion;
+    }
+  });
+
+  it("fails evidence when bridge ownership is unsettled even without a duplicate failure bucket", async () => {
+    const harness = createStartupHarness();
+    const coordinator = await bootAndStartRuntimeHarness(harness);
+    const dependencies = (
+      coordinator as unknown as { dependencies: ShowRunCoordinatorDependencies }
+    ).dependencies;
+
+    try {
+      const diagnostics = structuredClone(coordinator.diagnostics());
+      diagnostics.shutdown = {
+        requestedReason: "operator-stop",
+        failures: [],
+        childSettled: true,
+        leaseRemoved: true,
+        bridgeClosed: false,
+        forcedTermination: false,
+      };
+
+      await expect(
+        dependencies.finalizeEvidence(
+          { ok: false, reason: "shutdown-incomplete" },
+          diagnostics,
+          new AbortController().signal,
+        ),
+      ).resolves.toBe("fail");
+      expect(harness.evidenceWrites).toHaveLength(1);
+      expect(harness.evidenceWrites[0]).toMatchObject({
+        value: { shutdown: { bridgeClose: "failed" } },
+      });
     } finally {
       await coordinator.requestEmergencyStop("sigint");
       await coordinator.completion;
@@ -2767,6 +2807,51 @@ describe("real Task 9 show runtime adapters", () => {
     });
     expect(serialized).not.toContain("ab".repeat(24));
     expect(serialized).not.toContain("C:\\Users\\operator");
+  });
+
+  it("retains a bridge rejected during recovery cleanup and fails terminal evidence after one shutdown retry", async () => {
+    const harness = createStartupHarness({ rejectBridgeClose: true });
+    const coordinator = harness.adapters.createCoordinator(showCommand("Show"));
+    await expect(coordinator.boot()).resolves.toEqual({ ready: true });
+
+    harness.emitAgentDisconnect();
+    await settlePromises();
+    const held = coordinator.diagnostics();
+    const bridgeCountWhileHeld = harness.activeResourceCounts().bridges;
+    const spawnCountWhileHeld = harness.spawnInvocationCount();
+
+    expect(coordinator.handleRendererEvent({
+      schema: 1,
+      type: "operator-action",
+      action: "stop-show",
+    })).toBe(true);
+    const completion = await coordinator.completion;
+    const stopped = coordinator.diagnostics();
+
+    expect(held).toMatchObject({
+      state: "safe-ready",
+      reason: "recovery-old-session-unsettled",
+    });
+    expect(bridgeCountWhileHeld).toBe(1);
+    expect(spawnCountWhileHeld).toBe(1);
+    expect(
+      harness.trace.filter((entry) => entry === "bridge-close"),
+    ).toHaveLength(2);
+    expect(completion).toEqual({ ok: false, reason: "shutdown-incomplete" });
+    expect(stopped.shutdown).toMatchObject({
+      failures: expect.arrayContaining(["bridge-close-failed"]),
+      bridgeClosed: false,
+    });
+    expect(harness.evidenceWrites).toHaveLength(1);
+    expect(harness.evidenceWrites[0]).toMatchObject({
+      value: {
+        shutdown: {
+          bridgeClose: "failed",
+          leaseRemoved: true,
+        },
+      },
+    });
+    expect(harness.activeResourceCounts().bridges).toBe(1);
   });
 
   it("forwards the bounded signal and prevents an aborted evidence publication", async () => {

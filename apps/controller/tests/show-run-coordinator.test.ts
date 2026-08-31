@@ -212,6 +212,8 @@ class FakeSurface implements ShowSecondarySurface {
   public readonly rendererPid = 2026;
   public readonly sent: Array<RunCueEvent | RunStatusEvent> = [];
   public closeCalls = 0;
+  public eventDisposeCalls = 0;
+  public destroyedDisposeCalls = 0;
   public rejectStatusSends = false;
   public rejectClose = false;
   public registrationFailure: ListenerRegistrationFailure | undefined;
@@ -248,6 +250,7 @@ class FakeSurface implements ShowSecondarySurface {
     this.eventListeners.add(listener);
     this.capturedEventListeners.push(listener);
     return () => {
+      this.eventDisposeCalls += 1;
       this.trace.push("dispose-surface-event-listener");
       this.eventListeners.delete(listener);
       if (this.disposerFailures.has("surface.onEvent")) {
@@ -266,6 +269,7 @@ class FakeSurface implements ShowSecondarySurface {
     this.destroyedListeners.add(listener);
     this.capturedDestroyedListeners.push(listener);
     return () => {
+      this.destroyedDisposeCalls += 1;
       this.trace.push("dispose-surface-destroyed-listener");
       this.destroyedListeners.delete(listener);
       if (this.disposerFailures.has("surface.onDestroyed")) {
@@ -329,6 +333,7 @@ class FakeSession implements ShowRunSession {
   public invokeCallbacksDuringRuntimeStop = false;
   public reserveNextLoopOnStart = false;
   public failDiagnosticsAfterRuntimeStart = false;
+  public rejectDiagnostics = false;
   public rebindGenerationFailure = false;
   public runtimeCountGrowthLoop: number | undefined;
   public traceLoopConstruction = false;
@@ -591,7 +596,10 @@ class FakeSession implements ShowRunSession {
       this.trace.push("loop-stage:runtimeCounts");
       throw new Error("injected publication diagnostics failure");
     }
-    if (this.disposed && this.failPhase("session-diagnostics")) {
+    if (
+      this.rejectDiagnostics ||
+      (this.disposed && this.failPhase("session-diagnostics"))
+    ) {
       throw new Error("injected session diagnostics failure");
     }
     return {
@@ -726,6 +734,14 @@ interface HarnessOptions {
   networkOfflineSequence?: readonly boolean[];
   resourceIncompleteLoops?: readonly number[];
   runtimeCountGrowthLoop?: number;
+  validationFailure?: boolean;
+  surfaceRegistrationFailures?: readonly (
+    | Extract<
+        ListenerRegistrationFailure,
+        "surface.onEvent" | "surface.onDestroyed"
+      >
+    | undefined
+  )[];
 }
 
 function createHarness(options: HarnessOptions = {}) {
@@ -774,6 +790,9 @@ function createHarness(options: HarnessOptions = {}) {
     validate: async () => {
       trace.push("validate");
       await block("validate");
+      if (options.validationFailure === true) {
+        throw new Error("injected validation failure");
+      }
     },
     openSecondary: async (generationId, signal) => {
       trace.push(`open-secondary:${generationId}`);
@@ -837,6 +856,8 @@ function createHarness(options: HarnessOptions = {}) {
         throw new Error("injected secondary recovery failure");
       }
       const surface = new FakeSurface(trace);
+      surface.registrationFailure =
+        options.surfaceRegistrationFailures?.[surfaces.length];
       surface.rejectClose = options.shutdownFailures?.has("surface-close") ?? false;
       surfaces.push(surface);
       try {
@@ -1177,9 +1198,9 @@ function bindSurfaceForTest(
   surface: ShowSecondarySurface,
 ): void {
   const fixture = coordinator as unknown as {
-    bindSurface(value: ShowSecondarySurface, generationId: number): void;
+    adoptSurface(value: ShowSecondarySurface, generationId: number): void;
   };
-  fixture.bindSurface(surface, 1);
+  fixture.adoptSurface(surface, 1);
 }
 
 function bindSessionForTest(
@@ -1228,10 +1249,23 @@ function priorSessionSettlement(coordinator: ShowRunCoordinator): unknown {
 function activeCoordinatorResources(coordinator: ShowRunCoordinator): {
   surface: ShowSecondarySurface | undefined;
   session: ShowRunSession | undefined;
+  pendingSession: ShowRunSession | undefined;
+  surfaceDisposerCount: number;
+  operatorArmed: boolean;
 } {
-  return coordinator as unknown as {
+  const resources = coordinator as unknown as {
     surface: ShowSecondarySurface | undefined;
     session: ShowRunSession | undefined;
+    pendingSession: ShowRunSession | undefined;
+    surfaceDisposers: Set<() => void>;
+    operatorArmed: boolean;
+  };
+  return {
+    surface: resources.surface,
+    session: resources.session,
+    pendingSession: resources.pendingSession,
+    surfaceDisposerCount: resources.surfaceDisposers.size,
+    operatorArmed: resources.operatorArmed,
   };
 }
 
@@ -1453,6 +1487,131 @@ describe("show run coordinator", () => {
     expect(surface.diagnostics().listeners).toBe(0);
     expect(harness.coordinator.diagnostics().counts.listeners).toBe(0);
   });
+
+  it.each(
+    (
+      [
+        "boot",
+        "retained-session-secondary-recovery",
+        "hold-after-secondary-loss",
+        "full-session-replacement",
+        "operator-restart-without-retained-surface",
+      ] as const
+    ).flatMap((route) =>
+      (["surface.onEvent", "surface.onDestroyed"] as const).map(
+        (registrationFailure) => ({ route, registrationFailure }),
+      ),
+    ),
+  )(
+    "closes an unpublished candidate when $registrationFailure registration fails during $route",
+    async ({ route, registrationFailure }) => {
+      const harness = createHarness({
+        mode: "Show",
+        ...(route === "operator-restart-without-retained-surface"
+          ? { validationFailure: true }
+          : {}),
+        ...(route === "hold-after-secondary-loss"
+          ? { sessionConnections: [0] }
+          : {}),
+        surfaceRegistrationFailures:
+          route === "boot" || route === "operator-restart-without-retained-surface"
+            ? [registrationFailure]
+            : [undefined, registrationFailure],
+      });
+
+      switch (route) {
+        case "boot":
+          await expect(harness.coordinator.boot()).resolves.toEqual({
+            ready: false,
+            reason: "startup-failed",
+          });
+          break;
+        case "retained-session-secondary-recovery":
+          await startRunning(harness);
+          harness.surfaces[0]!.destroy();
+          await settle();
+          await harness.timers.fireTimeout(1_000);
+          await settle();
+          break;
+        case "hold-after-secondary-loss":
+          await startRunning(harness);
+          harness.surfaces[0]!.destroy();
+          await settle();
+          break;
+        case "full-session-replacement":
+          await startRunning(harness);
+          harness.sessions[0]!.editorCommandPending = true;
+          harness.surfaces[0]!.destroy();
+          await settle();
+          await harness.timers.fireTimeout(1_000);
+          await settle();
+          break;
+        case "operator-restart-without-retained-surface":
+          await expect(harness.coordinator.boot()).resolves.toEqual({
+            ready: false,
+            reason: "startup-failed",
+          });
+          expect(
+            harness.coordinator.handleRendererEvent({
+              schema: 1,
+              type: "operator-action",
+              action: "restart-loop",
+            }),
+          ).toBe(true);
+          await settle();
+          break;
+      }
+
+      const candidate = harness.surfaces.at(-1)!;
+      const resources = activeCoordinatorResources(harness.coordinator);
+      const candidateCloseCalls = candidate.closeCalls;
+      const candidateListenerCount = candidate.diagnostics().listeners;
+      const eventDisposeCalls = candidate.eventDisposeCalls;
+      const destroyedDisposeCalls = candidate.destroyedDisposeCalls;
+
+      await harness.coordinator.requestEmergencyStop("sigint");
+
+      expect(candidateCloseCalls).toBe(1);
+      expect(candidateListenerCount).toBe(0);
+      expect(eventDisposeCalls).toBe(
+        registrationFailure === "surface.onDestroyed" ? 1 : 0,
+      );
+      expect(destroyedDisposeCalls).toBe(0);
+      expect(resources.surface).toBeUndefined();
+      expect(resources.surfaceDisposerCount).toBe(0);
+      expect(resources.operatorArmed).toBe(false);
+    },
+  );
+
+  it.each(["surface.onEvent", "surface.onDestroyed"] as const)(
+    "fails closed when retained-surface rebind hits %s registration failure",
+    async (registrationFailure) => {
+      const harness = createHarness({ mode: "Show" });
+      await startRunning(harness);
+      const retainedSurface = harness.surfaces[0]!;
+      retainedSurface.registrationFailure = registrationFailure;
+
+      let thrown: unknown;
+      try {
+        harness.sessions[0]!.emitFault("janvim-exited");
+      } catch (error) {
+        thrown = error;
+      }
+      await settle();
+      const resources = activeCoordinatorResources(harness.coordinator);
+      const closeCalls = retainedSurface.closeCalls;
+      const listenerCount = retainedSurface.diagnostics().listeners;
+
+      await harness.coordinator.requestEmergencyStop("sigint");
+
+      expect(thrown).toBeUndefined();
+      expect(closeCalls).toBe(1);
+      expect(listenerCount).toBe(0);
+      expect(resources.surface).toBeUndefined();
+      expect(resources.surfaceDisposerCount).toBe(0);
+      expect(resources.operatorArmed).toBe(false);
+    },
+  );
 
   it("rolls back a session listener when the second registration throws", () => {
     const harness = createHarness();
@@ -3480,6 +3639,9 @@ describe("show run coordinator", () => {
       ) {
         harness.sessions[0]!.naturalExit = "still-running";
       }
+      if (phase === "session-diagnostics") {
+        harness.sessions[0]!.rejectDiagnostics = true;
+      }
 
       await expect(
         Promise.resolve().then(() =>
@@ -3629,6 +3791,91 @@ describe("show run coordinator", () => {
       await harness.coordinator.completion;
     }
   });
+
+  it.each(["reject", "timeout"] as const)(
+    "retains the owning session and reports incomplete settlement when bridge close %s",
+    async (failureMode) => {
+      const bridgeGate = failureMode === "timeout" ? deferred() : undefined;
+      const harness = createHarness({
+        mode: "Show",
+        ...(failureMode === "reject"
+          ? { shutdownFailures: new Set<InjectedShutdownFailure>(["close-bridge"]) }
+          : { phaseDeferrals: new Map([["close-bridge", bridgeGate!]]) }),
+      });
+      await startRunning(harness);
+      const owningSession = harness.sessions[0]!;
+
+      owningSession.emitFault("janvim-exited");
+      await settle();
+      if (failureMode === "timeout") {
+        expect(harness.timers.active(PHASE_TIMEOUT_MS)).toBe(1);
+        await harness.timers.fireTimeout(PHASE_TIMEOUT_MS);
+        await settle();
+      }
+
+      const held = harness.coordinator.diagnostics();
+      const heldResources = activeCoordinatorResources(harness.coordinator);
+      const retainedOwner =
+        heldResources.session === owningSession ||
+        heldResources.pendingSession === owningSession;
+      const restartAccepted = harness.coordinator.handleRendererEvent({
+        schema: 1,
+        type: "operator-action",
+        action: "restart-loop",
+      });
+      const stopAccepted = harness.coordinator.handleRendererEvent(stopEvent());
+      await settle();
+      if (failureMode === "timeout") {
+        expect(harness.timers.active(PHASE_TIMEOUT_MS)).toBe(1);
+        await harness.timers.fireTimeout(PHASE_TIMEOUT_MS);
+      }
+      const completion = await harness.coordinator.completion;
+      const stopped = harness.coordinator.diagnostics();
+      const evidenceDiagnostics = harness.evidence[0]!.diagnostics;
+      const closeAttempts = harness.trace.filter(
+        (entry) => entry === "close-bridge:5000",
+      ).length;
+      const disposeAttempts = harness.trace.filter(
+        (entry) => entry === "session-dispose",
+      ).length;
+
+      bridgeGate?.resolve();
+      await settle();
+
+      expect(held).toMatchObject({
+        state: "safe-ready",
+        reason: "recovery-old-session-unsettled",
+      });
+      expect(priorSessionSettlement(harness.coordinator)).toMatchObject({
+        childSettled: true,
+        leaseRemoved: true,
+        bridgeClosed: false,
+      });
+      expect(retainedOwner).toBe(true);
+      expect(harness.sessions).toEqual([owningSession]);
+      expect(harness.timers.active(1_000)).toBe(0);
+      expect(restartAccepted).toBe(false);
+      expect(stopAccepted).toBe(true);
+      expect(closeAttempts).toBe(2);
+      expect(disposeAttempts).toBe(0);
+      expect(completion).toEqual({ ok: false, reason: "shutdown-incomplete" });
+      expect(stopped).toMatchObject({
+        state: "stopped",
+        counts: { timers: 0 },
+        shutdown: {
+          failures: expect.arrayContaining(["bridge-close-failed"]),
+          childSettled: true,
+          leaseRemoved: true,
+          bridgeClosed: false,
+        },
+      });
+      expect(evidenceDiagnostics.shutdown).toMatchObject({
+        failures: expect.arrayContaining(["bridge-close-failed"]),
+        bridgeClosed: false,
+      });
+      expect(harness.coordinator.diagnostics()).toEqual(stopped);
+    },
+  );
 
   it("hands recovery cleanup ownership to a concurrent emergency ladder", async () => {
     const harness = createHarness({ mode: "Show", blockedPhase: "agent-shutdown" });
@@ -3991,6 +4238,10 @@ describe("show run coordinator", () => {
     });
 
     harness.coordinator.handleRendererEvent(stopEvent());
+    await settle();
+    if (harness.timers.active(PHASE_TIMEOUT_MS) === 1) {
+      await harness.timers.fireTimeout(PHASE_TIMEOUT_MS);
+    }
     await expect(harness.coordinator.completion).resolves.toEqual(
       expect.objectContaining({ reason: expect.any(String) }),
     );

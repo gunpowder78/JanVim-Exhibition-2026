@@ -847,7 +847,9 @@ function buildShowEvidence(
       : diagnostics.shutdown.forcedTermination
         ? ("forced" as const)
         : ("natural" as const),
-    bridgeClose: shutdownFailures.has("bridge-close-failed")
+    bridgeClose:
+      !diagnostics.shutdown.bridgeClosed ||
+      shutdownFailures.has("bridge-close-failed")
       ? ("failed" as const)
       : ("closed" as const),
     leaseRemoved: diagnostics.shutdown.leaseRemoved,

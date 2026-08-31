@@ -227,6 +227,7 @@ export type CoordinatorDiagnostics = {
     failures: readonly string[];
     childSettled: boolean;
     leaseRemoved: boolean;
+    bridgeClosed: boolean;
     forcedTermination: boolean;
   };
 };
@@ -270,6 +271,7 @@ type ActiveLoop = {
 type SessionCleanupResult = {
   childSettled: boolean;
   leaseRemoved: boolean;
+  bridgeClosed: boolean;
 };
 
 type HeldCleanupSequence = {
@@ -357,6 +359,7 @@ export class ShowRunCoordinator {
     failures: [] as string[],
     childSettled: false,
     leaseRemoved: false,
+    bridgeClosed: false,
     forcedTermination: false,
   };
 
@@ -402,8 +405,11 @@ export class ShowRunCoordinator {
         surface.close();
         return { ready: false, reason: "controller-stopping" };
       }
-      this.surface = surface;
-      this.bindSurface(surface, capturedGeneration);
+      try {
+        this.adoptSurface(surface, capturedGeneration);
+      } catch {
+        return await this.holdStartupFailure("startup-failed", undefined, false);
+      }
 
       const session = this.dependencies.createSession(capturedGeneration);
       this.session = session;
@@ -636,11 +642,16 @@ export class ShowRunCoordinator {
   private async holdStartupFailure(
     reason: string,
     session: ShowRunSession | undefined,
+    allowOperatorAction = true,
   ): Promise<{ ready: false; reason: string }> {
     const generationId = this.generationId;
     this.operatorArmed = false;
     this.log({ type: "startup-cleanup", reason });
-    let cleanup: SessionCleanupResult = { childSettled: true, leaseRemoved: true };
+    let cleanup: SessionCleanupResult = {
+      childSettled: true,
+      leaseRemoved: true,
+      bridgeClosed: true,
+    };
     if (session !== undefined) {
       if (this.session === session) this.session = undefined;
       this.pendingSession = session;
@@ -650,7 +661,8 @@ export class ShowRunCoordinator {
     }
     if (this.canContinueRecovery(generationId, "booting")) {
       this.transition("safe-ready", reason);
-      this.operatorArmed = cleanup.childSettled && cleanup.leaseRemoved;
+      this.operatorArmed =
+        allowOperatorAction && isCleanupFullySettled(cleanup);
       if (this.operatorArmed) this.sendStatus();
     }
     return { ready: false, reason };
@@ -663,12 +675,12 @@ export class ShowRunCoordinator {
   ): Promise<void> {
     const cleanup =
       session === undefined
-        ? { childSettled: true, leaseRemoved: true }
+        ? { childSettled: true, leaseRemoved: true, bridgeClosed: true }
         : await this.cleanupHeldSession(session);
     if (!this.canContinueRecovery(generationId, "booting")) return;
     this.priorSessionSettlement = cleanup;
     this.transition("safe-ready", reason);
-    this.operatorArmed = cleanup.childSettled && cleanup.leaseRemoved;
+    this.operatorArmed = isCleanupFullySettled(cleanup);
     this.recoveryInFlight = false;
     if (this.operatorArmed) this.sendStatus();
   }
@@ -711,22 +723,29 @@ export class ShowRunCoordinator {
           return cancelledCleanup();
         }
       }
-      await this.runCleanupPhase(sequence, "held-bridge-close", () =>
-        session.closeBridge(5_000),
-      );
+      const bridgeClosed =
+        (await this.runCleanupPhase(sequence, "held-bridge-close", async () => {
+          await session.closeBridge(5_000);
+          return true;
+        })) === true;
       if (!this.isHeldCleanupSequenceCurrent(sequence)) return cancelledCleanup();
       this.disposeSessionListeners();
-      if (!this.isHeldCleanupSequenceCurrent(sequence)) return cancelledCleanup();
-      bestEffortSync(() => session.dispose());
       if (!this.isHeldCleanupSequenceCurrent(sequence)) return cancelledCleanup();
       const leaseRemoved = bestEffortSyncResult(
         () => session.diagnostics().leaseRemoved,
         false,
       );
       if (!this.isHeldCleanupSequenceCurrent(sequence)) return cancelledCleanup();
-      if (this.session === session) this.session = undefined;
-      if (this.pendingSession === session) this.pendingSession = undefined;
-      return { childSettled, leaseRemoved };
+      const cleanup = { childSettled, leaseRemoved, bridgeClosed };
+      if (isCleanupFullySettled(cleanup)) {
+        bestEffortSync(() => session.dispose());
+        if (!this.isHeldCleanupSequenceCurrent(sequence)) {
+          return cancelledCleanup();
+        }
+        if (this.session === session) this.session = undefined;
+        if (this.pendingSession === session) this.pendingSession = undefined;
+      }
+      return cleanup;
     } finally {
       if (this.heldCleanupSequence === sequence) {
         this.heldCleanupSequence = undefined;
@@ -768,10 +787,11 @@ export class ShowRunCoordinator {
     this.heldCleanupSequence = undefined;
   }
 
-  private bindSurface(
+  private adoptSurface(
     surface: ShowSecondarySurface,
     generationId: number,
   ): void {
+    this.surface = undefined;
     this.disposeSurfaceListeners();
     const stagedDisposers: Array<() => void> = [];
     try {
@@ -795,9 +815,11 @@ export class ShowRunCoordinator {
       );
     } catch (error) {
       runRollbackInReverse(stagedDisposers);
+      bestEffortSync(() => surface.close());
       throw error;
     }
     for (const dispose of stagedDisposers) this.surfaceDisposers.add(dispose);
+    this.surface = surface;
   }
 
   private bindSession(session: ShowRunSession, generationId: number): void {
@@ -1592,7 +1614,10 @@ export class ShowRunCoordinator {
       return;
     }
 
-    this.rebindRetainedSurface(this.surface, invalidation.generationId);
+    const replaceSecondary = !this.rebindRetainedSurface(
+      this.surface,
+      invalidation.generationId,
+    );
     this.sendStatus();
     if (oldSession === undefined) {
       this.enterSafeReady("recovery-session-missing", false);
@@ -1606,7 +1631,7 @@ export class ShowRunCoordinator {
       await this.recoverFullSession(
         oldSession,
         invalidation.generationId,
-        false,
+        replaceSecondary,
         failedState !== "ready",
       );
     });
@@ -1744,6 +1769,7 @@ export class ShowRunCoordinator {
 
     let recoveryRecorded = false;
     let retainedSessionTouched = false;
+    let surfaceAdoptionFailed = false;
     try {
       const surface = await this.waitForRecoveryPhase(
         "open-secondary",
@@ -1754,8 +1780,12 @@ export class ShowRunCoordinator {
         bestEffortSync(() => surface.close());
         return;
       }
-      this.surface = surface;
-      this.bindSurface(surface, generationId);
+      try {
+        this.adoptSurface(surface, generationId);
+      } catch (error) {
+        surfaceAdoptionFailed = true;
+        throw error;
+      }
       retainedSessionTouched = true;
       await this.waitForRecoveryPhase("rebind-generation", (signal) =>
         session.rebindGeneration(generationId, signal),
@@ -1836,10 +1866,13 @@ export class ShowRunCoordinator {
           this.priorSessionSettlement = cleanup;
           this.enterSafeReady(
             "secondary-recovery-failed",
-            cleanup.childSettled && cleanup.leaseRemoved,
+            isCleanupFullySettled(cleanup),
           );
         } else {
-          this.enterSafeReady("secondary-recovery-failed");
+          this.enterSafeReady(
+            "secondary-recovery-failed",
+            !surfaceAdoptionFailed,
+          );
         }
       }
     }
@@ -1853,6 +1886,7 @@ export class ShowRunCoordinator {
     await Promise.resolve();
     if (!this.canContinueRecovery(generationId, state)) return;
     if (this.surface === oldSurface) this.surface = undefined;
+    let surfaceAdoptionFailed = false;
     try {
       const surface = await this.waitForRecoveryPhase(
         "open-secondary",
@@ -1863,8 +1897,11 @@ export class ShowRunCoordinator {
         bestEffortSync(() => surface.close());
         return;
       }
-      this.surface = surface;
-      this.bindSurface(surface, generationId);
+      try {
+        this.adoptSurface(surface, generationId);
+      } catch {
+        surfaceAdoptionFailed = true;
+      }
     } catch {
       // A missing control surface still remains a fail-closed safe-ready hold.
     }
@@ -1872,8 +1909,8 @@ export class ShowRunCoordinator {
       const settlement = this.priorSessionSettlement;
       this.enterSafeReady(
         "secondary-session-unhealthy",
-        settlement === undefined ||
-          (settlement.childSettled && settlement.leaseRemoved),
+        !surfaceAdoptionFailed &&
+          (settlement === undefined || isCleanupFullySettled(settlement)),
       );
     }
   }
@@ -1892,7 +1929,7 @@ export class ShowRunCoordinator {
     const cleanup = await this.cleanupHeldSession(oldSession);
     this.priorSessionSettlement = cleanup;
     if (!this.canContinueRecovery(generationId, "black-recovering")) return;
-    if (!cleanup.childSettled || !cleanup.leaseRemoved) {
+    if (!isCleanupFullySettled(cleanup)) {
       if (decision.allowed) {
         this.recordRecovery({
           generationId,
@@ -1916,6 +1953,7 @@ export class ShowRunCoordinator {
 
     let session: ShowRunSession | undefined;
     let replacementCleanup: SessionCleanupResult | undefined = cleanup;
+    let surfaceAdoptionFailed = false;
     try {
       if (replaceSecondary) {
         const surface = await this.waitForRecoveryPhase(
@@ -1927,8 +1965,12 @@ export class ShowRunCoordinator {
           bestEffortSync(() => surface.close());
           return;
         }
-        this.surface = surface;
-        this.bindSurface(surface, generationId);
+        try {
+          this.adoptSurface(surface, generationId);
+        } catch (error) {
+          surfaceAdoptionFailed = true;
+          throw error;
+        }
       }
       session = this.dependencies.createSession(generationId);
       replacementCleanup = undefined;
@@ -2019,8 +2061,9 @@ export class ShowRunCoordinator {
         });
         this.enterSafeReady(
           "session-recovery-failed",
-          replacementCleanup?.childSettled === true &&
-            replacementCleanup.leaseRemoved,
+          replacementCleanup !== undefined &&
+            isCleanupFullySettled(replacementCleanup) &&
+            !surfaceAdoptionFailed,
         );
       }
     }
@@ -2047,7 +2090,7 @@ export class ShowRunCoordinator {
       const cleanup = await this.cleanupHeldSession(oldSession);
       if (!this.canContinueRecovery(generationId, "safe-ready")) return;
       this.priorSessionSettlement = cleanup;
-      if (!cleanup.childSettled || !cleanup.leaseRemoved) {
+      if (!isCleanupFullySettled(cleanup)) {
         if (this.canContinueRecovery(generationId, "safe-ready")) {
           this.stateReason = "recovery-old-session-unsettled";
           this.operatorArmed = false;
@@ -2059,6 +2102,7 @@ export class ShowRunCoordinator {
     if (!this.canContinueRecovery(generationId, "safe-ready")) return;
 
     let session: ShowRunSession | undefined;
+    let surfaceAdoptionFailed = false;
     try {
       if (this.surface === undefined) {
         const surface = await this.waitForRecoveryPhase(
@@ -2070,8 +2114,12 @@ export class ShowRunCoordinator {
           bestEffortSync(() => surface.close());
           return;
         }
-        this.surface = surface;
-        this.bindSurface(surface, generationId);
+        try {
+          this.adoptSurface(surface, generationId);
+        } catch (error) {
+          surfaceAdoptionFailed = true;
+          throw error;
+        }
       }
       session = this.dependencies.createSession(generationId);
       this.pendingSession = session;
@@ -2128,8 +2176,9 @@ export class ShowRunCoordinator {
       if (this.canContinueRecovery(generationId, "safe-ready")) {
         this.stateReason = "operator-restart-failed";
         this.operatorArmed =
-          this.priorSessionSettlement?.childSettled === true &&
-          this.priorSessionSettlement.leaseRemoved;
+          this.priorSessionSettlement !== undefined &&
+          isCleanupFullySettled(this.priorSessionSettlement) &&
+          !surfaceAdoptionFailed;
         this.recoveryInFlight = false;
         if (this.operatorArmed) this.sendStatus();
       }
@@ -2139,8 +2188,14 @@ export class ShowRunCoordinator {
   private rebindRetainedSurface(
     surface: ShowSecondarySurface | undefined,
     generationId: number,
-  ): void {
-    if (surface !== undefined) this.bindSurface(surface, generationId);
+  ): boolean {
+    if (surface === undefined) return false;
+    try {
+      this.adoptSurface(surface, generationId);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   private canContinueRecovery(
@@ -2316,14 +2371,15 @@ export class ShowRunCoordinator {
             this.recordShutdownFailure("janvim-unsettled");
           }
         }
-        await this.runShutdownPhase(
-          "bridge-close-failed",
-          CLEANUP_PHASE_TIMEOUT_MS,
-          () => session.closeBridge(5_000),
-        );
-        this.runShutdownPhaseSync("session-dispose-failed", () =>
-          session.dispose(),
-        );
+        this.shutdownDiagnostics.bridgeClosed =
+          (await this.runShutdownPhase(
+            "bridge-close-failed",
+            CLEANUP_PHASE_TIMEOUT_MS,
+            async () => {
+              await session.closeBridge(5_000);
+              return true;
+            },
+          )) === true;
         const sessionDiagnostics = this.runShutdownPhaseSyncResult(
           "session-diagnostics-failed",
           () => session.diagnostics(),
@@ -2333,19 +2389,33 @@ export class ShowRunCoordinator {
         if (!this.shutdownDiagnostics.leaseRemoved) {
           this.recordShutdownFailure("lease-not-removed");
         }
+        const shutdownSettlement: SessionCleanupResult = {
+          childSettled: this.shutdownDiagnostics.childSettled,
+          leaseRemoved: this.shutdownDiagnostics.leaseRemoved,
+          bridgeClosed: this.shutdownDiagnostics.bridgeClosed,
+        };
+        if (isCleanupFullySettled(shutdownSettlement)) {
+          this.runShutdownPhaseSync("session-dispose-failed", () =>
+            session.dispose(),
+          );
+          if (this.session === session) this.session = undefined;
+          if (this.pendingSession === session) this.pendingSession = undefined;
+        }
       } else {
         const prior = this.priorSessionSettlement;
         this.shutdownDiagnostics.childSettled = prior?.childSettled ?? true;
         this.shutdownDiagnostics.leaseRemoved = prior?.leaseRemoved ?? true;
+        this.shutdownDiagnostics.bridgeClosed = prior?.bridgeClosed ?? true;
         if (
           !this.shutdownDiagnostics.childSettled ||
           !this.shutdownDiagnostics.leaseRemoved
         ) {
           this.recordShutdownFailure("janvim-unsettled");
         }
+        if (!this.shutdownDiagnostics.bridgeClosed) {
+          this.recordShutdownFailure("bridge-close-failed");
+        }
       }
-      this.session = undefined;
-      this.pendingSession = undefined;
       if (activeSampler !== undefined) {
         await this.runShutdownPhase(
           "resource-finish-failed",
@@ -2537,7 +2607,10 @@ export class ShowRunCoordinator {
     driver: MultiLoopDriver | undefined = this.driver,
     sampler: ResourceSampler | undefined = this.activeLoop?.sampler,
   ): RuntimeCountEvidence {
-    const session = this.session?.diagnostics();
+    const session =
+      this.state === "shutting-down" || this.state === "stopped"
+        ? bestEffortSyncResult(() => this.session?.diagnostics(), undefined)
+        : this.session?.diagnostics();
     const driverTimers = driver?.diagnostics().timers ?? 0;
     const samplerTimers = sampler?.diagnostics().timerCount ?? 0;
     return {
@@ -2631,7 +2704,11 @@ function cueReachesPrimary(cue: Cue): boolean {
 }
 
 function cancelledCleanup(): SessionCleanupResult {
-  return { childSettled: false, leaseRemoved: false };
+  return { childSettled: false, leaseRemoved: false, bridgeClosed: false };
+}
+
+function isCleanupFullySettled(cleanup: SessionCleanupResult): boolean {
+  return cleanup.childSettled && cleanup.leaseRemoved && cleanup.bridgeClosed;
 }
 
 function createGuardedAbortController(): {
