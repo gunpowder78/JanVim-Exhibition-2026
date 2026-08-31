@@ -474,10 +474,12 @@ run("shutdown rechecks a briefly live parent and exits once after ESRCH", functi
   recheck()
   equal(probe_count, 2)
   equal(exit_count, 1)
+  equal(#fixture.deferred, 1)
 
   recheck()
   equal(probe_count, 2)
   equal(exit_count, 1)
+  equal(#fixture.deferred, 1)
   fixture.connection:close()
 end)
 
@@ -498,8 +500,11 @@ run("shutdown bounds a live parent to twenty deferred rechecks", function()
     "cue-live-parent-bounded-shutdown",
     { type = "shutdown" }
   )) .. "\n")
-  assert(fixture.writes[2].callback)(nil)
+  local complete_write = assert(fixture.writes[2].callback)
+  complete_write(nil)
+  complete_write(nil)
   equal(probe_count, 1)
+  equal(#fixture.deferred, 1)
 
   for recheck_index = 1, 20 do
     equal(#fixture.deferred, recheck_index)
@@ -514,6 +519,66 @@ run("shutdown bounds a live parent to twenty deferred rechecks", function()
   equal(probe_count, 21)
   equal(exit_count, 0)
   fixture.connection:close()
+end)
+
+run("shutdown keeps synchronous duplicate defers within the parent probe bound", function()
+  local probe_count = 0
+  local defer_count = 0
+  local exit_count = 0
+  local fixture = new_connection_fixture({
+    parent_alive = function()
+      probe_count = probe_count + 1
+      return true
+    end,
+    defer = function(callback, delay_ms)
+      equal(delay_ms, 100)
+      defer_count = defer_count + 1
+      callback()
+      callback()
+    end,
+    exit_backend = function()
+      exit_count = exit_count + 1
+    end,
+  })
+
+  fixture.fake_tcp.reader(nil, vim.json.encode(command(
+    "cue-synchronous-defer-shutdown",
+    { type = "shutdown" }
+  )) .. "\n")
+  assert(fixture.writes[2].callback)(nil)
+
+  equal(probe_count, 21)
+  equal(defer_count, 20)
+  equal(exit_count, 0)
+  fixture.connection:close()
+end)
+
+run("shutdown cancels a pending parent recheck after connection disposal", function()
+  local probe_count = 0
+  local exit_count = 0
+  local fixture = new_connection_fixture({
+    parent_alive = function()
+      probe_count = probe_count + 1
+      return true
+    end,
+    exit_backend = function()
+      exit_count = exit_count + 1
+    end,
+  })
+
+  fixture.fake_tcp.reader(nil, vim.json.encode(command(
+    "cue-disposed-parent-recheck-shutdown",
+    { type = "shutdown" }
+  )) .. "\n")
+  assert(fixture.writes[2].callback)(nil)
+  equal(probe_count, 1)
+  equal(#fixture.deferred, 1)
+
+  fixture.connection:close()
+  fixture.deferred[1].callback()
+  equal(probe_count, 1)
+  equal(#fixture.deferred, 1)
+  equal(exit_count, 0)
 end)
 
 run("shutdown rechecks uncertain parent probes until ESRCH", function()
@@ -572,6 +637,7 @@ run("shutdown exits only when the default parent probe proves ESRCH", function()
         return 0
       end,
       expected_exit_count = 0,
+      expected_deferred_count = 1,
     },
     {
       name = "absent parent",
@@ -579,6 +645,7 @@ run("shutdown exits only when the default parent probe proves ESRCH", function()
         return nil, "ESRCH: no such process", "ESRCH"
       end,
       expected_exit_count = 1,
+      expected_deferred_count = 0,
     },
     {
       name = "permission denied",
@@ -586,6 +653,7 @@ run("shutdown exits only when the default parent probe proves ESRCH", function()
         return nil, "EPERM: operation not permitted", "EPERM"
       end,
       expected_exit_count = 0,
+      expected_deferred_count = 1,
     },
     {
       name = "probe threw",
@@ -593,6 +661,7 @@ run("shutdown exits only when the default parent probe proves ESRCH", function()
         error("injected parent probe failure")
       end,
       expected_exit_count = 0,
+      expected_deferred_count = 1,
     },
   }
 
@@ -610,6 +679,7 @@ run("shutdown exits only when the default parent probe proves ESRCH", function()
     )) .. "\n")
     assert(fixture.writes[2].callback)(nil)
     equal(exit_count, case.expected_exit_count, case.name)
+    equal(#fixture.deferred, case.expected_deferred_count, case.name)
     equal(fixture.fake_tcp.close_count, 1, case.name)
     fixture.connection:close()
   end
