@@ -23,6 +23,9 @@ const maximumBundleBytes = 16 * 1024 * 1024;
 const maximumAstNodes = maximumBundleBytes + 2;
 const maximumRuntimeImports = 64;
 const maximumRuntimeImportCharacters = 128;
+const maximumConstantStringDepth = 8;
+const maximumConstantStringNodes = 32;
+const maximumConstantStringBytes = 128;
 const dangerousDynamicLoaderNames = new Set([
   "createRequire",
   "eval",
@@ -110,6 +113,48 @@ function addRuntimeImport(runtimeImports, specifier) {
   throw new Error(`Unsupported Electron-main runtime import: ${specifier}`);
 }
 
+function evaluateConstantString(node) {
+  let evaluatedNodes = 0;
+
+  function evaluate(candidate, depth) {
+    evaluatedNodes += 1;
+    if (
+      depth > maximumConstantStringDepth ||
+      evaluatedNodes > maximumConstantStringNodes
+    ) {
+      throw new Error(
+        "Electron-main constant string expression exceeds the finite bound",
+      );
+    }
+
+    let value;
+    if (typescript.isStringLiteralLike(candidate)) {
+      value = candidate.text;
+    } else if (typescript.isParenthesizedExpression(candidate)) {
+      value = evaluate(candidate.expression, depth + 1);
+    } else if (
+      typescript.isBinaryExpression(candidate) &&
+      candidate.operatorToken.kind === typescript.SyntaxKind.PlusToken
+    ) {
+      const left = evaluate(candidate.left, depth + 1);
+      const right = evaluate(candidate.right, depth + 1);
+      if (left === undefined || right === undefined) return undefined;
+      value = left + right;
+    } else {
+      return undefined;
+    }
+
+    if (Buffer.byteLength(value, "utf8") > maximumConstantStringBytes) {
+      throw new Error(
+        "Electron-main constant string exceeds the finite byte bound",
+      );
+    }
+    return value;
+  }
+
+  return evaluate(node, 0);
+}
+
 function dangerousDynamicLoaderName(node) {
   if (
     typescript.isIdentifier(node) &&
@@ -123,18 +168,53 @@ function dangerousDynamicLoaderName(node) {
   ) {
     return node.name.text;
   }
+  if (typescript.isElementAccessExpression(node)) {
+    const propertyName = evaluateConstantString(node.argumentExpression);
+    if (dangerousDynamicLoaderNames.has(propertyName)) return propertyName;
+  }
+  return undefined;
+}
+
+function isReflectGetCall(node) {
+  return (
+    typescript.isCallExpression(node) &&
+    node.arguments.length >= 2 &&
+    typescript.isPropertyAccessExpression(node.expression) &&
+    typescript.isIdentifier(node.expression.expression) &&
+    node.expression.expression.text === "Reflect" &&
+    node.expression.name.text === "get"
+  );
+}
+
+function isProcessOrModuleLoaderTarget(node) {
+  if (typescript.isParenthesizedExpression(node)) {
+    return isProcessOrModuleLoaderTarget(node.expression);
+  }
   if (
-    typescript.isElementAccessExpression(node) &&
-    typescript.isStringLiteralLike(node.argumentExpression) &&
-    dangerousDynamicLoaderNames.has(node.argumentExpression.text)
+    typescript.isIdentifier(node) &&
+    (node.text === "process" || node.text === "module")
   ) {
-    return node.argumentExpression.text;
+    return true;
+  }
+  return (
+    typescript.isCallExpression(node) &&
+    dangerousDynamicLoaderName(node.expression) !== undefined
+  );
+}
+
+function dangerousReflectGetLoaderName(node) {
+  if (!isReflectGetCall(node)) return undefined;
+  const propertyName = evaluateConstantString(node.arguments[1]);
+  if (dangerousDynamicLoaderNames.has(propertyName)) return propertyName;
+  if (isProcessOrModuleLoaderTarget(node.arguments[0])) {
+    return "Reflect.get process/module loader target";
   }
   return undefined;
 }
 
 function assertNoDynamicLoaderBypass(node) {
-  const dangerousName = dangerousDynamicLoaderName(node);
+  const dangerousName =
+    dangerousDynamicLoaderName(node) ?? dangerousReflectGetLoaderName(node);
   if (dangerousName !== undefined) {
     throw new Error(
       `Unsupported Electron-main dynamic loader reference: ${dangerousName}`,
