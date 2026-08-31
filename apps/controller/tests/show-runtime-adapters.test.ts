@@ -587,6 +587,7 @@ function createStartupHarness(options: {
     action: "close-listener" | "ipc" | "web-guard";
     value: unknown;
   }[];
+  deferResetPresentationAck?: boolean;
   rejectFirstEditorCueId?: string;
   writeShowEvidence?: (
     path: string,
@@ -755,6 +756,7 @@ function createStartupHarness(options: {
   let timeoutFiveSecondOperations = false;
   const rejectedEditorCueIds = new Set<string>();
   const pendingRendererIdentityPids = new Set<number>();
+  const pendingResetPresentationAcks: Array<() => void> = [];
 
   class FakeWebContents extends EventEmitter {
     public constructor(private rendererPid: number) {
@@ -801,16 +803,31 @@ function createStartupHarness(options: {
         typeof payload.cue.id === "string"
       ) {
         const listener = [...ipcListeners.values()][0];
-        listener?.(
-          { sender: this, senderFrame: { url: loadedUrl! } },
-          {
-            schema: 1,
-            type: "presentation-ack",
-            generationId: payload.generationId,
-            loopId: payload.loopId,
-            cueId: payload.cue.id,
-          },
-        );
+        const acknowledge = (): void => {
+          listener?.(
+            { sender: this, senderFrame: { url: loadedUrl! } },
+            {
+              schema: 1,
+              type: "presentation-ack",
+              generationId: payload.generationId,
+              loopId: payload.loopId,
+              cueId: payload.cue.id,
+            },
+          );
+        };
+        const cue = payload.cue as {
+          kind?: unknown;
+          payload?: { action?: { type?: unknown } };
+        };
+        if (
+          options.deferResetPresentationAck === true &&
+          cue.kind === "editor-action" &&
+          cue.payload?.action?.type === "reset"
+        ) {
+          pendingResetPresentationAcks.push(acknowledge);
+        } else {
+          acknowledge();
+        }
       }
     });
     public readonly setWindowOpenHandler = vi.fn(
@@ -1353,6 +1370,13 @@ function createStartupHarness(options: {
     },
     get webContents() {
       return lastWindow?.webContents;
+    },
+    acknowledgePendingResetPresentation: () => {
+      const acknowledge = pendingResetPresentationAcks.shift();
+      if (acknowledge === undefined) {
+        throw new Error("no reset presentation acknowledgement is pending");
+      }
+      acknowledge();
     },
     dispatchRequest: (url: string) => {
       let result: { cancel: boolean } | undefined;
@@ -2468,6 +2492,77 @@ describe("real Task 9 show runtime adapters", () => {
       });
     },
   );
+
+  it("waits for an asynchronous reset presentation ACK before committing each Soak3 boundary", async () => {
+    const harness = createStartupHarness({ deferResetPresentationAck: true });
+    const coordinator = harness.adapters.createCoordinator(showCommand("Soak3"));
+    await expect(coordinator.boot()).resolves.toEqual({ ready: true });
+    const listener = [...harness.ipcListeners.values()][0];
+    listener!(
+      {
+        sender: harness.webContents,
+        senderFrame: { url: harness.loadedUrl! },
+      },
+      { schema: 1, type: "operator-action", action: "start" },
+    );
+    await settlePromises();
+
+    const cueDeltasMs = [5_001, 7_001, 33_001, 10_001, 23_001, 12_001];
+    for (let loopNumber = 1; loopNumber <= 3; loopNumber += 1) {
+      for (const deltaMs of cueDeltasMs) {
+        harness.timers.advanceBy(deltaMs);
+        await harness.timers.fireInterval(16);
+        await settlePromises();
+      }
+
+      expect(coordinator.diagnostics()).toMatchObject({
+        state: "running",
+        completedLoops: loopNumber - 1,
+        pendingBoundaryWork: 1,
+      });
+      harness.acknowledgePendingResetPresentation();
+      await settlePromises();
+      expect(coordinator.diagnostics().completedLoops).toBe(loopNumber);
+    }
+
+    await expect(coordinator.completion).resolves.toEqual({
+      ok: true,
+      reason: "soak-complete",
+    });
+  });
+
+  it("fails closed within two seconds when a reset presentation ACK never arrives", async () => {
+    const harness = createStartupHarness({ deferResetPresentationAck: true });
+    const coordinator = harness.adapters.createCoordinator(showCommand("Soak3"));
+    await expect(coordinator.boot()).resolves.toEqual({ ready: true });
+    const listener = [...harness.ipcListeners.values()][0];
+    listener!(
+      {
+        sender: harness.webContents,
+        senderFrame: { url: harness.loadedUrl! },
+      },
+      { schema: 1, type: "operator-action", action: "start" },
+    );
+    await settlePromises();
+
+    for (const deltaMs of [5_001, 7_001, 33_001, 10_001, 23_001, 12_001]) {
+      harness.timers.advanceBy(deltaMs);
+      await harness.timers.fireInterval(16);
+      await settlePromises();
+    }
+    expect(coordinator.diagnostics()).toMatchObject({
+      state: "running",
+      completedLoops: 0,
+      pendingBoundaryWork: 1,
+    });
+
+    await harness.timers.fireTimeout(2_000);
+    await settlePromises();
+    await expect(coordinator.completion).resolves.toEqual({
+      ok: false,
+      reason: "loop-boundary-presentation-timeout",
+    });
+  });
 
   it("writes strictly parseable Soak3 evidence with the three bounded P1 skips", async () => {
     const harness = createStartupHarness();

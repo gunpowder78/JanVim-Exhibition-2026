@@ -35,6 +35,7 @@ import { RestartBudget } from "./supervisor.js";
 
 const SHOW_LOOP_DURATION_MS = 90_000;
 const STARTUP_PHASE_TIMEOUT_MS = 35_000;
+const RESET_PRESENTATION_TIMEOUT_MS = 2_000;
 const BOUNDARY_PHASE_TIMEOUT_MS = 10_000;
 const CLEANUP_PHASE_TIMEOUT_MS = 10_000;
 const FINALIZATION_PHASE_TIMEOUT_MS = 10_000;
@@ -266,6 +267,14 @@ type ActiveLoop = {
   sampler: ResourceSampler;
   countsAtStart?: RuntimeCountEvidence;
   resetCueId?: string;
+  resetPresentationAcknowledged?: boolean;
+};
+
+type PendingResetPresentation = {
+  generationId: number;
+  loopId: string;
+  cueId: string;
+  resolve(): void;
 };
 
 type SessionCleanupResult = {
@@ -327,6 +336,8 @@ export class ShowRunCoordinator {
   private priorSessionSettlement: SessionCleanupResult | undefined;
   private boundaryOperation: Promise<void> | undefined;
   private pendingBoundaryTerminal: ShowRunResult | undefined;
+  private pendingResetPresentation: PendingResetPresentation | undefined;
+  private pendingDriverCompletionGenerationId: number | undefined;
   private heldCleanupSequence: HeldCleanupSequence | undefined;
   private readonly surfaceDisposers = new Set<() => void>();
   private readonly sessionDisposers = new Set<() => void>();
@@ -1254,6 +1265,18 @@ export class ShowRunCoordinator {
         event,
         this.dependencies.nowMs(),
       );
+      if (event.cueId === active.resetCueId) {
+        active.resetPresentationAcknowledged = true;
+        const pending = this.pendingResetPresentation;
+        if (
+          pending !== undefined &&
+          pending.generationId === event.generationId &&
+          pending.loopId === event.loopId &&
+          pending.cueId === event.cueId
+        ) {
+          pending.resolve();
+        }
+      }
       return true;
     } catch (error) {
       this.ignore(
@@ -1292,63 +1315,23 @@ export class ShowRunCoordinator {
       ) {
         throw new Error("loop boundary correlation is incomplete");
       }
-
       const countsAtEnd = this.runtimeCounts();
-      const telemetrySummary = active.telemetry.finishLoop({
-        loopId: active.loopId,
-        generationId,
-        resetCueId: active.resetCueId,
-        expectedPoemSha256: this.dependencies.originalPoemSha256,
-        endedAtMs: boundary.completedAtMs,
-        tickLatenessMs: boundary.tickLatenessMs,
-        advanceOverrunMs: boundary.advanceOverrunMs,
-      });
-      this.activeLoop = undefined;
-      this.updateAggregate(telemetrySummary);
-      this.completedLoops = this.aggregate.completedLoops;
-
-      const terminalBoundary =
-        this.stopQueued ||
-        (this.dependencies.mode === "Soak3" && boundary.loopNumber === 3);
-      if (terminalBoundary) {
-        this.pendingNextLoop = undefined;
-        this.currentLoopId = null;
-      } else {
-        const pending = this.pendingNextLoop;
-        if (
-          pending === undefined ||
-          pending.generationId !== generationId ||
-          pending.loopNumber !== boundary.loopNumber + 1
-        ) {
-          throw new Error("next loop ID was not reserved by the runtime");
-        }
-        this.pendingNextLoop = undefined;
-        const next = this.createActiveLoop(
-          pending.loopNumber,
-          generationId,
-          pending.loopId,
-        );
-        next.countsAtStart = this.runtimeCounts();
-      }
-
+      let failureReason = "loop-boundary-invalid";
       let operation!: Promise<void>;
       operation = this.runBoundedPhase(
-        "loop-boundary-finalize",
-        BOUNDARY_PHASE_TIMEOUT_MS,
-        async () => {
-          const [resourceResult, networkResult] = await Promise.allSettled([
-            active.sampler.finish(),
-            this.dependencies.sampleNetwork(),
-          ]);
-          if (resourceResult.status === "rejected") throw resourceResult.reason;
-          if (networkResult.status === "rejected") throw networkResult.reason;
-          return {
-            resourceSummary: resourceResult.value,
-            networkSnapshot: networkResult.value,
-          };
-        },
+        "loop-boundary-reset-presentation",
+        RESET_PRESENTATION_TIMEOUT_MS,
+        (signal) => this.waitForResetPresentation(active, generationId, signal),
       )
-        .then(({ resourceSummary, networkSnapshot }) => {
+        .catch((error: unknown) => {
+          failureReason =
+            error instanceof BoundedPhaseTimeoutError &&
+            error.phase === "loop-boundary-reset-presentation"
+              ? "loop-boundary-presentation-timeout"
+              : "loop-boundary-presentation-wait-failed";
+          throw error;
+        })
+        .then(() => {
           if (
             this.boundaryOperation !== operation ||
             !this.isCurrentGeneration(generationId) ||
@@ -1356,28 +1339,127 @@ export class ShowRunCoordinator {
           ) {
             return;
           }
-          this.retainNetworkSnapshot(networkSnapshot);
-          this.retainLoopSummary({
-            ...telemetrySummary,
+          const telemetrySummary = active.telemetry.finishLoop({
+            loopId: active.loopId,
             generationId,
-            resources: resourceSummary,
-            countsAtStart: active.countsAtStart!,
-            countsAtEnd,
+            resetCueId: active.resetCueId!,
+            expectedPoemSha256: this.dependencies.originalPoemSha256,
+            endedAtMs: Math.max(boundary.completedAtMs, this.dependencies.nowMs()),
+            tickLatenessMs: boundary.tickLatenessMs,
+            advanceOverrunMs: boundary.advanceOverrunMs,
+          });
+          this.activeLoop = undefined;
+          this.updateAggregate(telemetrySummary);
+          this.completedLoops = this.aggregate.completedLoops;
+
+          const terminalBoundary =
+            this.stopQueued ||
+            (this.dependencies.mode === "Soak3" && boundary.loopNumber === 3);
+          if (terminalBoundary) {
+            this.pendingNextLoop = undefined;
+            this.currentLoopId = null;
+          } else {
+            const pending = this.pendingNextLoop;
+            if (
+              pending === undefined ||
+              pending.generationId !== generationId ||
+              pending.loopNumber !== boundary.loopNumber + 1
+            ) {
+              throw new Error("next loop ID was not reserved by the runtime");
+            }
+            this.pendingNextLoop = undefined;
+            const next = this.createActiveLoop(
+              pending.loopNumber,
+              generationId,
+              pending.loopId,
+            );
+            next.countsAtStart = this.runtimeCounts();
+          }
+
+          failureReason = "loop-boundary-finalize-failed";
+          return this.runBoundedPhase(
+            "loop-boundary-finalize",
+            BOUNDARY_PHASE_TIMEOUT_MS,
+            async () => {
+              const [resourceResult, networkResult] = await Promise.allSettled([
+                active.sampler.finish(),
+                this.dependencies.sampleNetwork(),
+              ]);
+              if (resourceResult.status === "rejected") throw resourceResult.reason;
+              if (networkResult.status === "rejected") throw networkResult.reason;
+              return {
+                resourceSummary: resourceResult.value,
+                networkSnapshot: networkResult.value,
+              };
+            },
+          ).then(({ resourceSummary, networkSnapshot }) => {
+            if (
+              this.boundaryOperation !== operation ||
+              !this.isCurrentGeneration(generationId) ||
+              this.state !== "running"
+            ) {
+              return;
+            }
+            this.retainNetworkSnapshot(networkSnapshot);
+            this.retainLoopSummary({
+              ...telemetrySummary,
+              generationId,
+              resources: resourceSummary,
+              countsAtStart: active.countsAtStart!,
+              countsAtEnd,
+            });
           });
         })
         .then(
           () => this.finishBoundaryOperation(operation),
-          () =>
-            this.finishBoundaryOperation(
-              operation,
-              "loop-boundary-finalize-failed",
-            ),
+          () => this.finishBoundaryOperation(operation, failureReason),
         );
       this.boundaryOperation = operation;
     } catch {
       bestEffortSync(() => this.driver?.stop());
       this.receiveTerminalFailure("loop-boundary-invalid");
     }
+  }
+
+  private waitForResetPresentation(
+    active: ActiveLoop,
+    generationId: number,
+    signal: AbortSignal,
+  ): Promise<void> {
+    if (active.resetPresentationAcknowledged === true) return Promise.resolve();
+    const cueId = active.resetCueId;
+    if (cueId === undefined || this.pendingResetPresentation !== undefined) {
+      return Promise.reject(new Error("reset presentation wait is invalid"));
+    }
+
+    return new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const finish = (outcome: "resolve" | "reject"): void => {
+        if (settled) return;
+        settled = true;
+        signal.removeEventListener("abort", onAbort);
+        if (this.pendingResetPresentation === pending) {
+          this.pendingResetPresentation = undefined;
+        }
+        if (outcome === "resolve") resolve();
+        else reject(new Error("reset presentation wait was cancelled"));
+      };
+      const onAbort = (): void => finish("reject");
+      const pending: PendingResetPresentation = {
+        generationId,
+        loopId: active.loopId,
+        cueId,
+        resolve: () => finish("resolve"),
+      };
+
+      if (signal.aborted) {
+        finish("reject");
+        return;
+      }
+      signal.addEventListener("abort", onAbort, { once: true });
+      this.pendingResetPresentation = pending;
+      if (active.resetPresentationAcknowledged === true) pending.resolve();
+    });
   }
 
   private finishBoundaryOperation(
@@ -1388,6 +1470,15 @@ export class ShowRunCoordinator {
     this.boundaryOperation = undefined;
     if (failureReason !== undefined) {
       this.queueBoundaryTerminal({ ok: false, reason: failureReason });
+    }
+    const pendingDriverGenerationId = this.pendingDriverCompletionGenerationId;
+    this.pendingDriverCompletionGenerationId = undefined;
+    if (
+      pendingDriverGenerationId !== undefined &&
+      this.isCurrentGeneration(pendingDriverGenerationId) &&
+      this.state === "running"
+    ) {
+      this.queueBoundaryTerminal(this.driverCompletionResult());
     }
     const terminal = this.pendingBoundaryTerminal;
     this.pendingBoundaryTerminal = undefined;
@@ -1411,17 +1502,19 @@ export class ShowRunCoordinator {
       this.ignore("stale-generation");
       return;
     }
-    const result: ShowRunResult =
-      this.dependencies.mode === "Soak3" && this.completedLoops === 3
-        ? { ok: true, reason: "soak-complete" }
-        : this.stopQueued
-          ? { ok: true, reason: "operator-stop" }
-          : { ok: false, reason: "driver-completed-unexpectedly" };
     if (this.boundaryOperation !== undefined) {
-      this.queueBoundaryTerminal(result);
+      this.pendingDriverCompletionGenerationId = generationId;
     } else {
-      void this.beginShutdown(result);
+      void this.beginShutdown(this.driverCompletionResult());
     }
+  }
+
+  private driverCompletionResult(): ShowRunResult {
+    return this.dependencies.mode === "Soak3" && this.completedLoops === 3
+      ? { ok: true, reason: "soak-complete" }
+      : this.stopQueued
+        ? { ok: true, reason: "operator-stop" }
+        : { ok: false, reason: "driver-completed-unexpectedly" };
   }
 
   private handleDriverFailure(generationId: number, reason: string): void {
@@ -1711,7 +1804,10 @@ export class ShowRunCoordinator {
     if (this.boundaryOperation === undefined) return;
     this.boundaryOperation = undefined;
     this.pendingBoundaryTerminal = undefined;
+    this.pendingDriverCompletionGenerationId = undefined;
+    this.cancelBoundedPhase("loop-boundary-reset-presentation");
     this.cancelBoundedPhase("loop-boundary-finalize");
+    this.pendingResetPresentation = undefined;
   }
 
   private startRecovery(operation: () => Promise<void>): void {
