@@ -257,10 +257,22 @@ afterAll(() => {
 type ShowMode = "ValidateOnly" | "Soak3" | "Show";
 type NetworkPolicy = "OfflineRequired" | "DiagnosticConnected";
 
+interface WatchdogAttemptRecord {
+  schema: number;
+  runId: string;
+  failedControllerRunId: string;
+  failedControllerPid: number;
+  failedControllerExitCode: number;
+  attempt: number;
+  delayMs: number;
+  observedAtMonotonicMs: number;
+}
+
 interface InvocationRecord {
   atMs: number;
   controllerPid: number;
   arguments: string[];
+  observedWatchdogAttempts: WatchdogAttemptRecord[];
 }
 
 interface LauncherFixture {
@@ -272,6 +284,7 @@ interface LauncherFixture {
   invocationLog: string;
   sequenceLog: string;
   closeLog: string;
+  closeLifecycleLog: string;
   leaseMutationLog: string;
   inputMutationLog: string;
   launchMutationLog: string;
@@ -282,6 +295,7 @@ interface LauncherFixture {
   leasePath: string;
   evidencePath: string;
   incidentPath: string;
+  watchdogAttempts: string;
   electronCommand: string;
   electronExecutable: string;
   compiledEntry: string;
@@ -315,6 +329,7 @@ interface RunOptions {
     | "matching-success-wrong-content-evidence"
     | "matching-success-partial-evidence"
     | "crash-then-success"
+    | "crash-three-then-success"
     | "crash"
     | "lease-then-success"
     | "marker-and-lease-success"
@@ -324,6 +339,7 @@ interface RunOptions {
   controllerExit?: number;
   controllerOutputBytes?: number;
   closeOutputBytes?: number;
+  closeHelperSleepMs?: number;
   closeReceipt?: "valid" | "ownership-false" | "coercible-booleans";
   closeLeaseMutation?: "none" | "attempt-replace";
   inputMutation?: "none" | "attempt-display-map-append";
@@ -399,10 +415,45 @@ $self = Get-CimInstance Win32_Process -Filter "ProcessId=$PID"
 $controllerPid = [int]$self.ParentProcessId
 $controller = Get-Process -Id $controllerPid -ErrorAction Stop
 $controllerStartedAtUtc = $controller.StartTime.ToUniversalTime().ToString('o')
+$observedWatchdogAttempts = @()
+if (Test-Path -LiteralPath $env:SHOW_TEST_WATCHDOG_ATTEMPTS -PathType Leaf) {
+    $journalStream = $null
+    $journalReader = $null
+    try {
+        $journalStream = [IO.File]::Open(
+            $env:SHOW_TEST_WATCHDOG_ATTEMPTS,
+            [IO.FileMode]::Open,
+            [IO.FileAccess]::Read,
+            [IO.FileShare]::ReadWrite
+        )
+        if ($journalStream.Length -gt 4096) {
+            throw 'fake-watchdog-attempts-too-large'
+        }
+        $journalReader = [IO.StreamReader]::new(
+            $journalStream,
+            [Text.UTF8Encoding]::new($false, $true)
+        )
+        $journalText = $journalReader.ReadToEnd()
+    }
+    finally {
+        if ($null -ne $journalReader) {
+            $journalReader.Dispose()
+        }
+        elseif ($null -ne $journalStream) {
+            $journalStream.Dispose()
+        }
+    }
+    $observedWatchdogAttempts = @(
+        $journalText -split '\r?\n' |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+            ForEach-Object { $_ | ConvertFrom-Json -Depth 8 }
+    )
+}
 $record = [ordered]@{
     atMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
     controllerPid = $controllerPid
     arguments = @($RemainingArguments)
+    observedWatchdogAttempts = @($observedWatchdogAttempts)
 }
 Add-Content -LiteralPath $env:SHOW_TEST_INVOCATION_LOG -Value ($record | ConvertTo-Json -Compress -Depth 8)
 Add-Content -LiteralPath $env:SHOW_TEST_SEQUENCE_LOG -Value 'electron'
@@ -740,6 +791,14 @@ switch ($behavior) {
         Write-TerminalMarker -ControllerProcessId $controllerPid -Outcome 'intentional-success' -Reason 'operator-stop'
         exit 0
     }
+    'crash-three-then-success' {
+        if ($invocationCount -le 3) {
+            exit 9
+        }
+        Write-ShowEvidence -Mutation 'none'
+        Write-TerminalMarker -ControllerProcessId $controllerPid -Outcome 'intentional-success' -Reason 'operator-stop'
+        exit 0
+    }
     'marker-and-lease-success' {
         Write-RunLease -Mismatch $false -Unprovable $false
         Write-TerminalMarker -ControllerProcessId $controllerPid -Outcome 'intentional-success' -Reason 'operator-stop'
@@ -802,6 +861,20 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $record = [ordered]@{ pid = $ChildProcessId; hwnd = $Hwnd }
 Add-Content -LiteralPath $env:SHOW_TEST_CLOSE_LOG -Value ($record | ConvertTo-Json -Compress)
+$started = [ordered]@{
+    event = 'started'
+    atMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+}
+Add-Content -LiteralPath $env:SHOW_TEST_CLOSE_LIFECYCLE_LOG -Value ($started | ConvertTo-Json -Compress)
+$sleepMilliseconds = [int]$env:SHOW_TEST_CLOSE_HELPER_SLEEP_MS
+if ($sleepMilliseconds -gt 0) {
+    Start-Sleep -Milliseconds $sleepMilliseconds
+}
+$completed = [ordered]@{
+    event = 'completed'
+    atMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+}
+Add-Content -LiteralPath $env:SHOW_TEST_CLOSE_LIFECYCLE_LOG -Value ($completed | ConvertTo-Json -Compress)
 if ($env:SHOW_TEST_CLOSE_LEASE_MUTATION -eq 'attempt-replace') {
     try {
         [IO.File]::WriteAllText($env:SHOW_TEST_LEASE_PATH, '{"schema":0}')
@@ -941,6 +1014,7 @@ function makeLauncherFixture(): LauncherFixture {
   const invocationLog = join(root, "electron-invocations.ndjson");
   const sequenceLog = join(root, "sequence.log");
   const closeLog = join(root, "close-invocations.ndjson");
+  const closeLifecycleLog = join(root, "close-lifecycle.ndjson");
   const leaseMutationLog = join(root, "lease-mutation.log");
   const inputMutationLog = join(root, "input-mutation.log");
   const launchMutationLog = join(root, "launch-mutation.log");
@@ -951,6 +1025,7 @@ function makeLauncherFixture(): LauncherFixture {
   const leasePath = win32.join(externalRoot, "run-lease.json");
   const evidencePath = win32.join(externalRoot, "show-run.json");
   const incidentPath = win32.join(externalRoot, "controller-incident.json");
+  const watchdogAttempts = win32.join(externalRoot, "watchdog-attempts.jsonl");
   const electronCommand = join(root, "node_modules", ".bin", "electron.cmd");
   const electronExecutable = join(
     root,
@@ -1146,6 +1221,7 @@ function makeLauncherFixture(): LauncherFixture {
     invocationLog,
     sequenceLog,
     closeLog,
+    closeLifecycleLog,
     leaseMutationLog,
     inputMutationLog,
     launchMutationLog,
@@ -1156,6 +1232,7 @@ function makeLauncherFixture(): LauncherFixture {
     leasePath,
     evidencePath,
     incidentPath,
+    watchdogAttempts,
     electronCommand,
     electronExecutable,
     compiledEntry,
@@ -1253,6 +1330,9 @@ function runLauncher(
         SHOW_TEST_BEHAVIOR: options.behavior ?? "crash",
         SHOW_TEST_REPOSITORY_ROOT: fixture.root,
         SHOW_TEST_CLOSE_OUTPUT_BYTES: String(options.closeOutputBytes ?? 0),
+        SHOW_TEST_CLOSE_HELPER_SLEEP_MS: String(
+          options.closeHelperSleepMs ?? 0,
+        ),
         SHOW_TEST_CLOSE_RECEIPT: options.closeReceipt ?? "valid",
         SHOW_TEST_CLOSE_LEASE_MUTATION:
           options.closeLeaseMutation ?? "none",
@@ -1314,6 +1394,8 @@ function runLauncher(
         SHOW_TEST_INVOCATION_LOG: fixture.invocationLog,
         SHOW_TEST_SEQUENCE_LOG: fixture.sequenceLog,
         SHOW_TEST_CLOSE_LOG: fixture.closeLog,
+        SHOW_TEST_CLOSE_LIFECYCLE_LOG: fixture.closeLifecycleLog,
+        SHOW_TEST_WATCHDOG_ATTEMPTS: fixture.watchdogAttempts,
         SHOW_TEST_LEASE_PATH: fixture.leasePath,
         SHOW_TEST_LEASE_MUTATION_LOG: fixture.leaseMutationLog,
         SHOW_TEST_JANVIM_PID: String(options.janvimPid ?? 2147483000),
@@ -1337,6 +1419,27 @@ function invocations(fixture: LauncherFixture): InvocationRecord[] {
     .split(/\r?\n/u)
     .filter(Boolean)
     .map((line) => JSON.parse(line) as InvocationRecord);
+}
+
+function watchdogAttemptRecords(
+  fixture: LauncherFixture,
+): WatchdogAttemptRecord[] {
+  if (!existsSync(fixture.watchdogAttempts)) return [];
+  return readFileSync(fixture.watchdogAttempts, "utf8")
+    .split(/\r?\n/u)
+    .filter((line) => line.length > 0)
+    .map((line) => JSON.parse(line) as WatchdogAttemptRecord);
+}
+
+function closeLifecycleRecords(
+  fixture: LauncherFixture,
+): Array<{ event: string; atMs: number }> {
+  if (!existsSync(fixture.closeLifecycleLog)) return [];
+  return readFileSync(fixture.closeLifecycleLog, "utf8")
+    .trim()
+    .split(/\r?\n/u)
+    .filter(Boolean)
+    .map((line) => JSON.parse(line) as { event: string; atMs: number });
 }
 
 function flag(arguments_: readonly string[], name: string): string {
@@ -1845,6 +1948,7 @@ describe("offline show launcher and external watchdog", () => {
         : "sequence-log-missing";
       expect(result.status, `${output(result)}\n${diagnostic}`).toBe(0);
       expect(invocations(fixture)).toHaveLength(1);
+      expect(existsSync(fixture.watchdogAttempts)).toBe(false);
       const sequence = readFileSync(fixture.sequenceLog, "utf8").trim().split(/\r?\n/u);
       expect(sequence.indexOf("graph-verify")).toBeGreaterThanOrEqual(0);
       expect(sequence.indexOf("verify")).toBeGreaterThanOrEqual(0);
@@ -2221,6 +2325,28 @@ describe("offline show launcher and external watchdog", () => {
     }
   }, 15_000);
 
+  it("rejects a pre-existing watchdog journal before controller launch without replacing it", () => {
+    const fixture = makeLauncherFixture();
+    const preexisting = '{"schema":999,"sentinel":"preexisting"}\n';
+    try {
+      writeText(fixture.watchdogAttempts, preexisting);
+      const result = runLauncher(
+        fixture,
+        launcherArguments(fixture, "Show"),
+        { behavior: "matching-success" },
+      );
+
+      expect(result.status, output(result)).not.toBe(0);
+      expect(output(result)).toContain(
+        "conflicting-show-state:watchdog-attempts.jsonl",
+      );
+      expect(invocations(fixture)).toHaveLength(0);
+      expect(readFileSync(fixture.watchdogAttempts, "utf8")).toBe(preexisting);
+    } finally {
+      fixture.cleanup();
+    }
+  }, 15_000);
+
   it("rejects an oversized frozen config before unbounded hashing", () => {
     const fixture = makeLauncherFixture();
     try {
@@ -2451,6 +2577,7 @@ describe("offline show launcher and external watchdog", () => {
       expect(result.status).toBe(9);
       expect(invocations(fixture)).toHaveLength(1);
       expect(existsSync(fixture.incidentPath)).toBe(false);
+      expect(existsSync(fixture.watchdogAttempts)).toBe(false);
     } finally {
       fixture.cleanup();
     }
@@ -2492,6 +2619,7 @@ describe("offline show launcher and external watchdog", () => {
         );
         const records = invocations(fixture);
         expect(records).toHaveLength(1);
+        expect(existsSync(fixture.watchdogAttempts)).toBe(false);
         const args = records[0]!.arguments;
         expect(args).toContain(`--show-mode=${mode.toLowerCase()}`);
         expect(args).not.toEqual(expect.arrayContaining([expect.stringMatching(/^--g2-mode=/)]));
@@ -2723,6 +2851,83 @@ describe("offline show launcher and external watchdog", () => {
     }
   }, 30_000);
 
+  it("durably records each eligible retry before the next controller observes it", () => {
+    const fixture = makeLauncherFixture();
+    try {
+      const result = runLauncher(
+        fixture,
+        launcherArguments(fixture, "Show"),
+        { behavior: "crash-three-then-success", timeoutMs: 35_000 },
+      );
+      const records = invocations(fixture);
+      const retryDiagnostic = [
+        output(result),
+        existsSync(fixture.watchdogAttempts)
+          ? readFileSync(fixture.watchdogAttempts, "utf8")
+          : "watchdog-attempts-missing",
+        existsSync(fixture.sequenceLog)
+          ? readFileSync(fixture.sequenceLog, "utf8")
+          : "sequence-log-missing",
+      ].join("\n");
+
+      expect(result.status, retryDiagnostic).toBe(0);
+      expect(records).toHaveLength(4);
+      expect(existsSync(fixture.watchdogAttempts)).toBe(true);
+
+      const serialized = readFileSync(fixture.watchdogAttempts, "utf8");
+      const events = watchdogAttemptRecords(fixture);
+      expect(Buffer.byteLength(serialized, "utf8")).toBeLessThanOrEqual(4_096);
+      expect(serialized.endsWith("\n")).toBe(true);
+      expect(events).toHaveLength(3);
+      expect(events.map((event) => [event.attempt, event.delayMs])).toEqual([
+        [1, 1_000],
+        [2, 2_000],
+        [3, 4_000],
+      ]);
+      for (const [index, event] of events.entries()) {
+        expect(Object.keys(event)).toEqual([
+          "schema",
+          "runId",
+          "failedControllerRunId",
+          "failedControllerPid",
+          "failedControllerExitCode",
+          "attempt",
+          "delayMs",
+          "observedAtMonotonicMs",
+        ]);
+        expect(event.schema).toBe(1);
+        expect(event.runId).toBe(fixture.runId);
+        expect(event.failedControllerRunId).toBe(
+          flag(records[index]!.arguments, "controller-run-id"),
+        );
+        expect(event.failedControllerPid).toBe(records[index]!.controllerPid);
+        expect(event.failedControllerExitCode).toBe(9);
+        expect(Number.isInteger(event.observedAtMonotonicMs)).toBe(true);
+        expect(event.observedAtMonotonicMs).toBeGreaterThanOrEqual(0);
+        expect(event.observedAtMonotonicMs).toBeLessThanOrEqual(600_000);
+        if (index > 0) {
+          expect(event.observedAtMonotonicMs).toBeGreaterThan(
+            events[index - 1]!.observedAtMonotonicMs,
+          );
+        }
+      }
+      expect(records.map((record) => record.observedWatchdogAttempts)).toEqual([
+        [],
+        events.slice(0, 1),
+        events.slice(0, 2),
+        events,
+      ]);
+      expect(serialized).not.toMatch(
+        /token|secret|command|environment|stdout|stderr|content/iu,
+      );
+
+      writeFileSync(fixture.watchdogAttempts, "", { flag: "a" });
+      expect(watchdogAttemptRecords(fixture)).toEqual(events);
+    } finally {
+      fixture.cleanup();
+    }
+  }, 45_000);
+
   it("relaunches unexpected exits after 1000/2000/4000 ms and then stops", () => {
     const fixture = makeLauncherFixture();
     try {
@@ -2733,7 +2938,16 @@ describe("offline show launcher and external watchdog", () => {
       );
       expect(result.status).not.toBe(0);
       const records = invocations(fixture);
-      expect(records).toHaveLength(4);
+      const retryDiagnostic = [
+        output(result),
+        existsSync(fixture.watchdogAttempts)
+          ? readFileSync(fixture.watchdogAttempts, "utf8")
+          : "watchdog-attempts-missing",
+        existsSync(fixture.sequenceLog)
+          ? readFileSync(fixture.sequenceLog, "utf8")
+          : "sequence-log-missing",
+      ].join("\n");
+      expect(records, retryDiagnostic).toHaveLength(4);
       const deltas = records.slice(1).map((record, index) =>
         record.atMs - records[index]!.atMs,
       );
@@ -2751,12 +2965,62 @@ describe("offline show launcher and external watchdog", () => {
         expect(record.arguments.join("\n")).not.toMatch(/checkpoint|resume|loop-id/iu);
       }
       expect(existsSync(fixture.incidentPath)).toBe(true);
+      expect(existsSync(fixture.watchdogAttempts)).toBe(true);
+      const events = watchdogAttemptRecords(fixture);
+      expect(events.map((event) => [event.attempt, event.delayMs])).toEqual([
+        [1, 1_000],
+        [2, 2_000],
+        [3, 4_000],
+      ]);
+      expect(events).toHaveLength(3);
+      expect(Buffer.byteLength(readFileSync(fixture.watchdogAttempts))).toBeLessThanOrEqual(
+        4_096,
+      );
+      writeFileSync(fixture.watchdogAttempts, "", { flag: "a" });
     } finally {
       fixture.cleanup();
     }
   }, 25_000);
 
-  it("proves an exact lease, closes the exact HWND, then force-stops only the same PID", async () => {
+  it("times out a 3000 ms close helper at 2000 ms without settling or forcing the child", async () => {
+    const fixture = makeLauncherFixture();
+    const janvim = await startFakeJanVim(fixture);
+    try {
+      const result = runLauncher(
+        fixture,
+        launcherArguments(fixture, "Show"),
+        {
+          behavior: "lease-then-success",
+          closeHelperSleepMs: 3_000,
+          janvimPid: janvim.pid,
+          janvimStartedAtUtc: janvim.startedAtUtc,
+          janvimExecutableSha256: janvim.executableSha256,
+          timeoutMs: 22_000,
+        },
+      );
+      const lifecycle = closeLifecycleRecords(fixture);
+
+      expect(result.error).toBeUndefined();
+      expect(result.status, output(result)).toBe(70);
+      expect(invocations(fixture)).toHaveLength(1);
+      expect(lifecycle.map((record) => record.event)).toEqual(["started"]);
+      expect(Date.now() - lifecycle[0]!.atMs).toBeGreaterThanOrEqual(1_800);
+      expect(Date.now() - lifecycle[0]!.atMs).toBeLessThan(3_000);
+      expect(existsSync(fixture.leasePath)).toBe(true);
+      expect(await waitForExit(janvim.child, 100)).toBe(false);
+      expect(existsSync(fixture.watchdogAttempts)).toBe(false);
+      const incident = JSON.parse(
+        readFileSync(fixture.incidentPath, "utf8"),
+      ) as { reason: string };
+      expect(incident.reason).toBe("run-lease-unprovable");
+    } finally {
+      janvim.child.kill();
+      await waitForExit(janvim.child, 2_000);
+      fixture.cleanup();
+    }
+  }, 35_000);
+
+  it("keeps the fast helper separate from the 5000 ms child wait before exact force-stop", async () => {
     const fixture = makeLauncherFixture();
     const janvim = await startFakeJanVim(fixture);
     try {
@@ -2774,8 +3038,18 @@ describe("offline show launcher and external watchdog", () => {
       const leaseDiagnostic = existsSync(fixture.leasePath)
         ? readFileSync(fixture.leasePath, "utf8")
         : "lease-missing";
-      expect(result.status, `${output(result)}\n${leaseDiagnostic}`).toBe(0);
-      expect(invocations(fixture)).toHaveLength(2);
+      const retryDiagnostic = existsSync(fixture.watchdogAttempts)
+        ? readFileSync(fixture.watchdogAttempts, "utf8")
+        : "watchdog-attempts-missing";
+      const sequenceDiagnostic = existsSync(fixture.sequenceLog)
+        ? readFileSync(fixture.sequenceLog, "utf8")
+        : "sequence-log-missing";
+      expect(
+        result.status,
+        `${output(result)}\n${leaseDiagnostic}\n${retryDiagnostic}\n${sequenceDiagnostic}`,
+      ).toBe(0);
+      const invocationRecords = invocations(fixture);
+      expect(invocationRecords).toHaveLength(2);
       const closeRecords = readFileSync(fixture.closeLog, "utf8")
         .trim()
         .split(/\r?\n/u)
@@ -2784,8 +3058,20 @@ describe("offline show launcher and external watchdog", () => {
       expect(closeRecords).toEqual([
         { pid: janvim.pid, hwnd: "0x0000000000001234" },
       ]);
+      const lifecycle = closeLifecycleRecords(fixture);
+      expect(lifecycle.map((record) => record.event)).toEqual([
+        "started",
+        "completed",
+      ]);
+      expect(invocationRecords[1]!.atMs - lifecycle[1]!.atMs).toBeGreaterThanOrEqual(
+        5_800,
+      );
+      expect(invocationRecords[1]!.atMs - lifecycle[1]!.atMs).toBeLessThan(
+        12_000,
+      );
       expect(await waitForExit(janvim.child, 2_000)).toBe(true);
       expect(existsSync(fixture.leasePath)).toBe(false);
+      expect(watchdogAttemptRecords(fixture)).toHaveLength(1);
     } finally {
       if (!(await waitForExit(janvim.child, 100))) janvim.child.kill();
       fixture.cleanup();

@@ -39,6 +39,10 @@ $expectedManifestSha256 = '9a39ee522e556860053468854b0858bc1fafd8b7a1ca08ddff57d
 $expectedPoemSha256 = 'b699de273f5bbaedb08241495f52ce863d3e8e1851275ce3b6251484d75190a8'
 $incidentExitCode = 70
 $maximumJsonBytes = 4096
+$maximumWatchdogAttemptsBytes = 4096
+$maximumWatchdogMonotonicMilliseconds = 9007199254740991L
+$windowCloseHelperTimeoutMilliseconds = 2000
+$windowCloseHelperMaximumOutputBytes = 4096
 $maximumEvidenceBytes = 262144
 $maximumGraphManifestBytes = 262144
 $maximumGraphModules = 256
@@ -1124,6 +1128,76 @@ function Write-ControllerIncident {
     }
 }
 
+function Write-WatchdogAttempt {
+    param(
+        [Parameter(Mandatory = $true)][IO.FileStream]$Stream,
+        [Parameter(Mandatory = $true)][IO.StreamWriter]$Writer,
+        [Parameter(Mandatory = $true)][object]$TopLevelRunId,
+        [Parameter(Mandatory = $true)][object]$FailedControllerRunId,
+        [Parameter(Mandatory = $true)][object]$FailedControllerProcessId,
+        [Parameter(Mandatory = $true)][object]$FailedControllerExitCode,
+        [Parameter(Mandatory = $true)][object]$Attempt,
+        [Parameter(Mandatory = $true)][object]$DelayMilliseconds,
+        [Parameter(Mandatory = $true)][object]$ObservedAtMonotonicMilliseconds
+    )
+
+    if (
+        $TopLevelRunId -isnot [string] -or
+        $TopLevelRunId -cnotmatch '^[A-Za-z0-9._-]{1,64}$' -or
+        $FailedControllerRunId -isnot [string] -or
+        $FailedControllerRunId -cnotmatch '^[A-Za-z0-9._-]{1,96}$' -or
+        -not (Test-PositiveInteger -Value $FailedControllerProcessId) -or
+        [long]$FailedControllerProcessId -gt [int]::MaxValue -or
+        -not (Test-JsonInteger -Value $FailedControllerExitCode) -or
+        [long]$FailedControllerExitCode -lt [int]::MinValue -or
+        [long]$FailedControllerExitCode -gt [int]::MaxValue -or
+        -not (Test-PositiveInteger -Value $Attempt) -or
+        [long]$Attempt -gt $restartDelaysMilliseconds.Count -or
+        -not (Test-PositiveInteger -Value $DelayMilliseconds) -or
+        [long]$DelayMilliseconds -ne [long]$restartDelaysMilliseconds[[int]$Attempt - 1] -or
+        -not (Test-JsonInteger -Value $ObservedAtMonotonicMilliseconds) -or
+        [long]$ObservedAtMonotonicMilliseconds -lt 0 -or
+        [long]$ObservedAtMonotonicMilliseconds -gt $maximumWatchdogMonotonicMilliseconds -or
+        -not [object]::ReferenceEquals($Writer.BaseStream, $Stream) -or
+        -not $Stream.CanWrite
+    ) {
+        throw 'watchdog-attempt-invalid'
+    }
+
+    $record = [ordered]@{
+        schema = 1
+        runId = [string]$TopLevelRunId
+        failedControllerRunId = [string]$FailedControllerRunId
+        failedControllerPid = [int]$FailedControllerProcessId
+        failedControllerExitCode = [int]$FailedControllerExitCode
+        attempt = [int]$Attempt
+        delayMs = [int]$DelayMilliseconds
+        observedAtMonotonicMs = [long]$ObservedAtMonotonicMilliseconds
+    }
+    $serialized = $record | ConvertTo-Json -Compress -Depth 4
+    if ($serialized -match '[\r\n]') {
+        throw 'watchdog-attempt-invalid'
+    }
+
+    $Writer.Flush()
+    $encoding = [Text.UTF8Encoding]::new($false, $true)
+    $recordBytes = $encoding.GetByteCount($serialized + $Writer.NewLine)
+    if (
+        $recordBytes -lt 1 -or
+        $recordBytes -gt $maximumWatchdogAttemptsBytes -or
+        $Stream.Length -gt $maximumWatchdogAttemptsBytes - $recordBytes
+    ) {
+        throw 'watchdog-attempt-size-limit-exceeded'
+    }
+
+    $Writer.WriteLine($serialized)
+    $Writer.Flush()
+    $Stream.Flush($true)
+    if ($Stream.Length -gt $maximumWatchdogAttemptsBytes) {
+        throw 'watchdog-attempt-size-limit-exceeded'
+    }
+}
+
 function Read-StrictTerminalMarker {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
@@ -1507,8 +1581,8 @@ function Invoke-ExactWindowClose {
         -FilePath 'pwsh' `
         -Arguments $helperArguments `
         -WorkingDirectory $WorkingDirectory `
-        -TimeoutMilliseconds 5000 `
-        -MaximumOutputBytes $maximumJsonBytes `
+        -TimeoutMilliseconds $windowCloseHelperTimeoutMilliseconds `
+        -MaximumOutputBytes $windowCloseHelperMaximumOutputBytes `
         -Reason 'window-close-helper-failed'
     if ($result.ExitCode -ne 0 -or -not [string]::IsNullOrWhiteSpace($result.Stderr)) {
         throw 'window-close-helper-failed'
@@ -1834,7 +1908,14 @@ $terminalMarkerPath = Join-Path $resolvedRehearsalRoot 'controller-terminal.json
 $leasePath = Join-Path $resolvedRehearsalRoot 'run-lease.json'
 $incidentPath = Join-Path $resolvedRehearsalRoot 'controller-incident.json'
 $evidencePath = Join-Path $resolvedRehearsalRoot 'show-run.json'
-foreach ($conflictingPath in @($terminalMarkerPath, $leasePath, $incidentPath, $evidencePath)) {
+$watchdogAttemptsPath = Join-Path $resolvedRehearsalRoot 'watchdog-attempts.jsonl'
+foreach ($conflictingPath in @(
+    $terminalMarkerPath
+    $leasePath
+    $incidentPath
+    $evidencePath
+    $watchdogAttemptsPath
+)) {
     if (Test-Path -LiteralPath $conflictingPath) {
         throw "conflicting-show-state:$([IO.Path]::GetFileName($conflictingPath))"
     }
@@ -1926,6 +2007,8 @@ $verifierClaimSpecifications = @(
         -Reason 'typescript-package-metadata-snapshot-failed'
 )
 $frozenInputClaims = Open-FrozenInputClaims -Specifications $verifierClaimSpecifications
+$watchdogAttemptsStream = $null
+$watchdogAttemptsWriter = $null
 try {
 
 $nodeCandidates = @(Get-Command -Name 'node' -CommandType Application -ErrorAction Stop)
@@ -2137,6 +2220,7 @@ $showModeFlag = $Mode.ToLowerInvariant()
 $evidenceMode = if ($Mode -ceq 'Show') { 'Show' } else { 'Soak3' }
 $watchdogClock = [Diagnostics.Stopwatch]::StartNew()
 $crashTimes = [Collections.Generic.List[long]]::new()
+$watchdogAttemptCount = 0
 
 while ($true) {
     $controllerRunId = "ctl-$([Guid]::NewGuid().ToString('N'))"
@@ -2270,7 +2354,10 @@ while ($true) {
             $crashTimes.RemoveAt($index)
         }
     }
-    if ($crashTimes.Count -ge $restartDelaysMilliseconds.Count) {
+    if (
+        $watchdogAttemptCount -ge $restartDelaysMilliseconds.Count -or
+        $crashTimes.Count -ge $restartDelaysMilliseconds.Count
+    ) {
         Write-ControllerIncident `
             -Path $incidentPath `
             -Reason 'watchdog-crash-budget-exhausted' `
@@ -2279,13 +2366,53 @@ while ($true) {
             -ControllerExitCode $controllerExitCode
         exit $incidentExitCode
     }
-    $restartDelay = $restartDelaysMilliseconds[$crashTimes.Count]
+    $restartDelay = $restartDelaysMilliseconds[$watchdogAttemptCount]
+    $watchdogAttempt = $watchdogAttemptCount + 1
+    if ($null -eq $watchdogAttemptsStream) {
+        $watchdogAttemptsStream = [IO.File]::Open(
+            $watchdogAttemptsPath,
+            [IO.FileMode]::CreateNew,
+            [IO.FileAccess]::Write,
+            [IO.FileShare]::Read
+        )
+        $watchdogAttemptsWriter = [IO.StreamWriter]::new(
+            $watchdogAttemptsStream,
+            [Text.UTF8Encoding]::new($false, $true),
+            4096,
+            $true
+        )
+    }
+    Write-WatchdogAttempt `
+        -Stream $watchdogAttemptsStream `
+        -Writer $watchdogAttemptsWriter `
+        -TopLevelRunId $RunId `
+        -FailedControllerRunId $controllerRunId `
+        -FailedControllerProcessId $controllerProcessId `
+        -FailedControllerExitCode $controllerExitCode `
+        -Attempt $watchdogAttempt `
+        -DelayMilliseconds $restartDelay `
+        -ObservedAtMonotonicMilliseconds $now
     $crashTimes.Add($now)
+    $watchdogAttemptCount = $watchdogAttempt
     Start-Sleep -Milliseconds $restartDelay
 }
 }
 finally {
-    foreach ($frozenInputClaim in $frozenInputClaims) {
-        $frozenInputClaim.Dispose()
+    try {
+        if ($null -ne $watchdogAttemptsWriter) {
+            $watchdogAttemptsWriter.Dispose()
+        }
+    }
+    finally {
+        try {
+            if ($null -ne $watchdogAttemptsStream) {
+                $watchdogAttemptsStream.Dispose()
+            }
+        }
+        finally {
+            foreach ($frozenInputClaim in $frozenInputClaims) {
+                $frozenInputClaim.Dispose()
+            }
+        }
     }
 }
