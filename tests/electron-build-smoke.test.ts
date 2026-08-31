@@ -18,6 +18,11 @@ import { afterEach, describe, expect, it } from "vitest";
 
 const repositoryRoot = process.cwd();
 const bundleRelativePath = "apps/controller/dist/main/electron-main.js";
+const launcherPath = join(repositoryRoot, "scripts", "start-show.ps1");
+const reviewedElectronReleaseIdentityStart =
+  "# JANVIM_REVIEWED_ELECTRON_RELEASE_IDENTITY_BEGIN";
+const reviewedElectronReleaseIdentityEnd =
+  "# JANVIM_REVIEWED_ELECTRON_RELEASE_IDENTITY_END";
 const temporaryRoots: string[] = [];
 
 interface BundleManifest {
@@ -134,6 +139,69 @@ describe("compiled Electron main bundle", () => {
       createHash("sha256").update(bytes).digest("hex"),
     );
     expect(readdirSync(dirname(canonicalBundle))).toEqual(["electron-main.js"]);
+  });
+
+  it("pins launcher release constants to the reviewed real bundle identity", () => {
+    const source = readFileSync(launcherPath, "utf8");
+    const start = source.indexOf(reviewedElectronReleaseIdentityStart);
+    const end = source.indexOf(reviewedElectronReleaseIdentityEnd);
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+    const block = source.slice(start, end);
+    const relativePath =
+      /\$reviewedElectronMainRelativePath\s*=\s*'([^']+)'/u.exec(block)?.[1];
+    const bytes = Number(
+      /\$reviewedElectronMainBytes\s*=\s*(\d+)L/u.exec(block)?.[1],
+    );
+    const sha256 =
+      /\$reviewedElectronMainSha256\s*=\s*'([0-9a-f]{64})'/u.exec(block)?.[1];
+    const importsBlock =
+      /\$reviewedElectronMainRuntimeImports\s*=\s*@\(([\s\S]*?)\)/u.exec(
+        block,
+      )?.[1] ?? "";
+    const runtimeImports = [...importsBlock.matchAll(/^\s*'([^']+)'\s*$/gmu)]
+      .map((match) => match[1]);
+    const expectedReleaseIdentity = {
+      relativePath: "apps/controller/dist/main/electron-main.js",
+      bytes: 448609,
+      sha256:
+        "6a217cae1fe1f0f5a260912cf64bea9c65d1fbbf71bc2578769b423e2f11772b",
+      runtimeImports: [
+        "electron",
+        "node:child_process",
+        "node:crypto",
+        "node:fs",
+        "node:fs/promises",
+        "node:net",
+        "node:path",
+        "node:perf_hooks",
+        "node:url",
+        "node:util",
+      ],
+    };
+    expect({ relativePath, bytes, sha256, runtimeImports }).toEqual(
+      expectedReleaseIdentity,
+    );
+
+    const verifierResult = runVerifier(repositoryRoot);
+    expect(
+      verifierResult.status,
+      verifierResult.stderr || verifierResult.error?.message,
+    ).toBe(0);
+    const manifest = readManifest(verifierResult.stdout);
+    expect({ ...manifest.files[0], runtimeImports: manifest.runtimeImports })
+      .toEqual(expectedReleaseIdentity);
+    const realBundle = readFileSync(
+      join(repositoryRoot, ...expectedReleaseIdentity.relativePath.split("/")),
+    );
+    expect({
+      bytes: realBundle.byteLength,
+      sha256: createHash("sha256").update(realBundle).digest("hex"),
+    }).toEqual({
+      bytes: 448609,
+      sha256:
+        "6a217cae1fe1f0f5a260912cf64bea9c65d1fbbf71bc2578769b423e2f11772b",
+    });
   });
 
   it("rejects a non-electron bare package import", () => {

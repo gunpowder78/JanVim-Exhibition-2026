@@ -53,6 +53,23 @@ $maximumTypeScriptParserBytes = 9144216L
 $maximumTypeScriptPackageMetadataBytes = 65536L
 $crashWindowMilliseconds = 600000L
 $restartDelaysMilliseconds = @(1000, 2000, 4000)
+# JANVIM_REVIEWED_ELECTRON_RELEASE_IDENTITY_BEGIN
+$reviewedElectronMainRelativePath = 'apps/controller/dist/main/electron-main.js'
+$reviewedElectronMainBytes = 448609L
+$reviewedElectronMainSha256 = '6a217cae1fe1f0f5a260912cf64bea9c65d1fbbf71bc2578769b423e2f11772b'
+$reviewedElectronMainRuntimeImports = @(
+    'electron'
+    'node:child_process'
+    'node:crypto'
+    'node:fs'
+    'node:fs/promises'
+    'node:net'
+    'node:path'
+    'node:perf_hooks'
+    'node:url'
+    'node:util'
+)
+# JANVIM_REVIEWED_ELECTRON_RELEASE_IDENTITY_END
 $allowedElectronMainRuntimeImports = @(
     'electron'
     'node:child_process'
@@ -854,12 +871,18 @@ function Read-StrictElectronModuleGraph {
     $sha256 = Get-RequiredPropertyValue -InputObject $file -Name 'sha256' -Reason 'electron-module-graph-invalid'
     if (
         $relativePath -isnot [string] -or
-        $relativePath -cne 'apps/controller/dist/main/electron-main.js' -or
+        $relativePath -cne $reviewedElectronMainRelativePath -or
         -not (Test-PositiveInteger -Value $bytes) -or
         [long]$bytes -gt $maximumMainBundleBytes -or
         -not (Test-HashValue -Value $sha256)
     ) {
         throw 'electron-module-graph-invalid'
+    }
+    if (
+        [long]$bytes -ne $reviewedElectronMainBytes -or
+        $sha256 -cne $reviewedElectronMainSha256
+    ) {
+        throw 'electron-module-release-identity-mismatch'
     }
     $path = Resolve-ShowFullPath -Path (Join-Path $RepositoryRoot $relativePath) -Label 'electron-module-graph-path'
     if (
@@ -908,12 +931,20 @@ function Read-StrictElectronModuleGraph {
     if (-not $electronSeen) {
         throw 'electron-module-graph-invalid'
     }
+    if ($runtimeImports.Count -ne $reviewedElectronMainRuntimeImports.Count) {
+        throw 'electron-module-release-identity-mismatch'
+    }
+    for ($index = 0; $index -lt $reviewedElectronMainRuntimeImports.Count; $index += 1) {
+        if ($runtimeImports[$index] -cne $reviewedElectronMainRuntimeImports[$index]) {
+            throw 'electron-module-release-identity-mismatch'
+        }
+    }
 
     return [pscustomobject]@{
         Path = $path
-        ExpectedBytes = [long]$bytes
+        ExpectedBytes = $reviewedElectronMainBytes
         MaximumBytes = $maximumMainBundleBytes
-        ExpectedSha256 = $sha256
+        ExpectedSha256 = $reviewedElectronMainSha256
     }
 }
 

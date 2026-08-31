@@ -37,6 +37,17 @@ const protectedRoots = [
   "D:\\VirtualData\\TempCache\\janvim-task5-cached-d42e9769283e47dc8b98cf94baee739d",
   "D:\\VirtualData\\TempCache\\janvim-task5-physical-cached-e9735e8d02e34ff4a4ac8836f8e22dcb",
 ] as const;
+const reviewedElectronReleaseIdentityStart =
+  "# JANVIM_REVIEWED_ELECTRON_RELEASE_IDENTITY_BEGIN";
+const reviewedElectronReleaseIdentityEnd =
+  "# JANVIM_REVIEWED_ELECTRON_RELEASE_IDENTITY_END";
+const launcherFixtureRuntimeImports = [
+  "electron",
+  "node:child_process",
+  "node:fs",
+  "node:path",
+  "node:url",
+] as const;
 
 let fakeElectronTemplateRoot: string | undefined;
 let fakeElectronTemplate: string | undefined;
@@ -1072,6 +1083,39 @@ function copyFixtureFile(sourceRelative: string, root: string): string {
   return destination;
 }
 
+function patchCopiedLauncherReleaseIdentity(
+  script: string,
+  compiledEntry: string,
+): void {
+  const source = readFileSync(script, "utf8");
+  const start = source.indexOf(reviewedElectronReleaseIdentityStart);
+  const end = source.indexOf(reviewedElectronReleaseIdentityEnd);
+  if (start < 0 || end < 0) return;
+  if (
+    start !== source.lastIndexOf(reviewedElectronReleaseIdentityStart) ||
+    end !== source.lastIndexOf(reviewedElectronReleaseIdentityEnd) ||
+    end <= start
+  ) {
+    throw new Error("launcher release identity markers are ambiguous");
+  }
+  const replacement = [
+    reviewedElectronReleaseIdentityStart,
+    "$reviewedElectronMainRelativePath = 'apps/controller/dist/main/electron-main.js'",
+    `$reviewedElectronMainBytes = ${statSync(compiledEntry).size}L`,
+    `$reviewedElectronMainSha256 = '${sha256(compiledEntry)}'`,
+    "$reviewedElectronMainRuntimeImports = @(",
+    ...launcherFixtureRuntimeImports.map((specifier) => `    '${specifier}'`),
+    ")",
+    reviewedElectronReleaseIdentityEnd,
+  ].join("\r\n");
+  writeText(
+    script,
+    source.slice(0, start) +
+      replacement +
+      source.slice(end + reviewedElectronReleaseIdentityEnd.length),
+  );
+}
+
 function makeLauncherFixture(): LauncherFixture {
   if (!existsSync(productionScript)) {
     throw new Error(`production launcher missing: ${productionScript}`);
@@ -1245,6 +1289,7 @@ function makeLauncherFixture(): LauncherFixture {
       "",
     ].join("\n"),
   );
+  patchCopiedLauncherReleaseIdentity(script, compiledEntry);
   writeText(join(root, "node_modules", ".bin", "fake-electron.ps1"), fakeElectron);
   writeText(closeHelper, fakeCloseHelper);
   writeText(
@@ -1575,13 +1620,7 @@ function validGraphManifest(fixture: LauncherFixture): GraphManifest {
         "apps/controller/dist/main/electron-main.js",
       ),
     ],
-    runtimeImports: [
-      "electron",
-      "node:child_process",
-      "node:fs",
-      "node:path",
-      "node:url",
-    ],
+    runtimeImports: [...launcherFixtureRuntimeImports],
   };
 }
 
@@ -1629,7 +1668,9 @@ const duplicateGraphOutputCases = [
 
 interface InvalidGraphOutputCase {
   label: string;
-  reason: "electron-module-graph-invalid" | "frozen-input-claim-failed";
+  reason:
+    | "electron-module-graph-invalid"
+    | "electron-module-release-identity-mismatch";
   output(fixture: LauncherFixture): string;
 }
 
@@ -1899,7 +1940,7 @@ const invalidGraphOutputCases: readonly InvalidGraphOutputCase[] = [
   },
   {
     label: "wrong byte count",
-    reason: "frozen-input-claim-failed",
+    reason: "electron-module-release-identity-mismatch",
     output: (fixture) =>
       changedGraphOutput(fixture, (manifest) => ({
         ...manifest,
@@ -1911,7 +1952,7 @@ const invalidGraphOutputCases: readonly InvalidGraphOutputCase[] = [
   },
   {
     label: "wrong hash",
-    reason: "frozen-input-claim-failed",
+    reason: "electron-module-release-identity-mismatch",
     output: (fixture) =>
       changedGraphOutput(fixture, (manifest) => ({
         ...manifest,
@@ -2132,6 +2173,136 @@ describe("offline show launcher and external watchdog", () => {
       fixture.cleanup();
     }
   }, 15_000);
+
+  it("rejects a verifier-consistent identifier-alias bundle outside the reviewed release before Electron", () => {
+    const fixture = makeLauncherFixture();
+    try {
+      writeText(
+        fixture.compiledEntry,
+        [
+          'import "electron";',
+          'import "node:child_process";',
+          'import "node:fs";',
+          'import "node:path";',
+          'import "node:url";',
+          'const firstName = "getBuiltinModule";',
+          'const secondName = "createRequire";',
+          'process[firstName]("module")[secondName](import.meta.url)("zod");',
+          "",
+        ].join("\n"),
+      );
+
+      const result = runLauncher(
+        fixture,
+        launcherArguments(fixture, "ValidateOnly"),
+        { behavior: "matching-success" },
+      );
+      const sequence = existsSync(fixture.sequenceLog)
+        ? readFileSync(fixture.sequenceLog, "utf8").trim().split(/\r?\n/u)
+        : [];
+
+      expect(result.status, output(result)).not.toBe(0);
+      expect(output(result)).toContain(
+        "electron-module-release-identity-mismatch",
+      );
+      expect(sequence).toContain("graph-verify");
+      expect(sequence).not.toContain("verify");
+      expect(sequence).not.toContain("electron");
+      expect(invocations(fixture)).toHaveLength(0);
+    } finally {
+      fixture.cleanup();
+    }
+  }, 15_000);
+
+  it.each([
+    [
+      "missing allowed import",
+      ["electron", "node:child_process", "node:fs", "node:path"],
+      "electron-module-release-identity-mismatch",
+    ],
+    [
+      "reordered allowed imports",
+      ["electron", "node:fs", "node:child_process", "node:path", "node:url"],
+      "electron-module-graph-invalid",
+    ],
+    [
+      "extra allowed import",
+      [
+        "electron",
+        "node:child_process",
+        "node:crypto",
+        "node:fs",
+        "node:path",
+        "node:url",
+      ],
+      "electron-module-release-identity-mismatch",
+    ],
+  ] as const)(
+    "rejects release runtime identity with %s before Electron",
+    (_label, runtimeImports, reason) => {
+      const fixture = makeLauncherFixture();
+      try {
+        const result = runLauncher(
+          fixture,
+          launcherArguments(fixture, "ValidateOnly"),
+          {
+            behavior: "matching-success",
+            graphOutput: changedGraphOutput(fixture, (manifest) => ({
+              ...manifest,
+              runtimeImports,
+            })),
+          },
+        );
+
+        expect(result.status, output(result)).not.toBe(0);
+        expect(output(result)).toContain(reason);
+        expect(invocations(fixture)).toHaveLength(0);
+      } finally {
+        fixture.cleanup();
+      }
+    },
+    15_000,
+  );
+
+  it.each([
+    [
+      "different byte count",
+      (candidate: Buffer) => Buffer.concat([candidate, Buffer.from("\n")]),
+    ],
+    [
+      "same bytes with different hash",
+      (candidate: Buffer) => {
+        const changed = Buffer.from(candidate);
+        changed[changed.length - 1] = 0x20;
+        return changed;
+      },
+    ],
+  ] as const)(
+    "rejects verifier-consistent candidate with %s from the reviewed release before Electron",
+    (_label, changeCandidate) => {
+      const fixture = makeLauncherFixture();
+      try {
+        const changedCandidate = changeCandidate(
+          readFileSync(fixture.compiledEntry),
+        );
+        writeFileSync(fixture.compiledEntry, changedCandidate);
+        const result = runLauncher(
+          fixture,
+          launcherArguments(fixture, "ValidateOnly"),
+          { behavior: "matching-success" },
+        );
+
+        expect(result.status, output(result)).not.toBe(0);
+        expect(output(result)).toContain(
+          "electron-module-release-identity-mismatch",
+        );
+        expect(invocations(fixture)).toHaveLength(0);
+      } finally {
+        fixture.cleanup();
+      }
+    },
+    15_000,
+  );
 
   it("claims the TypeScript parser before graph verification executes its bytes", () => {
     const fixture = makeLauncherFixture();
