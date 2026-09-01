@@ -35,8 +35,13 @@ $expectedTag = 'v0.10.1-gmk.4'
 $expectedCommit = 'e95633101d93f8448b0f906e918b5d836ab95273'
 $expectedShowConfigSha256 = '506b4fc09424d974695020465e3bf7b0b2b58ee3d566d0c6b15fb8cb5c2f1615'
 $expectedPluginLabSha256 = '5a2b336fbc6974c98826cdacd0474dd33a31e05e13ebade37dbb7018aa727cb2'
-$expectedManifestSha256 = '9a39ee522e556860053468854b0858bc1fafd8b7a1ca08ddff57d0371b717b35'
+$expectedContentLockBytes = 2332L
+$expectedContentLockSha256 = '0f718738cd00b06dfb3b7f7a12c8bafd10ebc7b1820be4a011e0683426ad7bdd'
 $expectedPoemSha256 = 'b699de273f5bbaedb08241495f52ce863d3e8e1851275ce3b6251484d75190a8'
+$allowedContentProfiles = @('p0-baseline', 'songfeng-source', 'river-channel', 'tower-codebook')
+$maximumContentLockBytes = 32768
+$maximumContentPaperBytes = 32768
+$maximumContentManifestBytes = 131072
 $incidentExitCode = 70
 $maximumJsonBytes = 4096
 $maximumWatchdogAttemptsBytes = 4096
@@ -775,6 +780,284 @@ function Test-HashValue {
     param([Parameter(Mandatory = $true)][object]$Value)
 
     return $Value -is [string] -and $Value -cmatch '^[0-9a-f]{64}$'
+}
+
+function Resolve-ExactContentMemberPath {
+    param(
+        [Parameter(Mandatory = $true)][string]$RepositoryRoot,
+        [Parameter(Mandatory = $true)][object]$RelativePath,
+        [Parameter(Mandatory = $true)][string]$ExpectedRelativePath,
+        [Parameter(Mandatory = $true)][string]$Reason
+    )
+
+    if (
+        $RelativePath -isnot [string] -or
+        $RelativePath -cne $ExpectedRelativePath -or
+        $RelativePath -cnotmatch '^[A-Za-z0-9./-]+$'
+    ) {
+        throw $Reason
+    }
+    $resolved = [IO.Path]::GetFullPath((Join-Path $RepositoryRoot $RelativePath.Replace('/', '\')))
+    if (-not (Test-ShowAtOrBelow -Candidate $resolved -Root $RepositoryRoot)) {
+        throw $Reason
+    }
+    return $resolved
+}
+
+function Read-LockedContentMember {
+    param(
+        [Parameter(Mandatory = $true)][psobject]$Record,
+        [Parameter(Mandatory = $true)][string]$RepositoryRoot,
+        [Parameter(Mandatory = $true)][string]$ExpectedRelativePath,
+        [Parameter(Mandatory = $true)][int]$MaximumBytes,
+        [Parameter(Mandatory = $true)][string]$Reason
+    )
+
+    Assert-ExactPropertySet `
+        -InputObject $Record `
+        -ExpectedNames @('path', 'bytes', 'sha256') `
+        -Reason $Reason
+    $relativePath = Get-RequiredPropertyValue -InputObject $Record -Name 'path' -Reason $Reason
+    $expectedBytes = Get-RequiredPropertyValue -InputObject $Record -Name 'bytes' -Reason $Reason
+    $expectedHash = Get-RequiredPropertyValue -InputObject $Record -Name 'sha256' -Reason $Reason
+    if (
+        -not (Test-HashValue -Value $expectedHash) -or
+        -not (Test-ExactJsonInteger -Value $expectedBytes -Expected ([long]$expectedBytes)) -or
+        [long]$expectedBytes -lt 1 -or
+        [long]$expectedBytes -gt $MaximumBytes
+    ) {
+        throw $Reason
+    }
+    $path = Resolve-ExactContentMemberPath `
+        -RepositoryRoot $RepositoryRoot `
+        -RelativePath $relativePath `
+        -ExpectedRelativePath $ExpectedRelativePath `
+        -Reason $Reason
+    Assert-NoReparseTraversal -Path $path -Reason $Reason
+    $snapshot = Read-BoundedFileSnapshot -Path $path -MaximumBytes $MaximumBytes -Reason $Reason
+    if (
+        $snapshot.ByteLength -ne [long]$expectedBytes -or
+        $snapshot.FileSha256 -cne $expectedHash
+    ) {
+        throw $Reason
+    }
+    return [pscustomobject]@{ Path = $path; Snapshot = $snapshot }
+}
+
+function Assert-ContentProfileManifest {
+    param(
+        [Parameter(Mandatory = $true)][psobject]$Manifest,
+        [Parameter(Mandatory = $true)][string]$ProfileId,
+        [Parameter(Mandatory = $true)][string]$ExpectedRevision
+    )
+
+    $reason = 'content-profile-manifest-invalid'
+    Assert-ExactPropertySet `
+        -InputObject $Manifest `
+        -ExpectedNames @('schema', 'loopId', 'loopDurationMs', 'poemSha256', 'contentRevision', 'preparedBy', 'cues') `
+        -Reason $reason
+    $duration = Get-RequiredPropertyValue -InputObject $Manifest -Name 'loopDurationMs' -Reason $reason
+    $expectedDuration = if ($ProfileId -ceq 'p0-baseline') { 90000L } else { 165000L }
+    if (
+        -not (Test-ExactJsonInteger -Value (Get-RequiredPropertyValue -InputObject $Manifest -Name 'schema' -Reason $reason) -Expected 1) -or
+        -not (Test-ExactJsonInteger -Value $duration -Expected $expectedDuration) -or
+        (Get-RequiredPropertyValue -InputObject $Manifest -Name 'contentRevision' -Reason $reason) -cne $ExpectedRevision -or
+        (Get-RequiredPropertyValue -InputObject $Manifest -Name 'poemSha256' -Reason $reason) -cne $expectedPoemSha256
+    ) {
+        throw $reason
+    }
+    $cues = Get-RequiredPropertyValue -InputObject $Manifest -Name 'cues' -Reason $reason
+    if ($cues.Count -lt 1 -or $cues.Count -gt 256) {
+        throw $reason
+    }
+    $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $previousAtMs = -1L
+    $insertCount = 0
+    $moveCount = 0
+    $resetCount = 0
+    foreach ($cue in $cues) {
+        Assert-ExactPropertySet `
+            -InputObject $cue `
+            -ExpectedNames @('id', 'atMs', 'target', 'kind', 'payload') `
+            -Reason $reason
+        $cueId = Get-RequiredPropertyValue -InputObject $cue -Name 'id' -Reason $reason
+        $atMs = Get-RequiredPropertyValue -InputObject $cue -Name 'atMs' -Reason $reason
+        $kind = Get-RequiredPropertyValue -InputObject $cue -Name 'kind' -Reason $reason
+        if (
+            $cueId -isnot [string] -or
+            [string]::IsNullOrWhiteSpace($cueId) -or
+            -not $seen.Add($cueId) -or
+            -not (Test-ExactJsonInteger -Value $atMs -Expected ([long]$atMs)) -or
+            [long]$atMs -lt $previousAtMs -or
+            [long]$atMs -gt $expectedDuration
+        ) {
+            throw $reason
+        }
+        $previousAtMs = [long]$atMs
+        if ($kind -ceq 'editor-action') {
+            $payload = Get-RequiredPropertyValue -InputObject $cue -Name 'payload' -Reason $reason
+            Assert-ExactPropertySet `
+                -InputObject $payload `
+                -ExpectedNames @('action', 'displayKeys', 'semanticLabel', 'critical') `
+                -Reason $reason
+            if (-not (Test-ExactJsonTrue -Value (Get-RequiredPropertyValue -InputObject $payload -Name 'critical' -Reason $reason))) {
+                throw $reason
+            }
+            $action = Get-RequiredPropertyValue -InputObject $payload -Name 'action' -Reason $reason
+            $actionType = Get-RequiredPropertyValue -InputObject $action -Name 'type' -Reason $reason
+            if ($actionType -ceq 'insert') {
+                Assert-ExactPropertySet -InputObject $action -ExpectedNames @('type', 'text', 'charsPerSecond') -Reason $reason
+                $text = Get-RequiredPropertyValue -InputObject $action -Name 'text' -Reason $reason
+                $rate = Get-RequiredPropertyValue -InputObject $action -Name 'charsPerSecond' -Reason $reason
+                if (
+                    $text -isnot [string] -or
+                    [Text.Encoding]::UTF8.GetByteCount($text) -gt 512 -or
+                    $rate -isnot [ValueType] -or
+                    [double]$rate -lt 0 -or
+                    [double]$rate -gt 1000
+                ) {
+                    throw $reason
+                }
+                $insertCount++
+            }
+            elseif ($actionType -ceq 'move') {
+                Assert-ExactPropertySet -InputObject $action -ExpectedNames @('type', 'keys', 'repeat') -Reason $reason
+                $keys = Get-RequiredPropertyValue -InputObject $action -Name 'keys' -Reason $reason
+                $repeat = Get-RequiredPropertyValue -InputObject $action -Name 'repeat' -Reason $reason
+                if (
+                    $keys -cnotin @('h', 'j', 'k', 'l', 'w', 'b', 'e', '0', '$', 'G') -or
+                    -not (Test-ExactJsonInteger -Value $repeat -Expected ([long]$repeat)) -or
+                    [long]$repeat -lt 0 -or
+                    [long]$repeat -gt 256
+                ) {
+                    throw $reason
+                }
+                $moveCount++
+            }
+            elseif ($actionType -ceq 'reset') {
+                Assert-ExactPropertySet -InputObject $action -ExpectedNames @('type') -Reason $reason
+                $resetCount++
+            }
+            else {
+                throw $reason
+            }
+        }
+    }
+    $finalCue = $cues[-1]
+    $finalPayload = Get-RequiredPropertyValue -InputObject $finalCue -Name 'payload' -Reason 'content-profile-reset-invalid'
+    $finalAction = Get-RequiredPropertyValue -InputObject $finalPayload -Name 'action' -Reason 'content-profile-reset-invalid'
+    if (
+        (Get-RequiredPropertyValue -InputObject $finalCue -Name 'kind' -Reason 'content-profile-reset-invalid') -cne 'editor-action' -or
+        -not (Test-ExactJsonInteger -Value (Get-RequiredPropertyValue -InputObject $finalCue -Name 'atMs' -Reason 'content-profile-reset-invalid') -Expected $expectedDuration) -or
+        (Get-RequiredPropertyValue -InputObject $finalAction -Name 'type' -Reason 'content-profile-reset-invalid') -cne 'reset' -or
+        $resetCount -ne 1
+    ) {
+        throw 'content-profile-reset-invalid'
+    }
+    if (
+        $ProfileId -cne 'p0-baseline' -and
+        ($insertCount -lt 12 -or $insertCount -gt 18 -or $moveCount -lt 18 -or $moveCount -gt 28)
+    ) {
+        throw $reason
+    }
+}
+
+function Read-SelectedContentProfile {
+    param(
+        [Parameter(Mandatory = $true)][string]$RepositoryRoot,
+        [Parameter(Mandatory = $true)][string]$ContentLockPath,
+        [Parameter(Mandatory = $true)][psobject]$ActiveManifestSnapshot
+    )
+
+    $lockSnapshot = Read-BoundedJsonSnapshot `
+        -Path $ContentLockPath `
+        -MaximumBytes $maximumContentLockBytes `
+        -Reason 'content-lock-invalid'
+    if (
+        $lockSnapshot.ByteLength -ne $expectedContentLockBytes -or
+        $lockSnapshot.FileSha256 -cne $expectedContentLockSha256
+    ) {
+        throw 'content-lock-hash-mismatch'
+    }
+    $lock = $lockSnapshot.Value
+    Assert-ExactPropertySet `
+        -InputObject $lock `
+        -ExpectedNames @('schema', 'revision', 'poem', 'profiles') `
+        -Reason 'content-lock-invalid'
+    if (
+        -not (Test-ExactJsonInteger -Value (Get-RequiredPropertyValue -InputObject $lock -Name 'schema' -Reason 'content-lock-invalid') -Expected 1) -or
+        (Get-RequiredPropertyValue -InputObject $lock -Name 'revision' -Reason 'content-lock-invalid') -cne '20260902-p0.1-r1'
+    ) {
+        throw 'content-lock-invalid'
+    }
+    $profiles = Get-RequiredPropertyValue -InputObject $lock -Name 'profiles' -Reason 'content-lock-invalid'
+    if ($profiles.Count -ne $allowedContentProfiles.Count) {
+        throw 'content-profile-allowlist-invalid'
+    }
+    $matches = [Collections.Generic.List[psobject]]::new()
+    for ($index = 0; $index -lt $allowedContentProfiles.Count; $index++) {
+        $profile = $profiles[$index]
+        Assert-ExactPropertySet `
+            -InputObject $profile `
+            -ExpectedNames @('id', 'title', 'revision', 'paper', 'manifest') `
+            -Reason 'content-profile-record-invalid'
+        $profileId = Get-RequiredPropertyValue -InputObject $profile -Name 'id' -Reason 'content-profile-record-invalid'
+        if ($profileId -cne $allowedContentProfiles[$index]) {
+            throw 'content-profile-allowlist-invalid'
+        }
+        $manifestRecord = Get-RequiredPropertyValue -InputObject $profile -Name 'manifest' -Reason 'content-profile-record-invalid'
+        Assert-ExactPropertySet -InputObject $manifestRecord -ExpectedNames @('path', 'bytes', 'sha256') -Reason 'content-profile-record-invalid'
+        $manifestBytes = Get-RequiredPropertyValue -InputObject $manifestRecord -Name 'bytes' -Reason 'content-profile-record-invalid'
+        $manifestHash = Get-RequiredPropertyValue -InputObject $manifestRecord -Name 'sha256' -Reason 'content-profile-record-invalid'
+        if (
+            (Test-ExactJsonInteger -Value $manifestBytes -Expected $ActiveManifestSnapshot.ByteLength) -and
+            (Test-HashValue -Value $manifestHash) -and
+            $manifestHash -ceq $ActiveManifestSnapshot.FileSha256
+        ) {
+            $matches.Add($profile)
+        }
+    }
+    if ($matches.Count -ne 1) {
+        throw 'active-manifest-not-allowlisted'
+    }
+    $selected = $matches[0]
+    $selectedId = Get-RequiredPropertyValue -InputObject $selected -Name 'id' -Reason 'content-profile-record-invalid'
+    $selectedRevision = Get-RequiredPropertyValue -InputObject $selected -Name 'revision' -Reason 'content-profile-record-invalid'
+    $paper = Read-LockedContentMember `
+        -Record (Get-RequiredPropertyValue -InputObject $selected -Name 'paper' -Reason 'content-profile-record-invalid') `
+        -RepositoryRoot $RepositoryRoot `
+        -ExpectedRelativePath "content/p0.1/profiles/$selectedId/paper.md" `
+        -MaximumBytes $maximumContentPaperBytes `
+        -Reason 'content-profile-paper-invalid'
+    $manifestSource = Read-LockedContentMember `
+        -Record (Get-RequiredPropertyValue -InputObject $selected -Name 'manifest' -Reason 'content-profile-record-invalid') `
+        -RepositoryRoot $RepositoryRoot `
+        -ExpectedRelativePath "content/p0.1/profiles/$selectedId/show.manifest.json" `
+        -MaximumBytes $maximumContentManifestBytes `
+        -Reason 'content-profile-manifest-invalid'
+    $poem = Read-LockedContentMember `
+        -Record (Get-RequiredPropertyValue -InputObject $lock -Name 'poem' -Reason 'content-lock-invalid') `
+        -RepositoryRoot $RepositoryRoot `
+        -ExpectedRelativePath 'content/fixture/poem.txt' `
+        -MaximumBytes 65536 `
+        -Reason 'content-poem-invalid'
+    if ($poem.Snapshot.FileSha256 -cne $expectedPoemSha256) {
+        throw 'content-poem-invalid'
+    }
+    Assert-ContentProfileManifest `
+        -Manifest $ActiveManifestSnapshot.Value `
+        -ProfileId $selectedId `
+        -ExpectedRevision $selectedRevision
+    return [pscustomobject]@{
+        ProfileId = $selectedId
+        Revision = $selectedRevision
+        LockPath = $ContentLockPath
+        LockSnapshot = $lockSnapshot
+        PaperPath = $paper.Path
+        PaperSnapshot = $paper.Snapshot
+        ManifestSourcePath = $manifestSource.Path
+        ManifestSourceSnapshot = $manifestSource.Snapshot
+    }
 }
 
 function Assert-NoDuplicateJsonPropertyNames {
@@ -2048,6 +2331,7 @@ $verifyRuntime = Join-Path $repositoryRoot 'scripts\verify-runtime.ps1'
 $windowCloseHelper = Join-Path $repositoryRoot 'scripts\close-janvim-window.ps1'
 $artifactLockPath = Join-Path $repositoryRoot 'janvim-artifact.lock.json'
 $showConfigPath = Join-Path $repositoryRoot 'show\janvim-show.toml'
+$contentLockPath = Join-Path $repositoryRoot 'content\p0.1\content-lock.json'
 $manifestPath = Join-Path $repositoryRoot 'content\fixture\show.manifest.json'
 $poemPath = Join-Path $repositoryRoot 'content\fixture\poem.txt'
 $pluginLabPath = Join-Path $repositoryRoot 'runtime\user-root\plugin-lab\config\init.lua'
@@ -2065,6 +2349,7 @@ foreach ($requiredFile in @(
     $windowCloseHelper,
     $artifactLockPath,
     $showConfigPath,
+    $contentLockPath,
     $manifestPath,
     $poemPath,
     $pluginLabPath,
@@ -2229,10 +2514,14 @@ if (
     throw 'frozen-runtime-hash-mismatch'
 }
 
-$manifestSnapshot = Read-BoundedJsonSnapshot -Path $manifestPath -MaximumBytes 65536 -Reason 'show-manifest-invalid'
-if ($manifestSnapshot.FileSha256 -cne $expectedManifestSha256) {
-    throw 'frozen-manifest-hash-mismatch'
-}
+$manifestSnapshot = Read-BoundedJsonSnapshot `
+    -Path $manifestPath `
+    -MaximumBytes $maximumContentManifestBytes `
+    -Reason 'show-manifest-invalid'
+$selectedContentProfile = Read-SelectedContentProfile `
+    -RepositoryRoot $repositoryRoot `
+    -ContentLockPath $contentLockPath `
+    -ActiveManifestSnapshot $manifestSnapshot
 $manifest = $manifestSnapshot.Value
 $manifestPoemHash = Get-RequiredPropertyValue -InputObject $manifest -Name 'poemSha256' -Reason 'show-manifest-invalid'
 $contentRevision = Get-RequiredPropertyValue -InputObject $manifest -Name 'contentRevision' -Reason 'show-manifest-invalid'
@@ -2284,6 +2573,24 @@ $launchClaimSpecifications = @(
         ExpectedSha256 = $showConfigSnapshot.FileSha256
     },
     [pscustomobject]@{
+        Path = $selectedContentProfile.LockPath
+        ExpectedBytes = [long]$selectedContentProfile.LockSnapshot.ByteLength
+        MaximumBytes = [long]$maximumContentLockBytes
+        ExpectedSha256 = $selectedContentProfile.LockSnapshot.FileSha256
+    },
+    [pscustomobject]@{
+        Path = $selectedContentProfile.PaperPath
+        ExpectedBytes = [long]$selectedContentProfile.PaperSnapshot.ByteLength
+        MaximumBytes = [long]$maximumContentPaperBytes
+        ExpectedSha256 = $selectedContentProfile.PaperSnapshot.FileSha256
+    },
+    [pscustomobject]@{
+        Path = $selectedContentProfile.ManifestSourcePath
+        ExpectedBytes = [long]$selectedContentProfile.ManifestSourceSnapshot.ByteLength
+        MaximumBytes = [long]$maximumContentManifestBytes
+        ExpectedSha256 = $selectedContentProfile.ManifestSourceSnapshot.FileSha256
+    },
+    [pscustomobject]@{
         Path = $pluginLabPath
         ExpectedBytes = [long]$pluginLabSnapshot.ByteLength
         MaximumBytes = 65536L
@@ -2292,7 +2599,7 @@ $launchClaimSpecifications = @(
     [pscustomobject]@{
         Path = $manifestPath
         ExpectedBytes = [long]$manifestSnapshot.ByteLength
-        MaximumBytes = 65536L
+        MaximumBytes = [long]$maximumContentManifestBytes
         ExpectedSha256 = $manifestSnapshot.FileSha256
     },
     [pscustomobject]@{
