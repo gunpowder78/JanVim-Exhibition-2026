@@ -56,7 +56,7 @@ Vitest 4.1.11, Neovim 0.10.1 Lua/libuv, PowerShell 7.
   `nil` for every other result or thrown probe error. `exit_backend` is the fixed
   `vim.cmd("qall!")` operation.
 
-- [ ] **Step 1: Add a failing connection-level test for ACK-before-exit**
+- [x] **Step 1: Add a failing connection-level test for ACK-before-exit**
 
 Extend the existing fake TCP fixture in `nvim/tests/agent_spec.lua` so writes are retained with
 their callbacks instead of completing every callback immediately. Add a test named
@@ -100,14 +100,14 @@ The fake timer remains finite and the fake TCP `write` method stores
 `schema = 1`, `cueId = "cue-shutdown"`, and `outcome = "applied"`; do not derive the expectation
 through the protocol encoder.
 
-- [ ] **Step 2: Add a failing parent-alive control test**
+- [x] **Step 2: Add a failing parent-alive control test**
 
 Add `shutdown keeps a live-parent backend for normal HWND teardown` using the same real connection
 path with `parent_alive = function() return true end`. Complete the ACK write and assert the
 transport closes exactly once while `exit_count` remains zero. Retain the existing test that
 rejects `{ type = "shutdown", command = ":qa!" }` before any close or exit callback.
 
-- [ ] **Step 3: Run Lua tests and verify the RED failure**
+- [x] **Step 3: Run Lua tests and verify the RED failure**
 
 Run:
 
@@ -119,7 +119,7 @@ Expected: the orphan test fails because current `close_connection` closes the tr
 dispatch, before the shutdown ACK write callback, and no fixed orphan-backend exit exists. Confirm
 all earlier tests reached execution; a Lua syntax/load error is not an acceptable RED result.
 
-- [ ] **Step 4: Implement deferred authenticated shutdown in `init.lua`**
+- [x] **Step 4: Implement deferred authenticated shutdown in `init.lua`**
 
 Capture and validate the fixed lifecycle dependencies during `M.setup`:
 
@@ -168,7 +168,7 @@ In the TCP ACK write callback, after clearing `busy`, keep the current write-err
 successful write, call `complete_requested_shutdown()` and call `pump()` only when it returns
 false. Do not add a PID, command string, or exit flag to the protocol.
 
-- [ ] **Step 5: Run focused Lua verification and mutation checks**
+- [x] **Step 5: Run focused Lua verification and mutation checks**
 
 Run:
 
@@ -180,7 +180,7 @@ Expected: all Lua tests pass. Mentally verify these mutations are caught: closin
 exiting while the parent is alive, exiting twice, treating a failed liveness check as dead, and
 accepting a user-provided shutdown command.
 
-- [ ] **Step 6: Commit the Lua lifecycle behavior**
+- [x] **Step 6: Commit the Lua lifecycle behavior**
 
 ```powershell
 git diff --check
@@ -209,7 +209,7 @@ git commit -m "fix: settle orphaned show backend"
 - Keeps: the existing `childExit` promise as full `close` settlement, bounded stream finalization,
   and lease removal.
 
-- [ ] **Step 1: Split the fake frontend events without touching production code**
+- [x] **Step 1: Split the fake frontend events without touching production code**
 
 In `createStartupHarness`, make `FakeChild.kill()` emit both real events in order:
 
@@ -242,7 +242,7 @@ Delete a fake PID from `activeChildPids` on its first `exit`, while retaining st
 on `close`. Update the composed fixture in `tests/recovery.test.ts` to emit `exit` before `close`
 for its normal fake kill and HWND-close paths.
 
-- [ ] **Step 2: Add the failing delayed-`close` recovery test**
+- [x] **Step 2: Add the failing delayed-`close` recovery test**
 
 Replace the existing full-replacement test with the stricter name
 `invalidates on frontend exit but waits for backend close before replacement`. Use
@@ -275,7 +275,7 @@ Retain the existing literal order assertions: old lease removal precedes new bri
 precedes new spawn, placement, lease write, and original-poem prepare. Retain the maximum active
 resource assertion of one child, bridge, HWND, and lease.
 
-- [ ] **Step 3: Run the focused TypeScript test and verify the RED failure**
+- [x] **Step 3: Run the focused TypeScript test and verify the RED failure**
 
 Run:
 
@@ -287,7 +287,7 @@ Expected: the new test fails immediately after `emitJanVimExit(0)` because the c
 no `exit` listener and remains `running` generation 1. A TypeScript fixture error is not an
 acceptable RED result.
 
-- [ ] **Step 4: Extend the exact spawned-child interface**
+- [x] **Step 4: Extend the exact spawned-child interface**
 
 Add these overloads to `G2SpawnedChild` while retaining the existing `close` overloads:
 
@@ -304,7 +304,7 @@ off(
 
 Do not broaden the adapter to arbitrary event names.
 
-- [ ] **Step 5: Separate frontend exit observation from full close settlement**
+- [x] **Step 5: Separate frontend exit observation from full close settlement**
 
 Add `private childExited = false` to `RuntimeShowSession` and one private idempotent method:
 
@@ -339,7 +339,7 @@ The `close` fallback covers conforming adapters that coalesce event delivery, bu
 prevents a second fault. Do not resolve `childExit`, finalize streams, or remove the lease from the
 `exit` handler.
 
-- [ ] **Step 6: Run focused and composed recovery tests**
+- [x] **Step 6: Run focused and composed recovery tests**
 
 Run:
 
@@ -351,7 +351,7 @@ npm run typecheck
 Expected: both test files and typecheck pass with no warning. Confirm the delayed-`close` test would
 fail if either the `exit` listener or the `close` settlement guard were removed.
 
-- [ ] **Step 7: Commit the controller lifecycle behavior**
+- [x] **Step 7: Commit the controller lifecycle behavior**
 
 ```powershell
 git diff --check
@@ -381,7 +381,7 @@ git commit -m "fix: recover on JanVim frontend exit"
   `janvim-core.exe` SHA-256 remains
   `224b3457d89fbc6cf946359683632f29f9262bae08b6f0d2e3043a3a7a6d83b3`.
 
-- [ ] **Step 1: Synchronize only the reviewed Lua file**
+- [x] **Step 1: Synchronize only the reviewed Lua file**
 
 ```powershell
 $source = '.\nvim\lua\janvim_exhibition\init.lua'
@@ -396,7 +396,7 @@ if ($sourceHash -cne $targetHash) { throw 'prepared-agent-copy-mismatch' }
 
 Do not copy any JanVim product source, user configuration, poem, media, or whole directory.
 
-- [ ] **Step 2: Verify the immutable runtime boundary**
+- [x] **Step 2: Verify the immutable runtime boundary**
 
 ```powershell
 pwsh -NoProfile -File .\scripts\verify-runtime.ps1
@@ -409,7 +409,7 @@ if ($coreHash -cne '224b3457d89fbc6cf946359683632f29f9262bae08b6f0d2e3043a3a7a6d
 
 Expected: runtime verification exits 0 and the core hash remains exact.
 
-- [ ] **Step 3: Run the complete repository gates**
+- [x] **Step 3: Run the complete repository gates**
 
 ```powershell
 npm ci
@@ -426,7 +426,7 @@ git status --short --branch
 Expected: all commands exit 0; the tracked worktree is clean after the two implementation commits;
 the ignored prepared runtime copy is byte-identical to committed Lua source.
 
-- [ ] **Step 4: Request an independent code review**
+- [x] **Step 4: Request an independent code review**
 
 Invoke `superpowers:requesting-code-review`. Give the reviewer the approved design, this plan, the
 failed rehearsal evidence summary, both implementation commits, and exact gate output. Require
@@ -443,14 +443,14 @@ probe therefore left the exact Neovim backend alive, correctly blocked child `cl
 `old-session-unsettled` rather than an unsafe replacement. The owner approved this bounded
 amendment on 2026-09-01.
 
-- [ ] Add deterministic RED tests for live-then-`ESRCH`, duplicate deferred callbacks, exactly 20
+- [x] Add deterministic RED tests for live-then-`ESRCH`, duplicate deferred callbacks, exactly 20
   live rechecks, and uncertain/throwing probes that later confirm `ESRCH`.
-- [ ] Inject `defer(callback, 100)` with production `vim.defer_fn`; start only one probe chain after
+- [x] Inject `defer(callback, 100)` with production `vim.defer_fn`; start only one probe chain after
   the shutdown ACK, decrement a literal 20-recheck budget, and keep the fixed backend exit
   idempotent.
-- [ ] Treat only confirmed `alive == false` as permission to exit. Every other result consumes one
+- [x] Treat only confirmed `alive == false` as permission to exit. Every other result consumes one
   finite recheck and exhaustion remains fail-closed.
-- [ ] Synchronize only `nvim/lua/janvim_exhibition/init.lua` to the ignored prepared runtime, rerun
+- [x] Synchronize only `nvim/lua/janvim_exhibition/init.lua` to the ignored prepared runtime, rerun
   all repository gates, request independent review, and repeat Task 4 from new external roots.
 
 ---
@@ -504,7 +504,7 @@ despite the established placement rule that filters JanVim's zero-area helper wi
   real block AST. Prove a destroyed HWND, a live HWND owned by another PID, and a preloaded
   same-name type all fail closed without recording a stop.
 - [x] Run all repository gates, request independent review, and update the pinned runbook SHA-256.
-- [ ] Repeat Task 4 from new external evidence roots.
+- [x] Repeat Task 4 from new external evidence roots.
 
 ---
 
@@ -532,7 +532,7 @@ two-second child-process bound.
   behavior.
 - [x] Rebuild the Electron main bundle and advance the launcher's reviewed byte-size/SHA-256 pair
   to that exact build; retain the smoke test that rejects every other bundle identity.
-- [ ] Run all repository gates, request independent review, and repeat Task 4 from an entirely new
+- [x] Run all repository gates, request independent review, and repeat Task 4 from an entirely new
   set of external evidence roots. Preserve the failed root and do not reuse its paired normal root.
 
 ---
@@ -552,148 +552,53 @@ two-second child-process bound.
 - Produces: fresh ValidateOnly receipt, Show terminal/evidence records, one bounded JanVim recovery,
   and explicit human observations. It does not modify tracked files.
 
-- [ ] **Step 1: Create separate fresh Show and connected-validation roots**
+- [x] **Step 1: Create separate fresh Show and connected-validation roots**
 
-```powershell
-$repo = 'D:\github\JanVim-Exhibition-2026\.worktrees\task1'
-$parent = 'D:\VirtualData\JanVim-Exhibition-Rehearsals'
-$stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
-$showId = "g3-janvim-fault-$stamp"
-$validateId = "$showId-validate"
+  The accepted run used the frozen handoff
+  `D:\VirtualData\JanVim-Exhibition-Rehearsals\_g3-p0-final-offline-current.json`. The handoff names
+  the fixed Show ID `g3-p0-final-offline-20260902-013534-fault`, its separate validation ID, the
+  exact display map, receipt paths, and reviewed hashes. Operator windows must each read this same
+  handoff; PowerShell variables such as `$showId` are never assumed to cross window boundaries.
 
-foreach ($id in @($showId, $validateId)) {
-  $root = Join-Path $parent $id
-  $map = Join-Path $root 'display-map.json'
-  pwsh -NoProfile -File "$repo\scripts\start-g2-rehearsal.ps1" `
-    -Mode Capture -RehearsalRoot $root -DisplayMapPath $map
-  if ($LASTEXITCODE -ne 0) { throw "display-capture-failed:$id" }
-  pwsh -NoProfile -File "$repo\scripts\start-g2-rehearsal.ps1" `
-    -Mode Confirm -RehearsalRoot $root -DisplayMapPath $map `
-    -PrimaryDisplayId '1502331611' -SecondaryDisplayId '3192275084'
-  if ($LASTEXITCODE -ne 0) { throw "display-confirm-failed:$id" }
-}
+- [x] **Step 2: Run connected diagnostic validation only**
 
-"Show run ID: $showId"
-"Validate run ID: $validateId"
-```
+  `g3-p0-final-offline-20260902-013534-validate` returned one schema-1 receipt with `exitCode: 0`.
+  The current Windows display geometry was frozen separately from all failed and prior rehearsal
+  roots.
 
-- [ ] **Step 2: Run connected diagnostic validation only**
+- [x] **Step 3: Validate the exact runbook fault wrapper while connected**
 
-```powershell
-$validateRoot = Join-Path $parent $validateId
-$validateMap = Join-Path $validateRoot 'display-map.json'
-$validateReceipt = Join-Path $parent "$validateId.launcher-output.log"
-pwsh -NoProfile -File "$repo\scripts\start-show.ps1" `
-  -Mode ValidateOnly -RehearsalRoot $validateRoot -DisplayMapPath $validateMap `
-  -RunId $validateId -NetworkPolicy DiagnosticConnected 2>&1 |
-  Tee-Object -FilePath $validateReceipt
-if ($LASTEXITCODE -ne 0) { throw 'connected-validation-failed' }
-```
+  The frozen fault wrapper parsed without errors, required runbook SHA-256
+  `8a9e5f7b70a2bf473bf787353d65c7353ef4dbdaec70c814b2e67d619d8c2a17`, required exactly one
+  `Stop-Process -Id $janvimPid`, and failed closed with `offline-show-lease-not-ready` before the Show
+  lease existed. The wrapper reads its Run ID and roots from the handoff rather than session state.
 
-Expected: one schema-1 ValidateOnly receipt with `exitCode: 0`. Do not use this diagnostic root for
-Show.
+- [x] **Step 4: Disconnect networking, inject the exact JanVim fault, and stop normally**
 
-- [ ] **Step 3: Preload the exact runbook block while connected**
+  The launch wrapper rejected a connected preflight without creating a receipt or consuming the
+  fresh root. With Wi-Fi, Ethernet, and tunnel routes disconnected, the operator started Show,
+  injected the exact-identity JanVim fault during the initial prompt, observed recovery, and stopped
+  through the local control surface. Window A returned `OFFLINE_SHOW_EXIT_CODE:0`.
 
-In operator window B, retain the exact `$showId` printed by Step 1 and run:
+- [x] **Step 5: Confirm one complete recovered loop by human observation**
 
-```powershell
-$repo = 'D:\github\JanVim-Exhibition-2026\.worktrees\task1'
-$parent = 'D:\VirtualData\JanVim-Exhibition-Rehearsals'
-$runId = $showId
-$root = Join-Path $parent $runId
-$runbook = Join-Path $repo 'docs\operations\rehearsal-runbook.md'
-$expectedRunbookHash = '8a9e5f7b70a2bf473bf787353d65c7353ef4dbdaec70c814b2e67d619d8c2a17'
+  The operator explicitly confirmed all four required observations on 2026-09-02:
 
-$actualRunbookHash =
-  (Get-FileHash -Algorithm SHA256 $runbook).Hash.ToLowerInvariant()
-if ($actualRunbookHash -cne $expectedRunbookHash) {
-  throw 'runbook-hash-mismatch'
-}
+  - exactly one replacement JanVim window returned;
+  - the secondary remained an artwork-safe surface with no terminal or desktop exposure;
+  - the replacement began from the complete original poem;
+  - one write-back completed and reset without residual generated text.
 
-$lines = [IO.File]::ReadAllLines($runbook)
-$start = [Array]::IndexOf($lines, '# block: fault-janvim')
-if ($start -lt 0) { throw 'fault-janvim-marker-missing' }
-$end = -1
-for ($index = $start + 1; $index -lt $lines.Count; $index += 1) {
-  if ($lines[$index] -ceq '```') {
-    $end = $index
-    break
-  }
-}
-if ($end -lt 0) { throw 'fault-janvim-fence-missing' }
+- [x] **Step 6: Verify durable evidence and process cleanup**
 
-$code = [string]::Join(
-  [Environment]::NewLine,
-  $lines[$start..($end - 1)]
-)
-$tokens = $null
-$parseErrors = $null
-[void][Management.Automation.Language.Parser]::ParseInput(
-  $code,
-  [ref]$tokens,
-  [ref]$parseErrors
-)
-if ($parseErrors.Count -ne 0) { throw 'fault-janvim-parse-failed' }
-if (
-  ([regex]::Matches($code, 'Stop-Process\b')).Count -ne 1 -or
-  ([regex]::Matches($code, 'Stop-Process\s+-Id\s+\$janvimPid')).Count -ne 1
-) {
-  throw 'fault-janvim-stop-target-invalid'
-}
+  The frozen verifier returned `outcome: pass` for
+  `g3-p0-final-offline-20260902-013534-fault`: two completed post-recovery loops, recovery generation
+  2, four offline samples, zero online samples, and reset SHA-256
+  `b699de273f5bbaedb08241495f52ce863d3e8e1851275ce3b6251484d75190a8`. It also proved terminal
+  reason `operator-stop`, exactly one JanVim recovery at attempt 1 after 1000 ms, no incident, no run
+  lease, no runtime-count growth, no owned process residue, `acceptanceScope: monitor-simulation`,
+  and `physicalProjectorsTested: false`.
 
-$faultJanVim = [scriptblock]::Create($code)
-'JanVim fault block loaded but not executed.'
-```
-
-Do not execute `$faultJanVim` while connected.
-
-- [ ] **Step 4: Disconnect networking and run Show**
-
-In operator window A, after physically disconnecting Wi-Fi/Ethernet:
-
-```powershell
-$runId = $showId
-$root = Join-Path $parent $runId
-$map = Join-Path $root 'display-map.json'
-$receipt = Join-Path $parent "$runId.launcher-output.log"
-pwsh -NoProfile -File "$repo\scripts\start-show.ps1" `
-  -Mode Show -RehearsalRoot $root -DisplayMapPath $map `
-  -RunId $runId -NetworkPolicy OfflineRequired 2>&1 |
-  Tee-Object -FilePath $receipt
-$showExitCode = $LASTEXITCODE
-```
-
-Click Start Show once. During the initial prompt and before the first editor write, execute exactly
-`& $faultJanVim` in operator window B. Do not close either surface during the recovery interval.
-
-- [ ] **Step 5: Observe one complete recovered loop and stop normally**
-
-Require all of these observations before clicking Stop Show after the recovered loop reset:
-
-- the old JanVim frontend disappears and one replacement window returns;
-- the secondary remains artwork-safe with no terminal or desktop exposure;
-- the replacement begins with the complete original poem;
-- no old-generation text writes back;
-- the fresh loop writes once and resets to the original poem without residue.
-
-Reconnect only after operator window A returns.
-
-- [ ] **Step 6: Verify durable evidence and process cleanup**
-
-Parse `controller-terminal.json` and `show-run.json`. Require:
-
-- launcher and terminal success with reason `operator-stop`;
-- `offlineVerified: true` and zero online samples;
-- at least one completed post-recovery loop;
-- exactly one retained `recoveries` entry for domain `janvim`, attempt 1, delay 1000, outcome
-  `recovered`, and a generation greater than 1;
-- original-poem reset SHA-256
-  `b699de273f5bbaedb08241495f52ce863d3e8e1851275ce3b6251484d75190a8`;
-- no incident, no run lease, no runtime-count growth, and no process whose creation identity belongs
-  to the retry;
-- `acceptanceScope: monitor-simulation` and `physicalProjectorsTested: false`.
-
-If any item fails, preserve the root unchanged and return to systematic debugging. If all machine
-and human checks pass, mark only the JanVim recovery subgate complete; the independent normal Stop
-Show run and G4 remain pending.
+The parent-exit recovery plan and the dual-monitor P0 acceptance are complete. The original G4
+physical-projector rehearsal remains a separate display-hardware activity and is intentionally not
+claimed by this monitor-simulation evidence.
