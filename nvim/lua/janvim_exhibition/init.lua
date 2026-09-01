@@ -50,7 +50,7 @@ function M.setup(options)
   local schedule = options.schedule or vim.schedule
   local defer = options.defer or vim.defer_fn
   local exit_backend = options.exit_backend or function()
-    vim.cmd("qaall!")
+    vim.cmd("qall!")
   end
   assert(type(parent_alive) == "function", "JanVim parent liveness check is required")
   assert(type(schedule) == "function", "Neovim scheduler is required")

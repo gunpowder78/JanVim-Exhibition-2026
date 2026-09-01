@@ -6,6 +6,7 @@
 - Parent design: `docs/superpowers/specs/2026-08-29-task9-recovery-offline-soak-design.md`
 - Failed rehearsal: `g3-janvim-fault-20260831-221012`
 - Parent-recheck race rehearsal: `g3-janvim-fault-20260901-035135`
+- Invalid backend-exit command rehearsal: `g3-janvim-fault-20260901-045910`
 
 ## 1. Problem and evidence
 
@@ -99,7 +100,7 @@ may race Windows process-object retirement after the frontend `exit`, so a live 
 starts one finite chain of at most 20 rechecks at fixed 100 ms intervals:
 
 - if the parent is absent, the agent schedules one fixed backend-exit callback after ACK handling;
-  production wiring performs only the hard-coded Neovim exit operation;
+  production wiring performs only the hard-coded `vim.cmd("qall!")` Neovim exit operation;
 - if a recheck reports the parent absent, the same one fixed callback runs and the remaining chain
   stops;
 - if all 20 rechecks remain live or uncertain, the chain stops without exiting the backend.
@@ -158,6 +159,8 @@ Add agent tests with injected parent-liveness and fixed backend-exit callbacks. 
 - duplicate deferred callbacks cannot probe or exit twice;
 - duplicate shutdown cannot schedule a second exit;
 - shutdown with any user string remains rejected and cannot close or exit anything.
+- the production default backend-exit callback passes literal `qall!` to `vim.cmd`; the invalid
+  spelling `qaall!` must fail the test before implementation.
 
 ### 5.3 Verification
 

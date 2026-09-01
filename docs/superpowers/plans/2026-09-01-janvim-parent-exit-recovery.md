@@ -54,7 +54,7 @@ Vitest 4.1.11, Neovim 0.10.1 Lua/libuv, PowerShell 7.
 - In production, `parent_pid` is captured once with `uv.os_getppid()`. Liveness is `true` only
   when `uv.kill(pid, 0)` returns `0`, `false` only when its error name is exactly `ESRCH`, and
   `nil` for every other result or thrown probe error. `exit_backend` is the fixed
-  `vim.cmd("qaall!")` operation.
+  `vim.cmd("qall!")` operation.
 
 - [ ] **Step 1: Add a failing connection-level test for ACK-before-exit**
 
@@ -137,7 +137,7 @@ local parent_alive = options.parent_alive or function(pid)
 end
 local schedule = options.schedule or vim.schedule
 local exit_backend = options.exit_backend or function()
-  vim.cmd("qaall!")
+  vim.cmd("qall!")
 end
 ```
 
@@ -452,6 +452,26 @@ amendment on 2026-09-01.
   finite recheck and exhaustion remains fail-closed.
 - [ ] Synchronize only `nvim/lua/janvim_exhibition/init.lua` to the ignored prepared runtime, rerun
   all repository gates, request independent review, and repeat Task 4 from new external roots.
+
+---
+
+### Task 3B: Correct the fixed Neovim backend-exit command found by the repeated fault rehearsal
+
+The fresh offline run `g3-janvim-fault-20260901-045910` again reached recovery but retained its
+Neovim backend and failed with `old-session-unsettled`. A real-Neovim minimal reproduction proved
+that the plan-prescribed `qaall!` text is not an Ex command (`E492`). The surrounding `pcall`
+correctly prevented an uncontrolled Lua exception, but also made the misspelling visible only as a
+backend that never exited. The valid hard-coded command is `qall!`.
+
+- [x] Add a deterministic RED test that uses the production default `exit_backend`, captures its
+  exact `vim.cmd` argument, and requires literal `qall!` after confirmed parent absence.
+- [x] Change only the hard-coded default command from `qaall!` to `qall!`; retain ACK ordering,
+  parent proof, finite rechecks, one-shot scheduling, and parameter-free protocol behavior.
+- [x] Run the Lua suite and one real headless-Neovim callback proving `qall!` exits with code 0;
+  synchronize the prepared runtime and invalidate its generated Lua bytecode cache before the next
+  rehearsal.
+- [ ] Rerun all repository gates, request independent review, and repeat Task 4 once from fresh
+  external evidence roots after the operator is available.
 
 ---
 

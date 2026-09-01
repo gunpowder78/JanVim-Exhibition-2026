@@ -369,7 +369,7 @@ local function new_connection_fixture(options)
     self.closed = true
   end
 
-  local connection = exhibition.setup({
+  local setup_options = {
     port = 32123,
     token = TOKEN,
     uv = {
@@ -400,8 +400,11 @@ local function new_connection_fixture(options)
     end,
     parent_pid = options.parent_pid or 7628,
     parent_alive = options.parent_alive,
-    exit_backend = options.exit_backend or function() end,
-  })
+  }
+  if not options.use_default_exit_backend then
+    setup_options.exit_backend = options.exit_backend or function() end
+  end
+  local connection = exhibition.setup(setup_options)
 
   return {
     connection = connection,
@@ -442,6 +445,36 @@ run("shutdown flushes its ack before one orphan backend exit", function()
   complete_write(nil)
   equal(exit_count, 1)
   fixture.connection:close()
+end)
+
+run("shutdown default backend exit uses the valid qall command", function()
+  local commands = {}
+  local original_cmd = vim.cmd
+  vim.cmd = function(command_text)
+    table.insert(commands, command_text)
+  end
+  local fixture
+  local ok, err = xpcall(function()
+    fixture = new_connection_fixture({
+      use_default_exit_backend = true,
+      parent_alive = function()
+        return false
+      end,
+    })
+
+    fixture.fake_tcp.reader(nil, vim.json.encode(command(
+      "cue-default-backend-exit",
+      { type = "shutdown" }
+    )) .. "\n")
+    assert(fixture.writes[2].callback)(nil)
+  end, debug.traceback)
+  vim.cmd = original_cmd
+  if not ok then
+    error(err, 0)
+  end
+
+  equal(commands, { "qall!" })
+  assert(fixture).connection:close()
 end)
 
 run("shutdown rechecks a briefly live parent and exits once after ESRCH", function()
