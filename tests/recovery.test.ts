@@ -1138,6 +1138,7 @@ type PowerShellAstCommand = {
 
 type PowerShellAstMemberInvocation = {
   name: string;
+  text: string;
   startOffset: number;
   endOffset: number;
 };
@@ -1178,6 +1179,7 @@ $summaries = foreach ($item in @($payload)) {
     }, $true) | ForEach-Object {
         [pscustomobject]@{
             name = $_.Member.Extent.Text
+            text = $_.Extent.Text
             startOffset = $_.Extent.StartOffset
             endOffset = $_.Extent.EndOffset
         }
@@ -1391,6 +1393,7 @@ function expectTextOrder(block: string, markers: readonly string[]): void {
 
 const safePowerShellCommands = new Set(
   [
+    "Add-Type",
     "Assert-ExactPropertySet",
     "Assert-NoDuplicateJsonProperties",
     "Complete-StrictControllerLogRecord",
@@ -1428,7 +1431,9 @@ const safePowerShellMembers = new Set(
     "Equals",
     "GetDirectoryName",
     "GetFullPath",
+    "GetWindowThreadProcessId",
     "IsNullOrWhiteSpace",
+    "IsWindow",
     "new",
     "Open",
     "Parse",
@@ -1462,6 +1467,118 @@ function unsafePowerShellAstReasons(summary: PowerShellAstSummary): string[] {
         : ["member:" + member.name],
     ),
   ];
+}
+
+const expectedJanVimFaultInteropSource = String.raw`@'
+using System;
+using System.Runtime.InteropServices;
+
+public static class JanVimExhibitionFaultWindowV1
+{
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool IsWindow(IntPtr window);
+
+    [DllImport("user32.dll")]
+    public static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
+}
+'@`;
+
+function normalizePowerShellExtent(value: string): string {
+  return value.replace(/\r\n?/gu, "\n").replace(/\s+/gu, " ").trim();
+}
+
+function expectJanVimFaultInteropTopology(
+  blocks: ReadonlyMap<string, string>,
+  summaries: ReadonlyMap<string, PowerShellAstSummary>,
+): void {
+  const addTypeCommands = [...summaries.entries()].flatMap(([key, summary]) =>
+    commandsNamed(summary, "Add-Type").map((command) => ({ key, command })),
+  );
+  expect(addTypeCommands).toHaveLength(1);
+  expect(addTypeCommands[0]!.key).toBe("JanVim Fault:fault-janvim");
+  expect(addTypeCommands[0]!.command.elements).toHaveLength(3);
+  expect(addTypeCommands[0]!.command.elements.slice(0, 2)).toEqual([
+    "Add-Type",
+    "-TypeDefinition",
+  ]);
+  expect(
+    addTypeCommands[0]!.command.elements[2]!.replace(/\r\n?/gu, "\n"),
+  ).toBe(expectedJanVimFaultInteropSource);
+
+  const interopMemberNames = new Set([
+    "iswindow",
+    "getwindowthreadprocessid",
+  ]);
+  const interopInvocations = [...summaries.entries()].flatMap(
+    ([key, summary]) =>
+      summary.memberInvocations.flatMap((member) =>
+        interopMemberNames.has(member.name.toLowerCase())
+          ? [{ key, member }]
+          : [],
+      ),
+  );
+  expect(
+    interopInvocations.map(({ key, member }) => ({
+      key,
+      name: member.name,
+      text: normalizePowerShellExtent(member.text),
+    })),
+  ).toEqual([
+    {
+      key: "JanVim Fault:fault-janvim",
+      name: "IsWindow",
+      text: "[JanVimExhibitionFaultWindowV1]::IsWindow($leaseWindow)",
+    },
+    {
+      key: "JanVim Fault:fault-janvim",
+      name: "GetWindowThreadProcessId",
+      text: normalizePowerShellExtent(
+        String.raw`[JanVimExhibitionFaultWindowV1]::GetWindowThreadProcessId(
+        $leaseWindow,
+        [ref]$leaseWindowOwnerPid
+    )`,
+      ),
+    },
+  ]);
+
+  const janvimFaultBlock = blocks.get("JanVim Fault:fault-janvim")!;
+  expect(janvimFaultInteropSource(janvimFaultBlock)).toBe(
+    expectedJanVimFaultInteropSource,
+  );
+}
+
+function singleJanVimFaultBlock(block: string): ReadonlyMap<string, string> {
+  const key = "JanVim Fault:fault-janvim";
+  return new Map([[key, block]]);
+}
+
+function janvimFaultInteropSource(block: string): string {
+  const match = /Add-Type -TypeDefinition (?<source>@'[\s\S]*?\n'@)/u.exec(
+    block,
+  );
+  if (match?.groups?.source === undefined) {
+    throw new Error("JanVim fault Add-Type source is missing");
+  }
+  return match.groups.source;
+}
+
+function expectJanVimFaultInteropMutationRejected(block: string): void {
+  const blocks = singleJanVimFaultBlock(block);
+  const summaries = parsePowershellAst(blocks);
+  const summary = summaries.get("JanVim Fault:fault-janvim")!;
+  expect(summary.parseErrors).toEqual([]);
+  expect(commandsNamed(summary, "Add-Type")).toHaveLength(1);
+  expect(
+    summary.memberInvocations.filter((member) =>
+      ["iswindow", "getwindowthreadprocessid"].includes(
+        member.name.toLowerCase(),
+      ),
+    ),
+  ).toHaveLength(2);
+  expect(() =>
+    expectJanVimFaultInteropTopology(blocks, summaries),
+  ).toThrow();
 }
 
 function markdownCells(row: string): string[] {
@@ -1536,6 +1653,19 @@ interface SecondaryFaultContractResult {
   readonly error: string | null;
   readonly stoppedPids: readonly number[];
 }
+
+interface JanVimFaultContractResult {
+  readonly ok: boolean;
+  readonly error: string | null;
+  readonly expectedJanVimPid: number;
+  readonly stoppedPids: readonly number[];
+}
+
+type JanVimFaultContractMode =
+  | "valid"
+  | "destroyed-hwnd"
+  | "wrong-owner"
+  | "type-collision";
 
 function runSecondaryFaultContract(
   records: readonly Record<string, unknown>[],
@@ -1635,7 +1765,251 @@ catch {
   }
 }
 
+function runJanVimFaultContractWithDistinctHelperWindow(
+  mode: JanVimFaultContractMode = "valid",
+): JanVimFaultContractResult {
+  const runbook = readFileSync(runbookPath, "utf8");
+  const janvim = powershellBlocks(
+    markdownSections(runbook).get("JanVim Fault")!,
+  ).get("fault-janvim")!;
+  const encodedJanVim = Buffer.from(janvim, "utf8").toString("base64");
+  const root = mkdtempSync(join(tmpdir(), "janvim-r3-janvim-fault-"));
+
+  const wrapper = `
+$repo = $env:JANVIM_R3_REPOSITORY_ROOT
+$root = $env:JANVIM_R3_ROOT
+$runId = 'show-001'
+$controllerStartedAtUtc = '2026-09-01T00:00:00.000Z'
+$janvimStartedAtUtc = '2026-09-01T00:00:00.500Z'
+$leaseJanVimPid = if ($env:JANVIM_R3_FAULT_MODE -ceq 'wrong-owner') {
+    [int]1
+}
+else {
+    $PID
+}
+$janvimExecutable = [IO.Path]::GetFullPath(
+    (Join-Path $repo 'runtime\\janvim\\janvim-core.exe')
+)
+$script:StoppedPids = [Collections.Generic.List[int]]::new()
+
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+public static class JanVimFaultContractWindowHostV1
+{
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern IntPtr CreateWindowExW(
+        uint extendedStyle,
+        string className,
+        string windowName,
+        uint style,
+        int x,
+        int y,
+        int width,
+        int height,
+        IntPtr parent,
+        IntPtr menu,
+        IntPtr instance,
+        IntPtr parameter
+    );
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool DestroyWindow(IntPtr window);
+
+    public static IntPtr Create(int width, int height)
+    {
+        return CreateWindowExW(
+            0,
+            "STATIC",
+            "JanVim fault contract",
+            0,
+            0,
+            0,
+            width,
+            height,
+            IntPtr.Zero,
+            IntPtr.Zero,
+            IntPtr.Zero,
+            IntPtr.Zero
+        );
+    }
+}
+'@
+
+$helperWindow = [JanVimFaultContractWindowHostV1]::Create(0, 0)
+$leaseWindow = [JanVimFaultContractWindowHostV1]::Create(320, 200)
+if (
+    $helperWindow -eq [IntPtr]::Zero -or
+    $leaseWindow -eq [IntPtr]::Zero -or
+    $helperWindow -eq $leaseWindow
+) {
+    throw 'fault-contract-window-create-failed'
+}
+
+$lease = [ordered]@{
+    schema = 1
+    runId = $runId
+    controllerRunId = 'controller-001'
+    generationId = 1
+    controller = [ordered]@{
+        pid = 8001
+        startedAtUtc = $controllerStartedAtUtc
+    }
+    janvim = [ordered]@{
+        pid = $leaseJanVimPid
+        startedAtUtc = $janvimStartedAtUtc
+        hwnd = ('0x{0:X16}' -f $leaseWindow.ToInt64())
+        executableRelativePath = 'janvim-core.exe'
+        executableSha256 =
+            '224b3457d89fbc6cf946359683632f29f9262bae08b6f0d2e3043a3a7a6d83b3'
+    }
+}
+$lease | ConvertTo-Json -Depth 8 |
+    Set-Content -LiteralPath (Join-Path $root 'run-lease.json') -Encoding utf8NoBOM
+
+function global:Get-Process {
+    param([int]$Id, [object]$ErrorAction)
+    $startedAtUtc = if ($Id -eq 8001) {
+        $controllerStartedAtUtc
+    }
+    elseif ($Id -eq $leaseJanVimPid) {
+        $janvimStartedAtUtc
+    }
+    else {
+        throw "unexpected-process-id:$Id"
+    }
+    $candidate = [pscustomobject]@{
+        Handle = [IntPtr]1
+        StartTime = [DateTimeOffset]::Parse($startedAtUtc).UtcDateTime
+        Path = $janvimExecutable
+        MainWindowHandle = $helperWindow
+    }
+    $candidate | Add-Member -MemberType ScriptMethod -Name Dispose -Value { }
+    return $candidate
+}
+
+function global:Stop-Process {
+    param([int]$Id)
+    [void]$script:StoppedPids.Add($Id)
+}
+
+$faultCode = [Text.Encoding]::UTF8.GetString(
+    [Convert]::FromBase64String($env:JANVIM_R3_FAULT_BLOCK_BASE64)
+)
+$faultJanVim = [scriptblock]::Create($faultCode)
+if ($env:JANVIM_R3_FAULT_MODE -ceq 'type-collision') {
+    Add-Type -TypeDefinition @'
+using System;
+
+public static class JanVimExhibitionFaultWindowV1
+{
+    public static bool IsWindow(IntPtr window)
+    {
+        return true;
+    }
+
+    public static uint GetWindowThreadProcessId(IntPtr window, out uint processId)
+    {
+        processId = (uint)System.Diagnostics.Process.GetCurrentProcess().Id;
+        return 1;
+    }
+}
+'@
+}
+if ($env:JANVIM_R3_FAULT_MODE -ceq 'destroyed-hwnd') {
+    if (-not [JanVimFaultContractWindowHostV1]::DestroyWindow($leaseWindow)) {
+        throw 'fault-contract-window-destroy-failed'
+    }
+}
+
+try {
+    try {
+        & $faultJanVim
+        [ordered]@{
+            ok=$true
+            error=$null
+            expectedJanVimPid=$leaseJanVimPid
+            stoppedPids=@($script:StoppedPids)
+        } |
+            ConvertTo-Json -Compress
+    }
+    catch {
+        [ordered]@{
+            ok=$false
+            error=$_.Exception.Message
+            expectedJanVimPid=$leaseJanVimPid
+            stoppedPids=@($script:StoppedPids)
+        } |
+            ConvertTo-Json -Compress
+    }
+}
+finally {
+    [void][JanVimFaultContractWindowHostV1]::DestroyWindow($leaseWindow)
+    [void][JanVimFaultContractWindowHostV1]::DestroyWindow($helperWindow)
+}
+`;
+
+  try {
+    const result = spawnSync(
+      "pwsh",
+      ["-NoProfile", "-NonInteractive", "-Command", wrapper],
+      {
+        cwd: repositoryRoot,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          JANVIM_R3_FAULT_BLOCK_BASE64: encodedJanVim,
+          JANVIM_R3_FAULT_MODE: mode,
+          JANVIM_R3_REPOSITORY_ROOT: repositoryRoot,
+          JANVIM_R3_ROOT: root,
+        },
+        maxBuffer: 1024 * 1024,
+        timeout: 10_000,
+        windowsHide: true,
+      },
+    );
+    if (result.error !== undefined) throw result.error;
+    if (result.status !== 0) {
+      throw new Error(`JanVim fault contract failed: ${result.stderr}`);
+    }
+    const output = result.stdout.trim();
+    if (output.length === 0) {
+      throw new Error("JanVim fault contract returned no result");
+    }
+    return JSON.parse(output) as JanVimFaultContractResult;
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
 describe("Task 9 recovery operations", () => {
+  it("pins the byte-hashed rehearsal runbook to LF in every checkout", () => {
+    const result = spawnSync(
+      "git",
+      [
+        "check-attr",
+        "text",
+        "eol",
+        "--",
+        "docs/operations/rehearsal-runbook.md",
+      ],
+      {
+        cwd: repositoryRoot,
+        encoding: "utf8",
+        windowsHide: true,
+      },
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout.trim().split(/\r?\n/u)).toEqual([
+      "docs/operations/rehearsal-runbook.md: text: set",
+      "docs/operations/rehearsal-runbook.md: eol: lf",
+    ]);
+  });
+
   it("requires bounded, observable operator documents", () => {
     const runbook = readFileSync(runbookPath, "utf8");
     const incidentTemplate = readFileSync(incidentTemplatePath, "utf8");
@@ -1722,7 +2096,10 @@ describe("Task 9 recovery operations", () => {
     } as const;
     for (const [section, contracts] of Object.entries(sectionContracts)) {
       const body = runbookSections.get(section)!;
-      for (const contract of contracts) expect(body).toContain(contract);
+      const normalizedBody = body.replace(/\s+/gu, " ");
+      for (const contract of contracts) {
+        expect(normalizedBody).toContain(contract.replace(/\s+/gu, " "));
+      }
     }
 
     const incidentSections = markdownSections(incidentTemplate);
@@ -2048,6 +2425,52 @@ describe("Task 9 recovery operations", () => {
     }
   }, 10_000);
 
+  it("faults the leased JanVim window owner even when a helper is reported as MainWindowHandle", () => {
+    const result = runJanVimFaultContractWithDistinctHelperWindow();
+
+    expect(result.ok, result.error ?? undefined).toBe(true);
+    expect(result.expectedJanVimPid).toBeGreaterThan(0);
+    expect(result.error).toBeNull();
+    expect(result.stoppedPids).toEqual([result.expectedJanVimPid]);
+  }, 10_000);
+
+  it("fails closed when the leased JanVim HWND no longer exists", () => {
+    const result = runJanVimFaultContractWithDistinctHelperWindow(
+      "destroyed-hwnd",
+    );
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: "janvim-hwnd-identity-mismatch",
+      stoppedPids: [],
+    });
+  }, 10_000);
+
+  it("fails closed when a live leased HWND belongs to a different PID", () => {
+    const result = runJanVimFaultContractWithDistinctHelperWindow(
+      "wrong-owner",
+    );
+
+    expect(result.expectedJanVimPid).toBe(1);
+    expect(result).toMatchObject({
+      ok: false,
+      error: "janvim-hwnd-identity-mismatch",
+      stoppedPids: [],
+    });
+  }, 10_000);
+
+  it("fails closed when the reviewed interop type is already loaded", () => {
+    const result = runJanVimFaultContractWithDistinctHelperWindow(
+      "type-collision",
+    );
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: "janvim-window-interop-type-conflict",
+      stoppedPids: [],
+    });
+  }, 10_000);
+
   it("mirrors safe lease, event, token, and complete frozen artifact-lock schemas", () => {
     const sections = markdownSections(readFileSync(runbookPath, "utf8"));
     const faults = [
@@ -2250,6 +2673,61 @@ describe("Task 9 recovery operations", () => {
     ).toThrow();
   });
 
+  it("rejects an extra Add-Type parameter in the JanVim fault interop contract", () => {
+    const block = allPowershellBlocks(readFileSync(runbookPath, "utf8")).get(
+      "JanVim Fault:fault-janvim",
+    )!;
+    const mutatedBlock = block.replace(
+      "Add-Type -TypeDefinition @'",
+      "Add-Type -IgnoreWarnings -TypeDefinition @'",
+    );
+    expect(mutatedBlock).not.toBe(block);
+    expectJanVimFaultInteropMutationRejected(mutatedBlock);
+  });
+
+  it("rejects opaque managed code in the JanVim fault interop contract", () => {
+    const block = allPowershellBlocks(readFileSync(runbookPath, "utf8")).get(
+      "JanVim Fault:fault-janvim",
+    )!;
+    const source = janvimFaultInteropSource(block);
+    const mutatedSource = source.replace(
+      "public static class JanVimExhibitionFaultWindowV1\n{",
+      [
+        "public static class JanVimExhibitionFaultWindowV1",
+        "{",
+        "    static JanVimExhibitionFaultWindowV1()",
+        "    {",
+        "        Environment.FailFast(\"unexpected managed code\");",
+        "    }",
+      ].join("\n"),
+    );
+    expect(mutatedSource).not.toBe(source);
+    expectJanVimFaultInteropMutationRejected(
+      block.replace(source, mutatedSource),
+    );
+  });
+
+  it("rejects an extra PInvoke in the JanVim fault interop contract", () => {
+    const block = allPowershellBlocks(readFileSync(runbookPath, "utf8")).get(
+      "JanVim Fault:fault-janvim",
+    )!;
+    const source = janvimFaultInteropSource(block);
+    const mutatedSource = source.replace(
+      "public static class JanVimExhibitionFaultWindowV1\n{",
+      [
+        "public static class JanVimExhibitionFaultWindowV1",
+        "{",
+        "    [DllImport(\"kernel32.dll\")]",
+        "    public static extern void ExitProcess(uint exitCode);",
+        "",
+      ].join("\n"),
+    );
+    expect(mutatedSource).not.toBe(source);
+    expectJanVimFaultInteropMutationRejected(
+      block.replace(source, mutatedSource),
+    );
+  });
+
   it("allowlists parsed commands and enforces exact launcher and PID-stop topology", () => {
     const malicious = parsePowershellAst(
       new Map([
@@ -2291,6 +2769,7 @@ describe("Task 9 recovery operations", () => {
       expect(summary.parseErrors, key).toEqual([]);
       expect(unsafePowerShellAstReasons(summary), key).toEqual([]);
     }
+    expectJanVimFaultInteropTopology(blocks, summaries);
 
     const launchers = new Map<string, string[]>([
       [
@@ -2410,6 +2889,10 @@ describe("Task 9 recovery operations", () => {
       "Stop-Process -Id $rendererPid",
     ]);
     expectTextOrder(blocks.get("JanVim Fault:fault-janvim")!, [
+      "$windowInteropTypeName = 'JanVimExhibitionFaultWindowV1'",
+      "$null -ne ($windowInteropTypeName -as [type])",
+      "Add-Type -TypeDefinition",
+      "$null -eq ($windowInteropTypeName -as [type])",
       "$lease.generationId -gt 9007199254740991",
       "Test-LowerSha256 -Value $artifactLock.pluginLabConfigSha256",
       "$janvimExecutableItem.Length -ne $artifactLock.coreBytes",
@@ -2417,7 +2900,10 @@ describe("Task 9 recovery operations", () => {
       "Get-Process -Id $janvimPid -ErrorAction Stop",
       "$actualJanVimStartTicks",
       "$actualJanVimPath",
-      "$actualHwnd",
+      "$expectedHwnd",
+      "[JanVimExhibitionFaultWindowV1]::IsWindow($leaseWindow)",
+      "[JanVimExhibitionFaultWindowV1]::GetWindowThreadProcessId(",
+      "$leaseWindowOwnerPid -ne [uint32]$janvimPid",
       "Stop-Process -Id $janvimPid",
     ]);
     expectTextOrder(blocks.get("Controller Fault:fault-controller")!, [
@@ -2482,7 +2968,11 @@ describe("Task 9 recovery operations", () => {
       "$repo\\runtime\\janvim",
       "Get-Process -Id $janvimPid",
       "StartTime",
-      "MainWindowHandle",
+      "janvim-window-interop-type-conflict",
+      "Add-Type -TypeDefinition",
+      "janvim-window-interop-type-load-failed",
+      "IsWindow",
+      "GetWindowThreadProcessId",
       "Get-FileHash -LiteralPath $janvimExecutable",
       "coreBytes",
       "coreSha256",
@@ -2490,6 +2980,7 @@ describe("Task 9 recovery operations", () => {
     ]) {
       expect(janvim).toContain(contract);
     }
+    expect(janvim).not.toContain("MainWindowHandle");
     expect(processCommandLines(janvim, "Stop-Process")).toEqual([
       "Stop-Process -Id $janvimPid",
     ]);

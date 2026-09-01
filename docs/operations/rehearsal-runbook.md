@@ -709,11 +709,14 @@ Show and use G2 fallback.
 
 Precondition -> Show is running; the observer shell contains the exact active `$repo`, `$runId`,
 and `$root`; the token-free lease has the exact JanVim PID, HWND, start identity, and executable hash;
-an operator is watching both surfaces. Do not run this block during development or automated tests.
+the runspace has not previously loaded the fixed interop type; an operator is watching both
+surfaces. Do not run this block during development or automated tests.
 
 Exact command/action -> read a bounded strict lease and artifact lock, prove the live controller
 and JanVim identities while holding their process handles, prove the immutable executable's
-direct-child path, byte size, and SHA-256, then perform the approved deliberate fault only against that exact JanVim identity by stopping only its PID:
+direct-child path, byte size, and SHA-256, require a fresh reviewed interop type, prove the leased
+HWND still belongs to that exact PID, then perform the approved deliberate fault only against that
+exact JanVim identity by stopping only its PID:
 
 ```powershell
 # block: fault-janvim
@@ -721,6 +724,30 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $maximumLeaseBytes = 4096
 $maximumArtifactLockBytes = 65536
+$windowInteropTypeName = 'JanVimExhibitionFaultWindowV1'
+
+if ($null -ne ($windowInteropTypeName -as [type])) {
+    throw 'janvim-window-interop-type-conflict'
+}
+
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+public static class JanVimExhibitionFaultWindowV1
+{
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool IsWindow(IntPtr window);
+
+    [DllImport("user32.dll")]
+    public static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
+}
+'@
+
+if ($null -eq ($windowInteropTypeName -as [type])) {
+    throw 'janvim-window-interop-type-load-failed'
+}
 
 function Read-BoundedUtf8Text {
     param(
@@ -1059,8 +1086,19 @@ try {
         throw 'janvim-process-path-mismatch'
     }
     $expectedHwnd = [Convert]::ToUInt64($lease.janvim.hwnd.Substring(2), 16)
-    $actualHwnd = [uint64]$janvimProcess.MainWindowHandle.ToInt64()
-    if ($actualHwnd -eq 0 -or $actualHwnd -ne $expectedHwnd) {
+    if ([IntPtr]::Size -ne 8 -or $expectedHwnd -gt [uint64][long]::MaxValue) {
+        throw 'janvim-hwnd-identity-invalid'
+    }
+    $leaseWindow = [IntPtr]::new([long]$expectedHwnd)
+    $leaseWindowOwnerPid = [uint32]0
+    if (-not [JanVimExhibitionFaultWindowV1]::IsWindow($leaseWindow)) {
+        throw 'janvim-hwnd-identity-mismatch'
+    }
+    [void][JanVimExhibitionFaultWindowV1]::GetWindowThreadProcessId(
+        $leaseWindow,
+        [ref]$leaseWindowOwnerPid
+    )
+    if ($leaseWindowOwnerPid -ne [uint32]$janvimPid) {
         throw 'janvim-hwnd-identity-mismatch'
     }
     Stop-Process -Id $janvimPid
@@ -1077,9 +1115,9 @@ later old editor cue.
 Machine evidence -> recovery evidence records the JanVim domain, old and new generations,
 original-poem reset hash, exact prior process identity, and bounded retry delay.
 
-Bounded failure branch -> any missing, malformed, stale, duplicate-field, reparse, path, process,
-window, byte-size, or hash mismatch aborts before the stop. After the fourth real failure the
-controller is safe-ready; Stop Show and use G2 fallback.
+Bounded failure branch -> any preloaded interop type or missing, malformed, stale,
+duplicate-field, reparse, path, process, window, byte-size, or hash mismatch aborts before the
+stop. After the fourth real failure the controller is safe-ready; Stop Show and use G2 fallback.
 
 ## Controller Fault
 

@@ -7,6 +7,8 @@
 - Failed rehearsal: `g3-janvim-fault-20260831-221012`
 - Parent-recheck race rehearsal: `g3-janvim-fault-20260901-035135`
 - Invalid backend-exit command rehearsal: `g3-janvim-fault-20260901-045910`
+- False-negative HWND identity rehearsal: `g3-janvim-fault-20260901-122615`
+- Cold offline network-snapshot rehearsal: `g3-p0-final-20260901-162225-fault`
 
 ## 1. Problem and evidence
 
@@ -25,6 +27,20 @@ The existing automated fixtures reproduced child death by emitting only `close`.
 represent a terminated parent whose descendant still held inherited streams, so they did not
 detect this defect.
 
+A later fresh offline fault attempt exposed an independent operator-procedure defect. The strict
+lease recorded the visible, unowned, nonzero-client-area HWND selected by the placement helper,
+but the fault block later compared it to `.NET Process.MainWindowHandle`. JanVim has a second
+zero-area helper top-level window, and `.NET` may select that helper. The fault therefore failed
+closed with `janvim-hwnd-identity-mismatch` even though the leased HWND remained valid: the same
+run's normal shutdown later posted close to that exact HWND and removed the lease successfully.
+
+After that proof was repaired, the next fresh offline attempt failed even earlier: the launcher
+accepted the offline network snapshot, but the controller exited with code 70 before creating a
+surface or lease. Its log records `network-snapshot-failed` in startup cleanup. The launcher
+explicitly imports the Windows networking modules and permits a finite five seconds; the
+controller depended on cold module auto-loading and killed the same bounded query after two
+seconds. Fully disconnected adapters exposed that inconsistent bound.
+
 ## 2. Goal and boundaries
 
 An unexpected JanVim frontend exit must immediately invalidate the current cue generation and
@@ -42,6 +58,8 @@ The repair must:
 - keep Electron main as the only show clock and generation owner;
 - keep every cleanup phase, retry, timer, and stream wait finite;
 - preserve normal Stop Show behavior when the JanVim frontend is still alive;
+- verify the exact leased HWND directly instead of asking `.NET` to select a different main
+  window;
 - retain failed rehearsal evidence and never reuse its directory.
 
 This repair does not add a Windows service, Job Object launcher, generic process-tree search,
@@ -110,6 +128,49 @@ Lua, shell, and unknown shutdown fields. A single failed or uncertain parent che
 as death; it consumes only one bounded recheck. Exhaustion still fails closed: the backend is not
 exited, `close` does not settle, and the controller enters bounded `safe-ready` rather than
 launching over an unproven old session.
+
+### 3.4 Lease HWND ownership proof
+
+The operator JanVim fault block retains its complete PID, creation-time, executable path,
+byte-size, and SHA-256 proof. It converts the already validated lease HWND to a 64-bit `IntPtr`,
+requires `IsWindow` to confirm that the handle still exists, and uses
+`GetWindowThreadProcessId` to require that the window owner is the exact already-proven JanVim
+PID. Only then may the single `Stop-Process -Id $janvimPid` execute.
+
+The block does not call `Process.MainWindowHandle`, enumerate windows, match titles, or choose a
+replacement HWND. Missing, out-of-range, destroyed, or differently owned handles fail closed
+before the stop.
+
+Because the operator preloads this block only after checking the complete runbook SHA-256, Git
+must check out `docs/operations/rehearsal-runbook.md` with LF bytes on every Windows machine. The
+automated safety contract accepts exactly one `Add-Type -TypeDefinition` command, the complete
+reviewed C# here-string, and exactly the two `IsWindow` and `GetWindowThreadProcessId` calls. Extra
+parameters, managed code, P/Invoke declarations, or interop calls are rejected before rehearsal.
+
+PowerShell 7 may reuse an already loaded type with the same name instead of compiling the reviewed
+source again. The block therefore requires that `JanVimExhibitionFaultWindowV1` is absent before
+`Add-Type` and present afterward. A preloaded same-name type fails closed before any lease or
+process action. Mutation tests parse the actual modified runbook block into a PowerShell AST; they
+do not substitute a synthetic command summary.
+
+### 3.5 Cold offline network snapshot
+
+The controller uses the same hardened PowerShell preamble as the launcher for network evidence:
+strict error and warning handling, silent information/progress streams, explicit `NetTCPIP` and
+`NetConnection` imports, and no profile or interactive shell. Its child process remains bounded at
+five seconds with the existing 16 KiB stdout/stderr caps. Route and profile collection caps,
+exact default-route classification, JSON schema validation, and fail-closed offline policy remain
+unchanged.
+
+Five seconds is not a retry or an added show delay: it is the maximum lifetime of one cold Windows
+network-module query. Normal completion returns immediately. The controller's ten-second cleanup
+phase bound remains larger than this child bound, so shutdown can still retain the final offline
+snapshot without leaving an unbounded child.
+
+Because this TypeScript change alters the compiled Electron main bundle, the launcher's reviewed
+release identity advances to exactly 451,940 bytes and SHA-256
+`aad1d8ab03a7bd7bff4d02530da24f832ed7a822cd4739f0c7f7f66a167c4727`. The existing strict
+module-graph and bundle-identity tests continue to reject any other bytes or hash.
 
 ## 4. Error handling and safety
 
@@ -181,6 +242,18 @@ git status --short
 The ignored prepared Plugin Lab runtime copy must be synchronized from the reviewed exhibition Lua
 source and verified without changing the immutable JanVim artifact hash.
 
+### 5.4 Operator-block RED
+
+Execute the real `fault-janvim` runbook block in a controlled PowerShell process that owns two
+distinct windows. Expose the helper window through the fake process object's
+`MainWindowHandle`, place the second window in the strict lease, and mock only the final
+`Stop-Process` side effect. The old block must fail with `janvim-hwnd-identity-mismatch` and stop
+nothing. The repaired block must prove the leased window's real owner and record exactly the
+expected JanVim PID as the only stop target. Destroying the leased window before invocation must
+produce the same fail-closed identity mismatch and record no stop. A live lease HWND owned by a
+different PID must also fail closed, and preloading the reviewed type name with alternate managed
+code must produce `janvim-window-interop-type-conflict`; neither case may record a stop.
+
 ## 6. Expected implementation surface
 
 The minimal expected files are:
@@ -188,13 +261,14 @@ The minimal expected files are:
 - `apps/controller/src/g2-runtime-adapters.ts`;
 - `apps/controller/src/show-runtime-adapters.ts`;
 - `apps/controller/tests/show-runtime-adapters.test.ts`;
+- `scripts/start-show.ps1` for the exact rebuilt Electron release identity;
+- `tests/electron-build-smoke.test.ts` for that frozen byte-size/SHA-256 contract;
 - `nvim/lua/janvim_exhibition/init.lua` and/or `actions.lua`;
 - `nvim/tests/agent_spec.lua`;
-- `tests/recovery.test.ts` only if the composed recovery contract needs an additional assertion;
+- `.gitattributes` for stable LF bytes on the hashed runbook;
+- `docs/operations/rehearsal-runbook.md` for the direct lease-HWND owner proof;
+- `tests/recovery.test.ts` for the executable operator-block regression and AST safety contract;
 - the ignored prepared runtime copy corresponding exactly to the committed exhibition Lua source.
-
-No schema or runbook change is expected unless a RED test proves the parameter-free contract or
-operator procedure is insufficient.
 
 ## 7. Acceptance
 

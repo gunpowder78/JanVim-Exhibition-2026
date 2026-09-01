@@ -123,6 +123,12 @@ const LOOP_ID_MAX_BYTES = 64;
 const LOOP_ID_HASH_CHARACTERS = 12;
 const NETWORK_SNAPSHOT_SCRIPT = [
   "$ErrorActionPreference='Stop'",
+  "$WarningPreference='Stop'",
+  "$InformationPreference='SilentlyContinue'",
+  "$ProgressPreference='SilentlyContinue'",
+  "Set-StrictMode -Version Latest",
+  "Import-Module -Name 'NetTCPIP' -ErrorAction Stop",
+  "Import-Module -Name 'NetConnection' -ErrorAction Stop",
   "$routes=@(Get-NetRoute -ErrorAction Stop|Select-Object -First 1025|ForEach-Object{[pscustomobject]@{State=[string]$_.State;DestinationPrefix=[string]$_.DestinationPrefix}})",
   "if($routes.Count -gt 1024){throw 'network-route-cap-exceeded'}",
   "$activeExternalRoutes=@($routes|Where-Object{$_.State -ceq 'Alive' -and ($_.DestinationPrefix -ceq '0.0.0.0/0' -or $_.DestinationPrefix -ceq '::/0')}).Count",
@@ -779,7 +785,7 @@ async function sampleNetwork(
     ["-NoProfile", "-NonInteractive", "-Command", NETWORK_SNAPSHOT_SCRIPT],
     {
       cwd: host.repositoryRoot,
-      timeoutMs: 2_000,
+      timeoutMs: 5_000,
       maxStdoutBytes: 16_384,
       maxStderrBytes: 16_384,
     },

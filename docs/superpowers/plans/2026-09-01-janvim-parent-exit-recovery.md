@@ -470,8 +470,70 @@ backend that never exited. The valid hard-coded command is `qall!`.
 - [x] Run the Lua suite and one real headless-Neovim callback proving `qall!` exits with code 0;
   synchronize the prepared runtime and invalidate its generated Lua bytecode cache before the next
   rehearsal.
-- [ ] Rerun all repository gates, request independent review, and repeat Task 4 once from fresh
+- [x] Rerun all repository gates, request independent review, and repeat Task 4 once from fresh
   external evidence roots after the operator is available.
+
+---
+
+### Task 3C: Correct the operator JanVim HWND identity proof
+
+**Files:**
+
+- Modify: `.gitattributes`
+- Modify: `docs/operations/rehearsal-runbook.md`
+- Modify: `tests/recovery.test.ts`
+
+The fresh offline run `g3-janvim-fault-20260901-122615` reached the exact JanVim fault block but
+failed closed with `janvim-hwnd-identity-mismatch`. All prior PID, creation-time, path, byte-size,
+and SHA-256 checks passed. The later normal Stop Show succeeded with `hwndClose: posted`,
+`janvimExit: natural`, and `leaseRemoved: true`, proving the leased HWND remained live and owned
+through shutdown. The fault block had selected a second window via `Process.MainWindowHandle`,
+despite the established placement rule that filters JanVim's zero-area helper window.
+
+- [x] Add a behavioral RED test that executes the real runbook block with two windows owned by one
+  exact PID: a helper exposed as `MainWindowHandle` and a distinct valid leased HWND. Require the
+  deliberate stop to target the leased window owner; confirm the old block fails with
+  `janvim-hwnd-identity-mismatch` and stops no PID.
+- [x] Replace only the `MainWindowHandle` comparison with direct Win32 `IsWindow` and
+  `GetWindowThreadProcessId` proof for the lease HWND. Retain every process, creation-time, path,
+  byte-size, hash, and single exact-PID stop check, and keep all mismatches fail closed before
+  `Stop-Process`.
+- [x] Confirm the same behavioral test is GREEN and stops only the expected exact JanVim PID.
+- [x] Pin the byte-hashed runbook to LF; require a fresh interop type before `Add-Type`, its presence
+  afterward, the complete reviewed source, and the exact Win32 invocation topology parsed from the
+  real block AST. Prove a destroyed HWND, a live HWND owned by another PID, and a preloaded
+  same-name type all fail closed without recording a stop.
+- [x] Run all repository gates, request independent review, and update the pinned runbook SHA-256.
+- [ ] Repeat Task 4 from new external evidence roots.
+
+---
+
+### Task 3D: Harden the controller's cold offline network snapshot
+
+**Files:**
+
+- Modify: `apps/controller/src/show-runtime-adapters.ts`
+- Modify: `apps/controller/tests/show-runtime-adapters.test.ts`
+- Modify: `scripts/start-show.ps1`
+- Modify: `tests/electron-build-smoke.test.ts`
+- Modify: `docs/superpowers/specs/2026-09-01-janvim-parent-exit-recovery-design.md`
+
+The fresh offline attempt `g3-p0-final-20260901-162225-fault` exited with code 70 before either
+show surface appeared and before the operator fault action ran. Its controller log records
+`network-snapshot-failed` during startup cleanup. The launcher's hardened five-second network
+snapshot had already passed, while the controller still relied on module auto-loading inside a
+two-second child-process bound.
+
+- [x] Add a RED adapter contract requiring the controller snapshot to load `NetTCPIP` and
+  `NetConnection` explicitly, suppress non-data streams, use strict mode, and retain a finite
+  five-second child-process bound. Confirm the old implementation fails on its two-second bound.
+- [x] Align only the controller snapshot preamble and timeout with the already proven launcher
+  sampler; retain route/profile caps, output caps, exact offline classification, and fail-closed
+  behavior.
+- [x] Rebuild the Electron main bundle and advance the launcher's reviewed byte-size/SHA-256 pair
+  to that exact build; retain the smoke test that rejects every other bundle identity.
+- [ ] Run all repository gates, request independent review, and repeat Task 4 from an entirely new
+  set of external evidence roots. Preserve the failed root and do not reuse its paired normal root.
 
 ---
 
@@ -486,7 +548,7 @@ backend that never exited. The valid hard-coded command is `qall!`.
 **Interfaces:**
 
 - Consumes: clean reviewed build, confirmed display IDs `1502331611` (primary) and `3192275084`
-  (secondary), and the unchanged exact-identity fault block.
+  (secondary), and the reviewed exact-identity fault block.
 - Produces: fresh ValidateOnly receipt, Show terminal/evidence records, one bounded JanVim recovery,
   and explicit human observations. It does not modify tracked files.
 
@@ -541,7 +603,7 @@ $parent = 'D:\VirtualData\JanVim-Exhibition-Rehearsals'
 $runId = $showId
 $root = Join-Path $parent $runId
 $runbook = Join-Path $repo 'docs\operations\rehearsal-runbook.md'
-$expectedRunbookHash = '042e1ccfd521176ecadeb490036054c5b0a2da34033872d3a36ca3470e372d9c'
+$expectedRunbookHash = '8a9e5f7b70a2bf473bf787353d65c7353ef4dbdaec70c814b2e67d619d8c2a17'
 
 $actualRunbookHash =
   (Get-FileHash -Algorithm SHA256 $runbook).Hash.ToLowerInvariant()

@@ -275,6 +275,22 @@ Set-StrictMode -Version Latest
 $payloadBytes = [Convert]::FromBase64String([Console]::In.ReadToEnd().Trim())
 $payloadText = [Text.UTF8Encoding]::new($false, $true).GetString($payloadBytes)
 $payload = $payloadText | ConvertFrom-Json -Depth 8
+$networkModuleImports = [Collections.Generic.List[string]]::new()
+
+function Import-Module {
+    param(
+        [string]$Name,
+        [string]$ErrorAction
+    )
+
+    if (
+        $Name -cnotin @('NetTCPIP', 'NetConnection') -or
+        $ErrorAction -cne 'Stop'
+    ) {
+        throw 'unexpected-network-module-import'
+    }
+    $networkModuleImports.Add($Name)
+}
 
 function Get-NetRoute {
     [CmdletBinding()]
@@ -321,7 +337,11 @@ function Get-NetConnectionProfile {
 
 $scriptBytes = [Convert]::FromBase64String($env:SHOW_TEST_NETWORK_SCRIPT_BASE64)
 $scriptText = [Text.UTF8Encoding]::new($false, $true).GetString($scriptBytes)
-& ([scriptblock]::Create($scriptText))
+$snapshotOutput = & ([scriptblock]::Create($scriptText))
+if (($networkModuleImports -join ',') -cne 'NetTCPIP,NetConnection') {
+    throw 'network-module-import-contract-mismatch'
+}
+$snapshotOutput
 `;
 
 function executeFakeNetworkSnapshot(
@@ -360,6 +380,38 @@ function executeFakeNetworkSnapshot(
         ? `${result.stderr ?? ""}\nfake-network-snapshot-timeout`
         : (result.stderr ?? ""),
   };
+}
+
+function expectHardenedNetworkSnapshotCommand(
+  args: readonly string[],
+  limits: {
+    timeoutMs: number;
+    maxStdoutBytes: number;
+    maxStderrBytes: number;
+  },
+): string {
+  expect(args).toContain("-NoProfile");
+  expect(args).toContain("-NonInteractive");
+  expect(limits).toMatchObject({
+    timeoutMs: 5_000,
+    maxStdoutBytes: 16_384,
+    maxStderrBytes: 16_384,
+  });
+  const commandIndex = args.indexOf("-Command");
+  const script = args[commandIndex + 1];
+  if (commandIndex < 0 || script === undefined) {
+    throw new Error("network snapshot command fixture is incomplete");
+  }
+  expect(script.split(";").slice(0, 7)).toEqual([
+    "$ErrorActionPreference='Stop'",
+    "$WarningPreference='Stop'",
+    "$InformationPreference='SilentlyContinue'",
+    "$ProgressPreference='SilentlyContinue'",
+    "Set-StrictMode -Version Latest",
+    "Import-Module -Name 'NetTCPIP' -ErrorAction Stop",
+    "Import-Module -Name 'NetConnection' -ErrorAction Stop",
+  ]);
+  return script;
 }
 
 function createValidationHarness(options: {
@@ -481,18 +533,7 @@ function createValidationHarness(options: {
       }
       if (args.some((argument) => argument.includes("Get-NetRoute"))) {
         trace.push("network-snapshot");
-        expect(args).toContain("-NoProfile");
-        expect(args).toContain("-NonInteractive");
-        expect(limits).toMatchObject({
-          timeoutMs: 2_000,
-          maxStdoutBytes: 16_384,
-          maxStderrBytes: 16_384,
-        });
-        const commandIndex = args.indexOf("-Command");
-        const script = args[commandIndex + 1];
-        if (commandIndex < 0 || script === undefined) {
-          throw new Error("network snapshot command fixture is incomplete");
-        }
+        const script = expectHardenedNetworkSnapshotCommand(args, limits);
         return executeFakeNetworkSnapshot(
           script,
           options.routes ?? [],
@@ -1008,6 +1049,7 @@ function createStartupHarness(options: {
       }
       if (args.some((argument) => argument.includes("Get-NetRoute"))) {
         trace.push("network-snapshot");
+        expectHardenedNetworkSnapshotCommand(args, limits);
         return {
           exitCode: 0,
           stdout: JSON.stringify({
