@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
   copyFileSync,
+  cpSync,
   existsSync,
   linkSync,
   mkdirSync,
@@ -347,6 +348,8 @@ interface LauncherFixture {
   showConfig: string;
   poem: string;
   manifest: string;
+  contentLock: string;
+  contentProfiles: string;
   artifactLock: string;
   janvimExecutable: string;
   checkedInMap: string;
@@ -1116,6 +1119,20 @@ function patchCopiedLauncherReleaseIdentity(
   );
 }
 
+function patchCopiedContentLockIdentity(script: string, contentLock: string): void {
+  const source = readFileSync(script, "utf8");
+  const bytes = statSync(contentLock).size;
+  const digest = sha256(contentLock);
+  const changed = source
+    .replace(/\$expectedContentLockBytes\s*=\s*\d+L/u, `$expectedContentLockBytes = ${bytes}L`)
+    .replace(
+      /\$expectedContentLockSha256\s*=\s*'[0-9a-f]{64}'/u,
+      `$expectedContentLockSha256 = '${digest}'`,
+    );
+  if (changed === source) throw new Error("fixture content lock identity was not patched");
+  writeText(script, changed);
+}
+
 function makeLauncherFixture(): LauncherFixture {
   if (!existsSync(productionScript)) {
     throw new Error(`production launcher missing: ${productionScript}`);
@@ -1196,6 +1213,11 @@ function makeLauncherFixture(): LauncherFixture {
   const showConfig = copyFixtureFile("show/janvim-show.toml", root);
   const poem = copyFixtureFile("content/fixture/poem.txt", root);
   const manifest = copyFixtureFile("content/fixture/show.manifest.json", root);
+  const contentLock = copyFixtureFile("content/p0.1/content-lock.json", root);
+  const contentProfiles = join(root, "content", "p0.1", "profiles");
+  cpSync(join(repositoryRoot, "content", "p0.1", "profiles"), contentProfiles, {
+    recursive: true,
+  });
   copyFixtureFile("runtime/user-root/plugin-lab/config/init.lua", root);
   const artifactLock = copyFixtureFile("janvim-artifact.lock.json", root);
   copyFixtureFile("scripts/verify-electron-module-graph.mjs", root);
@@ -1354,6 +1376,8 @@ function makeLauncherFixture(): LauncherFixture {
     showConfig,
     poem,
     manifest,
+    contentLock,
+    contentProfiles,
     artifactLock,
     janvimExecutable,
     checkedInMap,
@@ -2112,6 +2136,117 @@ async function startFakeJanVim(fixture: LauncherFixture): Promise<{
 }
 
 describe("offline show launcher and external watchdog", () => {
+  it("interprets one pinned bounded content lock instead of one manifest hash", () => {
+    const source = readFileSync(productionScript, "utf8");
+    expect(source).toMatch(/\$expectedContentLockSha256\s*=\s*'[0-9a-f]{64}'/u);
+    expect(source).toMatch(/content\\p0\.1\\content-lock\.json/u);
+    expect(source).toMatch(/content-lock-hash-mismatch/u);
+    expect(source).toMatch(/active-manifest-not-allowlisted/u);
+    expect(source).toMatch(/content-profile-reset-invalid/u);
+    expect(source).not.toMatch(/\$expectedManifestSha256\s*=/u);
+  });
+
+  it.each([
+    "p0-baseline",
+    "songfeng-source",
+    "river-channel",
+    "tower-codebook",
+  ])("validates the locked %s profile before Electron", (profile) => {
+    const fixture = makeLauncherFixture();
+    try {
+      copyFileSync(
+        join(fixture.contentProfiles, profile, "show.manifest.json"),
+        fixture.manifest,
+      );
+      const result = runLauncher(
+        fixture,
+        launcherArguments(fixture, "ValidateOnly"),
+        { behavior: "matching-success" },
+      );
+      expect(result.status, output(result)).toBe(0);
+      expect(invocations(fixture)).toHaveLength(1);
+    } finally {
+      fixture.cleanup();
+    }
+  }, 30_000);
+
+  it.each([
+    ["changed lock", "content-lock-hash-mismatch", "lock"],
+    ["unlisted active manifest", "active-manifest-not-allowlisted", "active"],
+    ["changed selected paper", "content-profile-paper-invalid", "paper"],
+    ["changed selected source manifest", "content-profile-manifest-invalid", "source"],
+    ["oversize lock", "content-lock-invalid", "oversize"],
+  ] as const)("rejects %s before Electron", (_label, reason, mutation) => {
+    const fixture = makeLauncherFixture();
+    try {
+      if (mutation === "lock") {
+        writeFileSync(fixture.contentLock, `${readFileSync(fixture.contentLock, "utf8")} `);
+      } else if (mutation === "active") {
+        writeFileSync(fixture.manifest, `${readFileSync(fixture.manifest, "utf8")} `);
+      } else if (mutation === "paper") {
+        const paper = join(fixture.contentProfiles, "p0-baseline", "paper.md");
+        writeFileSync(paper, `${readFileSync(paper, "utf8")}changed`);
+      } else if (mutation === "source") {
+        const source = join(fixture.contentProfiles, "p0-baseline", "show.manifest.json");
+        writeFileSync(source, `${readFileSync(source, "utf8")} `);
+      } else {
+        writeFileSync(fixture.contentLock, Buffer.alloc(32 * 1024 + 1, 0x20));
+      }
+      const result = runLauncher(
+        fixture,
+        launcherArguments(fixture, "ValidateOnly"),
+        { behavior: "matching-success" },
+      );
+      expect(result.status, output(result)).not.toBe(0);
+      expect(output(result)).toContain(reason);
+      expect(invocations(fixture)).toHaveLength(0);
+    } finally {
+      fixture.cleanup();
+    }
+  }, 30_000);
+
+  it("rejects a newly locked profile whose final reset is not at the loop boundary", () => {
+    const fixture = makeLauncherFixture();
+    try {
+      const profilePath = join(
+        fixture.contentProfiles,
+        "songfeng-source",
+        "show.manifest.json",
+      );
+      const manifest = JSON.parse(readFileSync(profilePath, "utf8")) as {
+        cues: Array<{ atMs: number }>;
+      };
+      manifest.cues.at(-1)!.atMs = 164_999;
+      const manifestText = `${JSON.stringify(manifest, null, 2)}\n`;
+      writeText(profilePath, manifestText);
+      writeText(fixture.manifest, manifestText);
+
+      const lock = JSON.parse(readFileSync(fixture.contentLock, "utf8")) as {
+        profiles: Array<{
+          id: string;
+          manifest: { bytes: number; sha256: string };
+        }>;
+      };
+      const record = lock.profiles.find(({ id }) => id === "songfeng-source");
+      if (record === undefined) throw new Error("songfeng lock record missing");
+      record.manifest.bytes = statSync(profilePath).size;
+      record.manifest.sha256 = sha256(profilePath);
+      writeText(fixture.contentLock, `${JSON.stringify(lock, null, 2)}\n`);
+      patchCopiedContentLockIdentity(fixture.script, fixture.contentLock);
+
+      const result = runLauncher(
+        fixture,
+        launcherArguments(fixture, "ValidateOnly"),
+        { behavior: "matching-success" },
+      );
+      expect(result.status, output(result)).not.toBe(0);
+      expect(output(result)).toContain("content-profile-reset-invalid");
+      expect(invocations(fixture)).toHaveLength(0);
+    } finally {
+      fixture.cleanup();
+    }
+  }, 30_000);
+
   it("contains only the approved offline and exact-process command surface", () => {
     expect(existsSync(productionScript)).toBe(true);
     const source = readFileSync(productionScript, "utf8");
