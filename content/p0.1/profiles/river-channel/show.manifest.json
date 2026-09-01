@@ -1,0 +1,738 @@
+{
+  "schema": 1,
+  "loopId": "p0.1-river-channel-165s",
+  "loopDurationMs": 165000,
+  "poemSha256": "b699de273f5bbaedb08241495f52ce863d3e8e1851275ce3b6251484d75190a8",
+  "contentRevision": "20260902-river-channel-r1",
+  "preparedBy": "JanVim Exhibition Team",
+  "cues": [
+    {
+      "id": "river-channel-prompt",
+      "atMs": 3000,
+      "target": "secondary",
+      "kind": "prompt",
+      "payload": {
+        "title": "河流信道",
+        "text": "从原诗展开一份已冻结、可复演的信息论长文。",
+        "durationMs": 5000
+      }
+    },
+    {
+      "id": "river-channel-stream",
+      "atMs": 7000,
+      "target": "secondary",
+      "kind": "token-stream",
+      "payload": {
+        "text": "河流信道：噪声、容量与渡河协议的现场论证",
+        "complete": true
+      }
+    },
+    {
+      "id": "river-channel-move-start",
+      "atMs": 11000,
+      "target": "main",
+      "kind": "editor-action",
+      "payload": {
+        "action": {
+          "type": "move",
+          "keys": "G",
+          "repeat": 1
+        },
+        "displayKeys": [
+          "G"
+        ],
+        "semanticLabel": "jump to poem end",
+        "critical": true
+      }
+    },
+    {
+      "id": "river-channel-move-line-end",
+      "atMs": 11500,
+      "target": "main",
+      "kind": "editor-action",
+      "payload": {
+        "action": {
+          "type": "move",
+          "keys": "$",
+          "repeat": 1
+        },
+        "displayKeys": [
+          "$"
+        ],
+        "semanticLabel": "reach final poem column",
+        "critical": true
+      }
+    },
+    {
+      "id": "river-channel-insert-01",
+      "atMs": 14000,
+      "target": "main",
+      "kind": "editor-action",
+      "payload": {
+        "action": {
+          "type": "insert",
+          "text": "\n\n河流信道：噪声、容量与渡河协议的现场论证\n黄河并非一根理想导线，它携带泥沙、回声与无数未登记的支流进入海口。\n我们把上游写下的符号交给水面，随后只观察下游究竟收到怎样的波形。\n输入 X 与输出 Y 之间隔着天气、河床和距离，这个间隔就是 noisy channel。\n",
+          "charsPerSecond": 54
+        },
+        "displayKeys": [
+          "i",
+          "segment 01"
+        ],
+        "semanticLabel": "write frozen paper segment 01",
+        "critical": true
+      }
+    },
+    {
+      "id": "river-channel-move-out-01",
+      "atMs": 18200,
+      "target": "main",
+      "kind": "editor-action",
+      "payload": {
+        "action": {
+          "type": "move",
+          "keys": "b",
+          "repeat": 3
+        },
+        "displayKeys": [
+          "b3"
+        ],
+        "semanticLabel": "swordsman outward traverse",
+        "critical": true
+      }
+    },
+    {
+      "id": "river-channel-move-back-01",
+      "atMs": 19000,
+      "target": "main",
+      "kind": "editor-action",
+      "payload": {
+        "action": {
+          "type": "move",
+          "keys": "w",
+          "repeat": 3
+        },
+        "displayKeys": [
+          "w3"
+        ],
+        "semanticLabel": "swordsman return traverse",
+        "critical": true
+      }
+    },
+    {
+      "id": "river-channel-insert-02",
+      "atMs": 22000,
+      "target": "main",
+      "kind": "editor-action",
+      "payload": {
+        "action": {
+          "type": "insert",
+          "text": "噪声不是错误的别名，它是传递条件的一部分，必须被测量而不是被责骂。\n若同一输入可能抵达多个输出，条件分布 P(Y|X) 就像水势绘成的航路图。\n发送者不能命令每滴水，只能选择一组足够分离的信号，让接收者仍可判断。\nchannel capacity 描述可靠传递能够逼近的最高速率，却不许我们凭愿望越界。\n",
+          "charsPerSecond": 72
+        },
+        "displayKeys": [
+          "i",
+          "segment 02"
+        ],
+        "semanticLabel": "write frozen paper segment 02",
+        "critical": true
+      }
+    },
+    {
+      "id": "river-channel-move-out-02",
+      "atMs": 26200,
+      "target": "main",
+      "kind": "editor-action",
+      "payload": {
+        "action": {
+          "type": "move",
+          "keys": "0",
+          "repeat": 1
+        },
+        "displayKeys": [
+          "01"
+        ],
+        "semanticLabel": "swordsman outward traverse",
+        "critical": true
+      }
+    },
+    {
+      "id": "river-channel-move-back-02",
+      "atMs": 27000,
+      "target": "main",
+      "kind": "editor-action",
+      "payload": {
+        "action": {
+          "type": "move",
+          "keys": "$",
+          "repeat": 1
+        },
+        "displayKeys": [
+          "$1"
+        ],
+        "semanticLabel": "swordsman return traverse",
+        "critical": true
+      }
+    },
+    {
+      "id": "river-channel-insert-03",
+      "atMs": 30000,
+      "target": "main",
+      "kind": "editor-action",
+      "payload": {
+        "action": {
+          "type": "insert",
+          "text": "当速率低于容量，长码字可以把局部扰动摊薄，使整体意义穿过湍流。\n当速率超过容量，再华丽的解码器也只能在拥挤候选中制造自信的幻觉。\nShannon 的界线像不可见的堤岸，不阻止想象，却阻止把不可能写成承诺。\n河流每天改变颜色，信道模型因此不是河本身，而是一次受约束的测量姿势。\n",
+          "charsPerSecond": 61
+        },
+        "displayKeys": [
+          "i",
+          "segment 03"
+        ],
+        "semanticLabel": "write frozen paper segment 03",
+        "critical": true
+      }
+    },
+    {
+      "id": "river-channel-move-out-03",
+      "atMs": 34200,
+      "target": "main",
+      "kind": "editor-action",
+      "payload": {
+        "action": {
+          "type": "move",
+          "keys": "k",
+          "repeat": 1
+        },
+        "displayKeys": [
+          "k1"
+        ],
+        "semanticLabel": "swordsman outward traverse",
+        "critical": true
+      }
+    },
+    {
+      "id": "river-channel-move-back-03",
+      "atMs": 35000,
+      "target": "main",
+      "kind": "editor-action",
+      "payload": {
+        "action": {
+          "type": "move",
+          "keys": "j",
+          "repeat": 1
+        },
+        "displayKeys": [
+          "j1"
+        ],
+        "semanticLabel": "swordsman return traverse",
+        "critical": true
+      }
+    },
+    {
+      "id": "river-channel-insert-04",
+      "atMs": 38500,
+      "target": "main",
+      "kind": "editor-action",
+      "payload": {
+        "action": {
+          "type": "insert",
+          "text": "我们冻结这份模型，是为了让展演能够复核，不是宣称河流已经被完全理解。\nmutual information I(X;Y) 衡量上游与下游共享了多少可以相互证明的线索。\n若 Y 与 X 无关，河口再喧闹也不提供关于源头的消息，相关想象必须归零。\n若噪声减弱，观察输出便能排除更多输入候选，共享信息沿水面逐渐升高。\n",
+          "charsPerSecond": 88
+        },
+        "displayKeys": [
+          "i",
+          "segment 04"
+        ],
+        "semanticLabel": "write frozen paper segment 04",
+        "critical": true
+      }
+    },
+    {
+      "id": "river-channel-move-out-04",
+      "atMs": 42700,
+      "target": "main",
+      "kind": "editor-action",
+      "payload": {
+        "action": {
+          "type": "move",
+          "keys": "h",
+          "repeat": 10
+        },
+        "displayKeys": [
+          "h10"
+        ],
+        "semanticLabel": "swordsman outward traverse",
+        "critical": true
+      }
+    },
+    {
+      "id": "river-channel-move-back-04",
+      "atMs": 43500,
+      "target": "main",
+      "kind": "editor-action",
+      "payload": {
+        "action": {
+          "type": "move",
+          "keys": "l",
+          "repeat": 10
+        },
+        "displayKeys": [
+          "l10"
+        ],
+        "semanticLabel": "swordsman return traverse",
+        "critical": true
+      }
+    },
+    {
+      "id": "river-channel-insert-05",
+      "atMs": 47000,
+      "target": "main",
+      "kind": "editor-action",
+      "payload": {
+        "action": {
+          "type": "insert",
+          "text": "最大化 I(X;Y) 需要选择输入分布，这一选择如同安排船只经过不同水道。\n并非所有航道都应同频使用，浅滩、急弯与深槽有各自的代价和可靠程度。\n码本把长消息映成可航行的序列，每个 codeword 都是一条预先审阅的路线。\n接收者寻找最可能的路线，不追逐每一个浪花，也不把瞬时偏差当作新命令。\n",
+          "charsPerSecond": 57
+        },
+        "displayKeys": [
+          "i",
+          "segment 05"
+        ],
+        "semanticLabel": "write frozen paper segment 05",
+        "critical": true
+      }
+    },
+    {
+      "id": "river-channel-move-out-05",
+      "atMs": 51200,
+      "target": "main",
+      "kind": "editor-action",
+      "payload": {
+        "action": {
+          "type": "move",
+          "keys": "b",
+          "repeat": 5
+        },
+        "displayKeys": [
+          "b5"
+        ],
+        "semanticLabel": "swordsman outward traverse",
+        "critical": true
+      }
+    },
+    {
+      "id": "river-channel-move-back-05",
+      "atMs": 52000,
+      "target": "main",
+      "kind": "editor-action",
+      "payload": {
+        "action": {
+          "type": "move",
+          "keys": "w",
+          "repeat": 5
+        },
+        "displayKeys": [
+          "w5"
+        ],
+        "semanticLabel": "swordsman return traverse",
+        "critical": true
+      }
+    },
+    {
+      "id": "river-channel-insert-06",
+      "atMs": 55500,
+      "target": "main",
+      "kind": "editor-action",
+      "payload": {
+        "action": {
+          "type": "insert",
+          "text": "典型集合在此像季节性河道：绝大多数长序列会落入有限而可描述的区域。\n足够长的块让概率集中，使罕见扰动不再主宰整段传递的最终判决。\n但展演不能无限延长，所以我们把论文分成有字节上限的若干次真实写入。\n每次 insert 是一只小舟，携带数行内容，抵达后才允许下一段动作继续。\n",
+          "charsPerSecond": 54
+        },
+        "displayKeys": [
+          "i",
+          "segment 06"
+        ],
+        "semanticLabel": "write frozen paper segment 06",
+        "critical": true
+      }
+    },
+    {
+      "id": "river-channel-move-out-06",
+      "atMs": 59700,
+      "target": "main",
+      "kind": "editor-action",
+      "payload": {
+        "action": {
+          "type": "move",
+          "keys": "0",
+          "repeat": 1
+        },
+        "displayKeys": [
+          "01"
+        ],
+        "semanticLabel": "swordsman outward traverse",
+        "critical": true
+      }
+    },
+    {
+      "id": "river-channel-move-back-06",
+      "atMs": 60500,
+      "target": "main",
+      "kind": "editor-action",
+      "payload": {
+        "action": {
+          "type": "move",
+          "keys": "$",
+          "repeat": 1
+        },
+        "displayKeys": [
+          "$1"
+        ],
+        "semanticLabel": "swordsman return traverse",
+        "critical": true
+      }
+    },
+    {
+      "id": "river-channel-insert-07",
+      "atMs": 64500,
+      "target": "main",
+      "kind": "editor-action",
+      "payload": {
+        "action": {
+          "type": "insert",
+          "text": "光标以不规则步长沿句子疾行，模拟译码者在候选路径间迅速比较距离。\n它突然回到行首，又跃向行尾，像船头避开暗礁后重新寻找主流方向。\n左右滚动让长句超出视野，提醒观众任何接收窗口都只是信道的一小段。\n上下跳跃使过去的证据暂时离场，却仍保存在同一缓冲区和同一循环中。\n",
+          "charsPerSecond": 72
+        },
+        "displayKeys": [
+          "i",
+          "segment 07"
+        ],
+        "semanticLabel": "write frozen paper segment 07",
+        "critical": true
+      }
+    },
+    {
+      "id": "river-channel-move-out-07",
+      "atMs": 68700,
+      "target": "main",
+      "kind": "editor-action",
+      "payload": {
+        "action": {
+          "type": "move",
+          "keys": "k",
+          "repeat": 2
+        },
+        "displayKeys": [
+          "k2"
+        ],
+        "semanticLabel": "swordsman outward traverse",
+        "critical": true
+      }
+    },
+    {
+      "id": "river-channel-move-back-07",
+      "atMs": 69500,
+      "target": "main",
+      "kind": "editor-action",
+      "payload": {
+        "action": {
+          "type": "move",
+          "keys": "j",
+          "repeat": 2
+        },
+        "displayKeys": [
+          "j2"
+        ],
+        "semanticLabel": "swordsman return traverse",
+        "critical": true
+      }
+    },
+    {
+      "id": "river-channel-insert-08",
+      "atMs": 73500,
+      "target": "main",
+      "kind": "editor-action",
+      "payload": {
+        "action": {
+          "type": "insert",
+          "text": "副屏显示由同一 cue 派生的提示，不读取键盘，也不猜测主屏发生了什么。\n控制器拥有唯一 show clock，两块屏幕因此共享时序而非共享偶然点击。\n当网络断开，作品并未失去信道，因为真正的信道是本机已冻结的动作链。\n离线验证把外部默认路由视为不允许的支流，避免演出期间出现未知输入。\n",
+          "charsPerSecond": 61
+        },
+        "displayKeys": [
+          "i",
+          "segment 08"
+        ],
+        "semanticLabel": "write frozen paper segment 08",
+        "critical": true
+      }
+    },
+    {
+      "id": "river-channel-move-out-08",
+      "atMs": 77700,
+      "target": "main",
+      "kind": "editor-action",
+      "payload": {
+        "action": {
+          "type": "move",
+          "keys": "h",
+          "repeat": 14
+        },
+        "displayKeys": [
+          "h14"
+        ],
+        "semanticLabel": "swordsman outward traverse",
+        "critical": true
+      }
+    },
+    {
+      "id": "river-channel-move-back-08",
+      "atMs": 78500,
+      "target": "main",
+      "kind": "editor-action",
+      "payload": {
+        "action": {
+          "type": "move",
+          "keys": "l",
+          "repeat": 14
+        },
+        "displayKeys": [
+          "l14"
+        ],
+        "semanticLabel": "swordsman return traverse",
+        "critical": true
+      }
+    },
+    {
+      "id": "river-channel-insert-09",
+      "atMs": 82500,
+      "target": "main",
+      "kind": "editor-action",
+      "payload": {
+        "action": {
+          "type": "insert",
+          "text": "哈希把纸面、manifest 与原诗锁在一起，任何一个字节漂移都会在开场前失败。\n失败关闭不是胆怯，而是承认可靠通信必须先知道自己正在发送哪一份消息。\n若副屏消失，系统进入安全巡航并重建显示面，而不让桌面或终端暴露出来。\n",
+          "charsPerSecond": 88
+        },
+        "displayKeys": [
+          "i",
+          "segment 09"
+        ],
+        "semanticLabel": "write frozen paper segment 09",
+        "critical": true
+      }
+    },
+    {
+      "id": "river-channel-move-out-09",
+      "atMs": 86700,
+      "target": "main",
+      "kind": "editor-action",
+      "payload": {
+        "action": {
+          "type": "move",
+          "keys": "b",
+          "repeat": 7
+        },
+        "displayKeys": [
+          "b7"
+        ],
+        "semanticLabel": "swordsman outward traverse",
+        "critical": true
+      }
+    },
+    {
+      "id": "river-channel-move-back-09",
+      "atMs": 87500,
+      "target": "main",
+      "kind": "editor-action",
+      "payload": {
+        "action": {
+          "type": "move",
+          "keys": "w",
+          "repeat": 7
+        },
+        "displayKeys": [
+          "w7"
+        ],
+        "semanticLabel": "swordsman return traverse",
+        "critical": true
+      }
+    },
+    {
+      "id": "river-channel-insert-10",
+      "atMs": 92000,
+      "target": "main",
+      "kind": "editor-action",
+      "payload": {
+        "action": {
+          "type": "insert",
+          "text": "若主屏进程失去生命，旧代际立即失效，随后从原诗准备状态重新开始。\n恢复后的 loop 不补写旧队列，因迟到的正确消息在新上下文里也可能是错误。\n这条原则与序列号相似：代际让接收者拒绝属于过去航次的合法数据包。\n",
+          "charsPerSecond": 57
+        },
+        "displayKeys": [
+          "i",
+          "segment 10"
+        ],
+        "semanticLabel": "write frozen paper segment 10",
+        "critical": true
+      }
+    },
+    {
+      "id": "river-channel-move-out-10",
+      "atMs": 96200,
+      "target": "main",
+      "kind": "editor-action",
+      "payload": {
+        "action": {
+          "type": "move",
+          "keys": "k",
+          "repeat": 3
+        },
+        "displayKeys": [
+          "k3"
+        ],
+        "semanticLabel": "swordsman outward traverse",
+        "critical": true
+      }
+    },
+    {
+      "id": "river-channel-move-back-10",
+      "atMs": 97000,
+      "target": "main",
+      "kind": "editor-action",
+      "payload": {
+        "action": {
+          "type": "move",
+          "keys": "j",
+          "repeat": 3
+        },
+        "displayKeys": [
+          "j3"
+        ],
+        "semanticLabel": "swordsman return traverse",
+        "critical": true
+      }
+    },
+    {
+      "id": "river-channel-insert-11",
+      "atMs": 101500,
+      "target": "main",
+      "kind": "editor-action",
+      "payload": {
+        "action": {
+          "type": "insert",
+          "text": "有限重试预算像救生艇数量，足够应对事故，却不能掩盖持续失效的事实。\n日志记录延迟、漂移与复原哈希，使可靠性不只停留在操作员的记忆里。\n我们并不把毫秒当作诗意的敌人；精确的时序反而让两块光面产生呼吸。\n",
+          "charsPerSecond": 54
+        },
+        "displayKeys": [
+          "i",
+          "segment 11"
+        ],
+        "semanticLabel": "write frozen paper segment 11",
+        "critical": true
+      }
+    },
+    {
+      "id": "river-channel-insert-12",
+      "atMs": 111000,
+      "target": "main",
+      "kind": "editor-action",
+      "payload": {
+        "action": {
+          "type": "insert",
+          "text": "快速写入之后留出缓冲，稠密移动之后出现停顿，河势因此有急有缓。\n所谓随机轮播不调用 RNG，而是在三份主题之间由操作员明确选择一份。\n所谓随机节奏也不是临场漂移，而是固定 cue 中经过观看与调整的非均匀间隔。\n",
+          "charsPerSecond": 72
+        },
+        "displayKeys": [
+          "i",
+          "segment 12"
+        ],
+        "semanticLabel": "write frozen paper segment 12",
+        "critical": true
+      }
+    },
+    {
+      "id": "river-channel-insert-13",
+      "atMs": 121000,
+      "target": "main",
+      "kind": "editor-action",
+      "payload": {
+        "action": {
+          "type": "insert",
+          "text": "这样，同一天可以重复相同顺序，观众仍会在局部转折中感到不可预料。\n长文本提供足够列宽，让 NeoVide 风格的轨迹真正跨越屏幕而非原地闪烁。\n中文论述之间嵌入 capacity、codeword 与 decoding，形成程序员终端的纹理。\n",
+          "charsPerSecond": 61
+        },
+        "displayKeys": [
+          "i",
+          "segment 13"
+        ],
+        "semanticLabel": "write frozen paper segment 13",
+        "critical": true
+      }
+    },
+    {
+      "id": "river-channel-insert-14",
+      "atMs": 132000,
+      "target": "main",
+      "kind": "editor-action",
+      "payload": {
+        "action": {
+          "type": "insert",
+          "text": "公式名不是装饰性咒语，它们标出这场山水书写与信息论之间的真实接口。\n然而我们不复刻任何现成论文，所有段落只为这次作品重新组织和书写。\n最终 reset 像河流入海后的潮汐回返，把缓冲区精确恢复到四行原诗。\n",
+          "charsPerSecond": 88
+        },
+        "displayKeys": [
+          "i",
+          "segment 14"
+        ],
+        "semanticLabel": "write frozen paper segment 14",
+        "critical": true
+      }
+    },
+    {
+      "id": "river-channel-insert-15",
+      "atMs": 143000,
+      "target": "main",
+      "kind": "editor-action",
+      "payload": {
+        "action": {
+          "type": "insert",
+          "text": "如果复原哈希不同，循环即被判定失败，不允许残留文字伪装成下一轮开端。\n当原诗再次显现，X 重新位于源头，Y 尚未抵达，信道重新获得开放的未来。\n河仍流动，协议却保持有限；正因边界清楚，作品才可以整日可靠循环。\n",
+          "charsPerSecond": 57
+        },
+        "displayKeys": [
+          "i",
+          "segment 15"
+        ],
+        "semanticLabel": "write frozen paper segment 15",
+        "critical": true
+      }
+    },
+    {
+      "id": "river-channel-fade",
+      "atMs": 155000,
+      "target": "secondary",
+      "kind": "fade",
+      "payload": {
+        "label": "return-to-poem",
+        "durationMs": 8000
+      }
+    },
+    {
+      "id": "river-channel-reset",
+      "atMs": 165000,
+      "target": "main",
+      "kind": "editor-action",
+      "payload": {
+        "action": {
+          "type": "reset"
+        },
+        "displayKeys": [
+          "Esc"
+        ],
+        "semanticLabel": "restore exact source poem",
+        "critical": true
+      }
+    }
+  ]
+}
