@@ -41,15 +41,17 @@ The repository contains one rollback profile and three exhibition profiles:
 | `tower-codebook` | 层楼码本 | Mutual information, codebook, and rate-distortion |
 
 Each exhibition profile has an original, pre-reviewed `paper.md` and a frozen
-`show.manifest.json`. The three new manifests share a 165,000 ms choreography and each contains:
+`show.manifest.json`. The three new manifests share the accepted P0 controller's fixed 90,000 ms
+choreography and each contains:
 
 - 48–64 newline-separated paper lines and roughly 1,400–2,000 Chinese characters;
 - 12–18 bounded insert actions whose UTF-8 payloads remain within the schema's 512-byte limit;
+- insert pacing that completes within the immutable agent's 1,500 ms action cap;
 - 18–28 bounded move actions using only the existing allowlisted keys;
 - moderate English information-theory vocabulary and formula names;
 - one completed secondary token stream followed by one accepted secondary token stream before
   the first non-reset editor action;
-- one final editor `reset` cue at exactly 165,000 ms.
+- one final editor `reset` cue at exactly 90,000 ms.
 
 The original four-line poem is unchanged and every manifest names its frozen SHA-256.
 
@@ -110,8 +112,9 @@ compatible: the selected manifest's `contentRevision`, byte count, and SHA-256 a
 
 Automated verification covers allowlist rejection, traversal and unknown-field rejection, lock
 and member hash mismatch, byte caps, cue counts, insert payload limits, the exact terminal reset,
-completion-before-acceptance-before-writeback causality, selector idempotence and atomic staging,
-startup fail-closed behavior, and LF checkout policy.
+insert-duration compatibility, completion-before-acceptance-before-writeback causality, exact
+90-second P0 clock compatibility, selector idempotence and atomic staging, startup fail-closed
+behavior, and LF checkout policy.
 
 The final gate is:
 

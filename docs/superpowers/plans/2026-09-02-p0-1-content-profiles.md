@@ -44,7 +44,7 @@ Electron 44 build verification.
 - [x] Add tests that require exactly the four approved profile IDs, strict lock property sets,
   canonical relative paths, unique revisions, bounded lock/paper/manifest bytes, and matching
   SHA-256 values.
-- [x] Add tests that require each long profile to have 165,000 ms duration, 48–64 paper lines,
+- [x] Add tests that require each long profile to have 90,000 ms duration, 48–64 paper lines,
   1,400–2,000 Chinese characters, 12–18 inserts, 18–28 moves, bounded insert payloads, and one
   exact final reset; require all manifests to retain the original poem digest.
 - [x] Add an LF-attribute test for the lock, profiles, active manifest, artifact lock, and Lua hash
@@ -74,7 +74,7 @@ Commit: `test: specify frozen P0.1 content profiles`
 - Create: `content/p0.1/content-lock.json`
 
 - [x] Write original long-form themed papers with moderate English terminology and no runtime AI.
-- [x] Encode the approved 165-second common cue topology with irregular but deterministic move and
+- [x] Encode the approved 90-second common cue topology with irregular but deterministic move and
   insert timing; preserve all schema and payload limits.
 - [x] Copy the accepted active manifest byte-for-byte into the rollback profile and document it in
   a bounded rollback paper.
@@ -158,3 +158,29 @@ Commit: `docs: record P0.1 content profile verification`
   main bundle remains byte-identical to accepted P0.
 
 Commit: `fix: require accepted result before profile writeback`
+
+### Task 7: Fit frozen actions and loop timing to the immutable P0 runtime
+
+**Files:**
+
+- Modify: `tests/content-profiles.test.ts`
+- Modify: `tests/start-show.test.ts`
+- Modify: `content/p0.1/profiles/songfeng-source/show.manifest.json`
+- Modify: `content/p0.1/profiles/river-channel/show.manifest.json`
+- Modify: `content/p0.1/profiles/tower-codebook/show.manifest.json`
+- Modify: `content/p0.1/content-lock.json`
+- Modify: `scripts/select-show-profile.ps1`
+- Modify: `scripts/start-show.ps1`
+
+- [x] Preserve the r2 recovery evidence and trace its repeated critical ACK rejection to insert
+  pacing above the immutable agent's 1,500 ms action cap.
+- [x] Add a failing Unicode-character duration test, raise only the five frozen pacing bands, and
+  confirm the first three r3 segments write back without restart.
+- [x] Preserve the r3 terminal evidence and trace `loop-deadline-exceeded` to the immutable P0
+  controller's fixed 90-second Show clock.
+- [x] After owner approval, add a failing 90-second contract test and compress all 42 cues without
+  removing any paper text, insert, or move action; reset exactly at 90,000 ms.
+- [x] Regenerate r4 identities, run all 795 tests, rebuild, and prove the Electron main bundle is
+  byte-identical to accepted P0.
+
+Commit: `fix: fit content profiles to P0 show clock`
