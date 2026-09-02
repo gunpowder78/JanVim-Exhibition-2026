@@ -147,6 +147,53 @@ run("compact punctuation is display-only and survives reset", function()
   agent:dispose()
 end)
 
+run("balanced semantic palette is display-only and survives reset", function()
+  local semantic_text = "entropy 信息论 山 回写 42 OSC"
+  local expectations = {
+    { text = "entropy", syntax_group = "JanVimEnglishTech", highlight_group = "Function" },
+    { text = "信息论", syntax_group = "JanVimChineseTech", highlight_group = "Type" },
+    { text = "山", syntax_group = "JanVimLandscape", highlight_group = "String" },
+    { text = "回写", syntax_group = "JanVimProcess", highlight_group = "Keyword" },
+    { text = "42", syntax_group = "JanVimNumber", highlight_group = "Number" },
+    { text = "OSC", syntax_group = "JanVimAcronym", highlight_group = "Constant" },
+  }
+  local expected_buffer_text = semantic_text .. "\n黄河入海流"
+  local expected_buffer_hash = vim.fn.sha256(expected_buffer_text)
+  local agent = new_agent()
+
+  local function replace_and_assert(cue_id)
+    local replace_ack = dispatch(agent, command(cue_id, {
+      type = "replace",
+      rangeId = "opening",
+      text = semantic_text,
+    }))
+    equal(replace_ack.outcome, "applied")
+    equal(replace_ack.bufferSha256, expected_buffer_hash)
+
+    local buffer_number = assert(agent:buffer_number())
+    vim.api.nvim_set_current_buf(buffer_number)
+    equal(buffer_text(buffer_number), expected_buffer_text)
+
+    local line = vim.api.nvim_buf_get_lines(buffer_number, 0, 1, true)[1]
+    for _, expectation in ipairs(expectations) do
+      local byte_column = assert(line:find(expectation.text, 1, true))
+      local syntax_id = vim.fn.synID(1, byte_column, 1)
+      equal(vim.fn.synIDattr(syntax_id, "name"), expectation.syntax_group)
+      equal(
+        vim.api.nvim_get_hl(0, { name = expectation.syntax_group, link = true }).link,
+        expectation.highlight_group
+      )
+    end
+  end
+
+  prepare(agent)
+  replace_and_assert("cue-balanced-palette-before-reset")
+  local reset_ack = dispatch(agent, command("cue-balanced-palette-reset", { type = "reset" }))
+  equal(reset_ack.bufferSha256, POEM_HASH)
+  replace_and_assert("cue-balanced-palette-after-reset")
+  agent:dispose()
+end)
+
 run("insert and replace mutate only the tracked exhibition buffer", function()
   local agent = new_agent()
   prepare(agent)
