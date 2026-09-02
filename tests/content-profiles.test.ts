@@ -168,6 +168,15 @@ describe("P0.1 frozen content profiles", () => {
     for (const action of inserts) {
       if (action.type !== "insert") throw new Error("unreachable insert narrowing");
       expect(Buffer.byteLength(action.text, "utf8")).toBeLessThanOrEqual(512);
+      const intervalMs =
+        action.charsPerSecond === 0
+          ? 0
+          : Math.max(1, Math.floor(1_000 / action.charsPerSecond));
+      const durationMs = intervalMs * Array.from(action.text).length;
+      expect(
+        durationMs,
+        `${id} insert at ${action.charsPerSecond} chars/s exceeds the JanVim 1500 ms action cap`,
+      ).toBeLessThanOrEqual(1_500);
     }
     const finalCue = manifest.cues.at(-1);
     expect(finalCue).toMatchObject({
