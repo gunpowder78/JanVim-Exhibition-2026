@@ -2247,6 +2247,48 @@ describe("offline show launcher and external watchdog", () => {
     }
   }, 30_000);
 
+  it("rejects a newly locked profile whose final reset is not presented on both screens", () => {
+    const fixture = makeLauncherFixture();
+    try {
+      const profilePath = join(
+        fixture.contentProfiles,
+        "songfeng-source",
+        "show.manifest.json",
+      );
+      const manifest = JSON.parse(readFileSync(profilePath, "utf8")) as {
+        cues: Array<{ target: string }>;
+      };
+      manifest.cues.at(-1)!.target = "main";
+      const manifestText = `${JSON.stringify(manifest, null, 2)}\n`;
+      writeText(profilePath, manifestText);
+      writeText(fixture.manifest, manifestText);
+
+      const lock = JSON.parse(readFileSync(fixture.contentLock, "utf8")) as {
+        profiles: Array<{
+          id: string;
+          manifest: { bytes: number; sha256: string };
+        }>;
+      };
+      const record = lock.profiles.find(({ id }) => id === "songfeng-source");
+      if (record === undefined) throw new Error("songfeng lock record missing");
+      record.manifest.bytes = statSync(profilePath).size;
+      record.manifest.sha256 = sha256(profilePath);
+      writeText(fixture.contentLock, `${JSON.stringify(lock, null, 2)}\n`);
+      patchCopiedContentLockIdentity(fixture.script, fixture.contentLock);
+
+      const result = runLauncher(
+        fixture,
+        launcherArguments(fixture, "ValidateOnly"),
+        { behavior: "matching-success" },
+      );
+      expect(result.status, output(result)).not.toBe(0);
+      expect(output(result)).toContain("content-profile-reset-invalid");
+      expect(invocations(fixture)).toHaveLength(0);
+    } finally {
+      fixture.cleanup();
+    }
+  }, 30_000);
+
   it("contains only the approved offline and exact-process command surface", () => {
     expect(existsSync(productionScript)).toBe(true);
     const source = readFileSync(productionScript, "utf8");

@@ -181,7 +181,7 @@ describe("P0.1 frozen content profiles", () => {
     const finalCue = manifest.cues.at(-1);
     expect(finalCue).toMatchObject({
       atMs: 90_000,
-      target: "main",
+      target: "both",
       kind: "editor-action",
       payload: { action: { type: "reset" } },
     } satisfies Partial<ShowManifest["cues"][number]>);

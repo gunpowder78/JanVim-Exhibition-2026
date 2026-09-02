@@ -36,7 +36,7 @@ $expectedCommit = 'e95633101d93f8448b0f906e918b5d836ab95273'
 $expectedShowConfigSha256 = '506b4fc09424d974695020465e3bf7b0b2b58ee3d566d0c6b15fb8cb5c2f1615'
 $expectedPluginLabSha256 = '5a2b336fbc6974c98826cdacd0474dd33a31e05e13ebade37dbb7018aa727cb2'
 $expectedContentLockBytes = 2332L
-$expectedContentLockSha256 = '4be49bb5cbabd9e5bbd43efabf950b3f535e771a795dd1e90609f16f09e03710'
+$expectedContentLockSha256 = '536878e087aa32f28139826984b26db8c263953c0c6a62bfe2903712fed4ed8c'
 $expectedPoemSha256 = 'b699de273f5bbaedb08241495f52ce863d3e8e1851275ce3b6251484d75190a8'
 $allowedContentProfiles = @('p0-baseline', 'songfeng-source', 'river-channel', 'tower-codebook')
 $maximumContentLockBytes = 32768
@@ -948,6 +948,7 @@ function Assert-ContentProfileManifest {
     $finalAction = Get-RequiredPropertyValue -InputObject $finalPayload -Name 'action' -Reason 'content-profile-reset-invalid'
     if (
         (Get-RequiredPropertyValue -InputObject $finalCue -Name 'kind' -Reason 'content-profile-reset-invalid') -cne 'editor-action' -or
+        (Get-RequiredPropertyValue -InputObject $finalCue -Name 'target' -Reason 'content-profile-reset-invalid') -cne 'both' -or
         -not (Test-ExactJsonInteger -Value (Get-RequiredPropertyValue -InputObject $finalCue -Name 'atMs' -Reason 'content-profile-reset-invalid') -Expected $expectedDuration) -or
         (Get-RequiredPropertyValue -InputObject $finalAction -Name 'type' -Reason 'content-profile-reset-invalid') -cne 'reset' -or
         $resetCount -ne 1
@@ -986,7 +987,7 @@ function Read-SelectedContentProfile {
         -Reason 'content-lock-invalid'
     if (
         -not (Test-ExactJsonInteger -Value (Get-RequiredPropertyValue -InputObject $lock -Name 'schema' -Reason 'content-lock-invalid') -Expected 1) -or
-        (Get-RequiredPropertyValue -InputObject $lock -Name 'revision' -Reason 'content-lock-invalid') -cne '20260902-p0.1-r4'
+        (Get-RequiredPropertyValue -InputObject $lock -Name 'revision' -Reason 'content-lock-invalid') -cne '20260902-p0.1-r5'
     ) {
         throw 'content-lock-invalid'
     }

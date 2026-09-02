@@ -3,7 +3,7 @@
   "loopId": "p0.1-tower-codebook-165s",
   "loopDurationMs": 90000,
   "poemSha256": "b699de273f5bbaedb08241495f52ce863d3e8e1851275ce3b6251484d75190a8",
-  "contentRevision": "20260902-tower-codebook-r4",
+  "contentRevision": "20260902-tower-codebook-r5",
   "preparedBy": "JanVim Exhibition Team",
   "cues": [
     {
@@ -731,7 +731,7 @@
     {
       "id": "tower-codebook-reset",
       "atMs": 90000,
-      "target": "main",
+      "target": "both",
       "kind": "editor-action",
       "payload": {
         "action": {
