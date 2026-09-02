@@ -184,3 +184,26 @@ Commit: `fix: require accepted result before profile writeback`
   byte-identical to accepted P0.
 
 Commit: `fix: fit content profiles to P0 show clock`
+
+### Task 8: Present the loop-boundary reset on both screens
+
+**Files:**
+
+- Modify: `tests/content-profiles.test.ts`
+- Modify: `tests/start-show.test.ts`
+- Modify: `content/p0.1/profiles/songfeng-source/show.manifest.json`
+- Modify: `content/p0.1/profiles/river-channel/show.manifest.json`
+- Modify: `content/p0.1/profiles/tower-codebook/show.manifest.json`
+- Modify: `content/p0.1/content-lock.json`
+- Modify: `scripts/select-show-profile.ps1`
+- Modify: `scripts/start-show.ps1`
+
+- [x] Preserve the r4 terminal evidence and trace `loop-boundary-presentation-timeout` to the
+  final reset targeting only the main screen.
+- [x] Add failing content and launcher tamper tests requiring the final reset to target `both`.
+- [x] Update the three frozen manifests and both independent PowerShell validators, regenerate r5
+  identities, and run focused tests to green.
+- [x] Complete seven consecutive dual-monitor r5 loops with 42 cues, 38 primary completions, 15
+  inserts, exact poem reset, zero retries, and zero recoveries; stop cleanly through the operator UI.
+
+Commit: `fix: present profile reset on both screens`

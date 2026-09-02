@@ -4,9 +4,9 @@
 - Branch: `feat/p0-1-content-profiles`
 - Worktree: `D:\github\JanVim-Exhibition-2026\.worktrees\p0-1-content`
 - P0 base: `7ea7fbea54c7bdb0bb29e915923003b7a221cedb`
-- Tested implementation commit: `a018f5c28e69b10e1d89e25d599740deb92aa6bb`
+- Tested implementation commit: `d6fbbabcb3b7e9ec08aa4f2117f69702a7b3130a`
 - Automated outcome: pass
-- Remaining acceptance: owner dual-monitor visual inspection
+- Dual-monitor choreography acceptance: passed with `songfeng-source` r5
 - Physical-projector claim: not made
 
 ## Delivered behavior
@@ -33,8 +33,8 @@ Content lock:
 
 - path: `content/p0.1/content-lock.json`
 - bytes: 2,332
-- SHA-256: `4be49bb5cbabd9e5bbd43efabf950b3f535e771a795dd1e90609f16f09e03710`
-- revision: `20260902-p0.1-r4`
+- SHA-256: `536878e087aa32f28139826984b26db8c263953c0c6a62bfe2903712fed4ed8c`
+- revision: `20260902-p0.1-r5`
 
 Shared source poem:
 
@@ -47,9 +47,9 @@ Profiles:
 | ID | Revision | Paper bytes / SHA-256 | Manifest bytes / SHA-256 |
 | --- | --- | --- | --- |
 | `p0-baseline` | `20260828-0002` | 191 / `facccc14609bdd129ccdaa70373a57c890092b789be067ef1f5e6431ee650778` | 2,284 / `9a39ee522e556860053468854b0858bc1fafd8b7a1ca08ddff57d0371b717b35` |
-| `songfeng-source` | `20260902-songfeng-source-r4` | 4,953 / `4b00dd50adc18ab76dc03c9826e0bb2cb4babdb86a5de2efd4ccafa483e4c211` | 21,691 / `f5bad7dfe37f7a884a676e921c5349eed4e6f0d754c5f0d239fb586ccf0ef518` |
-| `river-channel` | `20260902-river-channel-r4` | 5,171 / `afc1dccc5e6317ea89bbf08b23215fa03a6926898a7f7a95fba441c010fd2142` | 21,819 / `032d4f13374f68a5e41a1ef7b43319b06b662dcc37767ad974c3ec4e7dfd7b09` |
-| `tower-codebook` | `20260902-tower-codebook-r4` | 5,273 / `3ee76e80a7a83d610c1647de7353271e64d2cb410681dcd33db53d7af655d293` | 21,963 / `55a2f574342aacde1f862db762a3dccb7b7ed6de23d96471cdcadf3831bd8a39` |
+| `songfeng-source` | `20260902-songfeng-source-r5` | 4,953 / `4b00dd50adc18ab76dc03c9826e0bb2cb4babdb86a5de2efd4ccafa483e4c211` | 21,691 / `bc159d8658fdcd6a5b8af69ba9b36b5db221c799df8fef48e9b7f9bcb0ee615d` |
+| `river-channel` | `20260902-river-channel-r5` | 5,171 / `afc1dccc5e6317ea89bbf08b23215fa03a6926898a7f7a95fba441c010fd2142` | 21,819 / `3cde37494e5a5d058a6a4b556ae91ebedcf4b2d5fac255eb21da8cd91b77eb95` |
+| `tower-codebook` | `20260902-tower-codebook-r5` | 5,273 / `3ee76e80a7a83d610c1647de7353271e64d2cb410681dcd33db53d7af655d293` | 21,963 / `c131dc8ab84291e90c32445d30ed2e104bedb4d03a92a8312dc119bcc0d0c22c` |
 
 Each long profile is 90 seconds, has 42 total cues, 15 insert cues, 22 move cues, one final reset
 at exactly 90,000 ms, and no insert payload above 512 UTF-8 bytes. Papers contain 52–54 lines and
@@ -87,12 +87,17 @@ approval, a failing 90-second contract test was added and all 42 cues were compr
 removing text or actions. r4 resets exactly at 90,000 ms and retains the byte-identical P0
 Electron bundle.
 
+The r4 reset restored the primary poem but targeted only `main`, so the controller correctly
+failed closed with `loop-boundary-presentation-timeout` while waiting for the secondary boundary
+presentation. A content test and a real launcher tamper test were added before production changes;
+r5 requires the final reset target to be `both` in the manifests, selector, and launcher.
+
 Final complete result:
 
 - 47 test files passed
-- 795 tests passed
+- 796 tests passed
 - 0 failures
-- duration: 607.21 seconds
+- duration: 613.70 seconds
 
 Additional gates all returned exit code 0:
 
@@ -128,7 +133,24 @@ An independent review subagent was unavailable in the current execution environm
 review scope was performed directly against the base-to-HEAD diff, with automated boundary and
 placeholder checks plus the full test evidence above.
 
-## Visual inspection handoff
+## Dual-monitor visual acceptance
+
+The owner accepted `songfeng-source` r5 as visually normal on two real monitors. Durable evidence:
+
+- run ID: `p01-r5-songfeng-20260902-134114-show`;
+- launcher exit code: 0;
+- terminal outcome: `intentional-success`, reason `operator-stop`;
+- completed loops: 7;
+- cues per loop: 42;
+- primary completions per loop: 38;
+- insert completions per loop: 15;
+- total retries and recoveries: 0;
+- every retained loop reset SHA-256:
+  `b699de273f5bbaedb08241495f52ce863d3e8e1851275ce3b6251484d75190a8`;
+- shutdown: agent acknowledged, JanVim natural exit, bridge closed, lease removed;
+- acceptance scope: monitor simulation; no physical-projector claim.
+
+## Profile operation
 
 The active manifest was restored to `p0-baseline` after exercising all four real selector paths.
 Its active SHA-256 is again
@@ -141,6 +163,6 @@ From the P0.1 worktree, select one theme with exactly one of these commands:
 - `pwsh -NoProfile -File .\scripts\select-show-profile.ps1 -Profile tower-codebook`
 - rollback: `pwsh -NoProfile -File .\scripts\select-show-profile.ps1 -Profile p0-baseline`
 
-The next step is a fresh dual-monitor Show rehearsal for each long profile. The owner should
-inspect visible text density, horizontal travel, vertical jumps, `swordsman` trajectory, secondary
-cue correspondence, exact final reset, and absence of stale generated text after the next loop.
+The shared r5 choreography is accepted with `songfeng-source`; `river-channel` and
+`tower-codebook` remain optional theme-specific visual spot checks before curation. Physical
+projector mapping remains a separate hardware rehearsal.

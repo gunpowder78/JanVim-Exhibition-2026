@@ -51,7 +51,7 @@ choreography and each contains:
 - moderate English information-theory vocabulary and formula names;
 - one completed secondary token stream followed by one accepted secondary token stream before
   the first non-reset editor action;
-- one final editor `reset` cue at exactly 90,000 ms.
+- one final editor `reset` cue targeted to `both` screens at exactly 90,000 ms.
 
 The original four-line poem is unchanged and every manifest names its frozen SHA-256.
 
@@ -81,7 +81,7 @@ the reviewed byte identity.
 3. accepts only a literal allowlisted profile ID;
 4. validates the selected paper and manifest path, size, and digest;
 5. validates the manifest schema, content revision, poem digest, cue bounds, completion-before-
-   acceptance-before-writeback causality, and final reset;
+   acceptance-before-writeback causality, and final reset time/type/two-screen target;
 6. atomically replaces the fixed active manifest using a same-directory temporary file;
 7. rereads the active file and returns one compressed JSON receipt.
 
@@ -100,7 +100,7 @@ runtime verification or Electron launch it additionally:
 - identifies exactly one locked profile whose manifest digest and byte count match the active
   manifest;
 - verifies that profile's revision, poem digest, cue payload bounds, completion-before-
-  acceptance-before-writeback causality, and final reset;
+  acceptance-before-writeback causality, and final reset time/type/two-screen target;
 - freezes the content lock and selected paper alongside the active manifest and poem for the
   launch lifetime.
 
@@ -113,8 +113,8 @@ compatible: the selected manifest's `contentRevision`, byte count, and SHA-256 a
 Automated verification covers allowlist rejection, traversal and unknown-field rejection, lock
 and member hash mismatch, byte caps, cue counts, insert payload limits, the exact terminal reset,
 insert-duration compatibility, completion-before-acceptance-before-writeback causality, exact
-90-second P0 clock compatibility, selector idempotence and atomic staging, startup fail-closed
-behavior, and LF checkout policy.
+90-second P0 clock compatibility, two-screen reset presentation, selector idempotence and atomic
+staging, startup fail-closed behavior, and LF checkout policy.
 
 The final gate is:
 
