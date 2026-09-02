@@ -135,3 +135,26 @@ Commit: `feat: validate locked content profiles at launch`
 - [x] Keep the isolated branch/worktree ready for the owner's dual-monitor visual inspection.
 
 Commit: `docs: record P0.1 content profile verification`
+
+### Task 6: Correct long-profile result causality after visual rehearsal
+
+**Files:**
+
+- Modify: `tests/content-profiles.test.ts`
+- Modify: `content/p0.1/profiles/songfeng-source/show.manifest.json`
+- Modify: `content/p0.1/profiles/river-channel/show.manifest.json`
+- Modify: `content/p0.1/profiles/tower-codebook/show.manifest.json`
+- Modify: `content/p0.1/content-lock.json`
+- Modify: `scripts/select-show-profile.ps1`
+- Modify: `scripts/start-show.ps1`
+
+- [x] Reproduce the visual-rehearsal safe-black failure and trace it to the first editor action
+  occurring after result completion but before result acceptance.
+- [x] Add a deterministic failing test that requires completion, then acceptance, before every
+  long profile's first non-reset editor action.
+- [x] Add one bounded accepted token-stream cue to each long profile, bump all three profile
+  revisions and the lock revision to r2, and regenerate exact bytes and SHA-256 values.
+- [x] Run focused tests and the complete 795-test suite to green; rebuild and prove the Electron
+  main bundle remains byte-identical to accepted P0.
+
+Commit: `fix: require accepted result before profile writeback`
