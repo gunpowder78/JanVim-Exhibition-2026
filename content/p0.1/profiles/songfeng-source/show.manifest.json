@@ -1,14 +1,14 @@
 {
   "schema": 1,
   "loopId": "p0.1-songfeng-source-165s",
-  "loopDurationMs": 165000,
+  "loopDurationMs": 90000,
   "poemSha256": "b699de273f5bbaedb08241495f52ce863d3e8e1851275ce3b6251484d75190a8",
-  "contentRevision": "20260902-songfeng-source-r3",
+  "contentRevision": "20260902-songfeng-source-r4",
   "preparedBy": "JanVim Exhibition Team",
   "cues": [
     {
       "id": "songfeng-source-prompt",
-      "atMs": 3000,
+      "atMs": 2000,
       "target": "secondary",
       "kind": "prompt",
       "payload": {
@@ -19,7 +19,7 @@
     },
     {
       "id": "songfeng-source-stream",
-      "atMs": 7000,
+      "atMs": 5000,
       "target": "secondary",
       "kind": "token-stream",
       "payload": {
@@ -29,7 +29,7 @@
     },
     {
       "id": "songfeng-source-accept",
-      "atMs": 9000,
+      "atMs": 7000,
       "target": "secondary",
       "kind": "token-stream",
       "payload": {
@@ -39,7 +39,7 @@
     },
     {
       "id": "songfeng-source-move-start",
-      "atMs": 11000,
+      "atMs": 9000,
       "target": "main",
       "kind": "editor-action",
       "payload": {
@@ -57,7 +57,7 @@
     },
     {
       "id": "songfeng-source-move-line-end",
-      "atMs": 11500,
+      "atMs": 9500,
       "target": "main",
       "kind": "editor-action",
       "payload": {
@@ -75,7 +75,7 @@
     },
     {
       "id": "songfeng-source-insert-01",
-      "atMs": 14000,
+      "atMs": 12000,
       "target": "main",
       "kind": "editor-action",
       "payload": {
@@ -94,7 +94,7 @@
     },
     {
       "id": "songfeng-source-move-out-01",
-      "atMs": 18200,
+      "atMs": 14200,
       "target": "main",
       "kind": "editor-action",
       "payload": {
@@ -112,7 +112,7 @@
     },
     {
       "id": "songfeng-source-move-back-01",
-      "atMs": 19000,
+      "atMs": 15200,
       "target": "main",
       "kind": "editor-action",
       "payload": {
@@ -130,7 +130,7 @@
     },
     {
       "id": "songfeng-source-insert-02",
-      "atMs": 22000,
+      "atMs": 17000,
       "target": "main",
       "kind": "editor-action",
       "payload": {
@@ -149,7 +149,7 @@
     },
     {
       "id": "songfeng-source-move-out-02",
-      "atMs": 26200,
+      "atMs": 19200,
       "target": "main",
       "kind": "editor-action",
       "payload": {
@@ -167,7 +167,7 @@
     },
     {
       "id": "songfeng-source-move-back-02",
-      "atMs": 27000,
+      "atMs": 20200,
       "target": "main",
       "kind": "editor-action",
       "payload": {
@@ -185,7 +185,7 @@
     },
     {
       "id": "songfeng-source-insert-03",
-      "atMs": 30000,
+      "atMs": 22000,
       "target": "main",
       "kind": "editor-action",
       "payload": {
@@ -204,7 +204,7 @@
     },
     {
       "id": "songfeng-source-move-out-03",
-      "atMs": 34200,
+      "atMs": 24200,
       "target": "main",
       "kind": "editor-action",
       "payload": {
@@ -222,7 +222,7 @@
     },
     {
       "id": "songfeng-source-move-back-03",
-      "atMs": 35000,
+      "atMs": 25200,
       "target": "main",
       "kind": "editor-action",
       "payload": {
@@ -240,7 +240,7 @@
     },
     {
       "id": "songfeng-source-insert-04",
-      "atMs": 38500,
+      "atMs": 27000,
       "target": "main",
       "kind": "editor-action",
       "payload": {
@@ -259,7 +259,7 @@
     },
     {
       "id": "songfeng-source-move-out-04",
-      "atMs": 42700,
+      "atMs": 29200,
       "target": "main",
       "kind": "editor-action",
       "payload": {
@@ -277,7 +277,7 @@
     },
     {
       "id": "songfeng-source-move-back-04",
-      "atMs": 43500,
+      "atMs": 30200,
       "target": "main",
       "kind": "editor-action",
       "payload": {
@@ -295,7 +295,7 @@
     },
     {
       "id": "songfeng-source-insert-05",
-      "atMs": 47000,
+      "atMs": 32000,
       "target": "main",
       "kind": "editor-action",
       "payload": {
@@ -314,7 +314,7 @@
     },
     {
       "id": "songfeng-source-move-out-05",
-      "atMs": 51200,
+      "atMs": 34200,
       "target": "main",
       "kind": "editor-action",
       "payload": {
@@ -332,7 +332,7 @@
     },
     {
       "id": "songfeng-source-move-back-05",
-      "atMs": 52000,
+      "atMs": 35200,
       "target": "main",
       "kind": "editor-action",
       "payload": {
@@ -350,7 +350,7 @@
     },
     {
       "id": "songfeng-source-insert-06",
-      "atMs": 55500,
+      "atMs": 37000,
       "target": "main",
       "kind": "editor-action",
       "payload": {
@@ -369,7 +369,7 @@
     },
     {
       "id": "songfeng-source-move-out-06",
-      "atMs": 59700,
+      "atMs": 39200,
       "target": "main",
       "kind": "editor-action",
       "payload": {
@@ -387,7 +387,7 @@
     },
     {
       "id": "songfeng-source-move-back-06",
-      "atMs": 60500,
+      "atMs": 40200,
       "target": "main",
       "kind": "editor-action",
       "payload": {
@@ -405,7 +405,7 @@
     },
     {
       "id": "songfeng-source-insert-07",
-      "atMs": 64500,
+      "atMs": 42000,
       "target": "main",
       "kind": "editor-action",
       "payload": {
@@ -424,7 +424,7 @@
     },
     {
       "id": "songfeng-source-move-out-07",
-      "atMs": 68700,
+      "atMs": 44200,
       "target": "main",
       "kind": "editor-action",
       "payload": {
@@ -442,7 +442,7 @@
     },
     {
       "id": "songfeng-source-move-back-07",
-      "atMs": 69500,
+      "atMs": 45200,
       "target": "main",
       "kind": "editor-action",
       "payload": {
@@ -460,7 +460,7 @@
     },
     {
       "id": "songfeng-source-insert-08",
-      "atMs": 73500,
+      "atMs": 47000,
       "target": "main",
       "kind": "editor-action",
       "payload": {
@@ -479,7 +479,7 @@
     },
     {
       "id": "songfeng-source-move-out-08",
-      "atMs": 77700,
+      "atMs": 49200,
       "target": "main",
       "kind": "editor-action",
       "payload": {
@@ -497,7 +497,7 @@
     },
     {
       "id": "songfeng-source-move-back-08",
-      "atMs": 78500,
+      "atMs": 50200,
       "target": "main",
       "kind": "editor-action",
       "payload": {
@@ -515,7 +515,7 @@
     },
     {
       "id": "songfeng-source-insert-09",
-      "atMs": 82500,
+      "atMs": 52000,
       "target": "main",
       "kind": "editor-action",
       "payload": {
@@ -534,7 +534,7 @@
     },
     {
       "id": "songfeng-source-move-out-09",
-      "atMs": 86700,
+      "atMs": 54200,
       "target": "main",
       "kind": "editor-action",
       "payload": {
@@ -552,7 +552,7 @@
     },
     {
       "id": "songfeng-source-move-back-09",
-      "atMs": 87500,
+      "atMs": 55200,
       "target": "main",
       "kind": "editor-action",
       "payload": {
@@ -570,7 +570,7 @@
     },
     {
       "id": "songfeng-source-insert-10",
-      "atMs": 92000,
+      "atMs": 57000,
       "target": "main",
       "kind": "editor-action",
       "payload": {
@@ -589,7 +589,7 @@
     },
     {
       "id": "songfeng-source-move-out-10",
-      "atMs": 96200,
+      "atMs": 59200,
       "target": "main",
       "kind": "editor-action",
       "payload": {
@@ -607,7 +607,7 @@
     },
     {
       "id": "songfeng-source-move-back-10",
-      "atMs": 97000,
+      "atMs": 60200,
       "target": "main",
       "kind": "editor-action",
       "payload": {
@@ -625,7 +625,7 @@
     },
     {
       "id": "songfeng-source-insert-11",
-      "atMs": 101500,
+      "atMs": 62000,
       "target": "main",
       "kind": "editor-action",
       "payload": {
@@ -644,7 +644,7 @@
     },
     {
       "id": "songfeng-source-insert-12",
-      "atMs": 111000,
+      "atMs": 67000,
       "target": "main",
       "kind": "editor-action",
       "payload": {
@@ -663,7 +663,7 @@
     },
     {
       "id": "songfeng-source-insert-13",
-      "atMs": 121000,
+      "atMs": 72000,
       "target": "main",
       "kind": "editor-action",
       "payload": {
@@ -682,7 +682,7 @@
     },
     {
       "id": "songfeng-source-insert-14",
-      "atMs": 132000,
+      "atMs": 77000,
       "target": "main",
       "kind": "editor-action",
       "payload": {
@@ -701,7 +701,7 @@
     },
     {
       "id": "songfeng-source-insert-15",
-      "atMs": 143000,
+      "atMs": 82000,
       "target": "main",
       "kind": "editor-action",
       "payload": {
@@ -720,17 +720,17 @@
     },
     {
       "id": "songfeng-source-fade",
-      "atMs": 155000,
+      "atMs": 85000,
       "target": "secondary",
       "kind": "fade",
       "payload": {
         "label": "return-to-poem",
-        "durationMs": 8000
+        "durationMs": 4000
       }
     },
     {
       "id": "songfeng-source-reset",
-      "atMs": 165000,
+      "atMs": 90000,
       "target": "main",
       "kind": "editor-action",
       "payload": {

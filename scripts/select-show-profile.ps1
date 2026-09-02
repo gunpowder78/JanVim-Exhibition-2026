@@ -8,7 +8,7 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
-$expectedContentLockSha256 = 'cc64ac52728bd44e747d558aca797536d1ec488faa960a7845ef90916f9d2e9f'
+$expectedContentLockSha256 = '4be49bb5cbabd9e5bbd43efabf950b3f535e771a795dd1e90609f16f09e03710'
 $expectedContentLockBytes = 2332L
 $expectedPoemSha256 = 'b699de273f5bbaedb08241495f52ce863d3e8e1851275ce3b6251484d75190a8'
 $allowedProfiles = @('p0-baseline', 'songfeng-source', 'river-channel', 'tower-codebook')
@@ -196,7 +196,7 @@ function Assert-ManifestContract {
         throw $Reason
     }
     $duration = Get-Property $Manifest 'loopDurationMs' $Reason
-    $expectedDuration = if ($ProfileId -ceq 'p0-baseline') { 90000L } else { 165000L }
+    $expectedDuration = 90000L
     if (-not (Test-ExactInteger -Value $duration -Expected $expectedDuration)) {
         throw $Reason
     }
@@ -299,7 +299,7 @@ $lock = Convert-BoundedJson -Snapshot $lockSnapshot -Reason 'content-lock-invali
 Assert-ExactProperties -Value $lock -Names @('schema', 'revision', 'poem', 'profiles') -Reason 'content-lock-invalid'
 if (
     -not (Test-ExactInteger -Value (Get-Property $lock 'schema' 'content-lock-invalid') -Expected 1) -or
-    (Get-Property $lock 'revision' 'content-lock-invalid') -cne '20260902-p0.1-r3'
+    (Get-Property $lock 'revision' 'content-lock-invalid') -cne '20260902-p0.1-r4'
 ) {
     throw 'content-lock-invalid'
 }

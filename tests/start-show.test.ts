@@ -2216,7 +2216,7 @@ describe("offline show launcher and external watchdog", () => {
       const manifest = JSON.parse(readFileSync(profilePath, "utf8")) as {
         cues: Array<{ atMs: number }>;
       };
-      manifest.cues.at(-1)!.atMs = 164_999;
+      manifest.cues.at(-1)!.atMs = 89_999;
       const manifestText = `${JSON.stringify(manifest, null, 2)}\n`;
       writeText(profilePath, manifestText);
       writeText(fixture.manifest, manifestText);

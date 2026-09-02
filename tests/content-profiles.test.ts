@@ -125,7 +125,7 @@ describe("P0.1 frozen content profiles", () => {
     const manifest = parseShowManifest(
       JSON.parse(readFileSync(absolute(profile.manifest.path), "utf8")),
     );
-    expect(manifest.loopDurationMs).toBe(165_000);
+    expect(manifest.loopDurationMs).toBe(90_000);
     expect(manifest.poemSha256).toBe(poemHash);
     expect(manifest.contentRevision).toBe(profile.revision);
     const firstEditorIndex = manifest.cues.findIndex(
@@ -180,7 +180,7 @@ describe("P0.1 frozen content profiles", () => {
     }
     const finalCue = manifest.cues.at(-1);
     expect(finalCue).toMatchObject({
-      atMs: 165_000,
+      atMs: 90_000,
       target: "main",
       kind: "editor-action",
       payload: { action: { type: "reset" } },

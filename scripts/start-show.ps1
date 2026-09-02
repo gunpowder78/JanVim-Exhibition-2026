@@ -36,7 +36,7 @@ $expectedCommit = 'e95633101d93f8448b0f906e918b5d836ab95273'
 $expectedShowConfigSha256 = '506b4fc09424d974695020465e3bf7b0b2b58ee3d566d0c6b15fb8cb5c2f1615'
 $expectedPluginLabSha256 = '5a2b336fbc6974c98826cdacd0474dd33a31e05e13ebade37dbb7018aa727cb2'
 $expectedContentLockBytes = 2332L
-$expectedContentLockSha256 = 'cc64ac52728bd44e747d558aca797536d1ec488faa960a7845ef90916f9d2e9f'
+$expectedContentLockSha256 = '4be49bb5cbabd9e5bbd43efabf950b3f535e771a795dd1e90609f16f09e03710'
 $expectedPoemSha256 = 'b699de273f5bbaedb08241495f52ce863d3e8e1851275ce3b6251484d75190a8'
 $allowedContentProfiles = @('p0-baseline', 'songfeng-source', 'river-channel', 'tower-codebook')
 $maximumContentLockBytes = 32768
@@ -857,7 +857,7 @@ function Assert-ContentProfileManifest {
         -ExpectedNames @('schema', 'loopId', 'loopDurationMs', 'poemSha256', 'contentRevision', 'preparedBy', 'cues') `
         -Reason $reason
     $duration = Get-RequiredPropertyValue -InputObject $Manifest -Name 'loopDurationMs' -Reason $reason
-    $expectedDuration = if ($ProfileId -ceq 'p0-baseline') { 90000L } else { 165000L }
+    $expectedDuration = 90000L
     if (
         -not (Test-ExactJsonInteger -Value (Get-RequiredPropertyValue -InputObject $Manifest -Name 'schema' -Reason $reason) -Expected 1) -or
         -not (Test-ExactJsonInteger -Value $duration -Expected $expectedDuration) -or
@@ -986,7 +986,7 @@ function Read-SelectedContentProfile {
         -Reason 'content-lock-invalid'
     if (
         -not (Test-ExactJsonInteger -Value (Get-RequiredPropertyValue -InputObject $lock -Name 'schema' -Reason 'content-lock-invalid') -Expected 1) -or
-        (Get-RequiredPropertyValue -InputObject $lock -Name 'revision' -Reason 'content-lock-invalid') -cne '20260902-p0.1-r3'
+        (Get-RequiredPropertyValue -InputObject $lock -Name 'revision' -Reason 'content-lock-invalid') -cne '20260902-p0.1-r4'
     ) {
         throw 'content-lock-invalid'
     }
