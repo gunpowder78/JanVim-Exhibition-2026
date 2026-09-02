@@ -488,9 +488,9 @@ describe("real G2 runtime adapter boundaries", () => {
       "D:\\show\\content\\fixture\\poem.txt",
       "D:\\show\\runtime\\janvim\\janvim-core.exe",
     ]);
-    expect(janVimCore.byteLength).toBe(18_866_688);
+    expect(janVimCore.byteLength).toBe(18_869_248);
     expect(createHash("sha256").update(janVimCore).digest("hex")).toBe(
-      "224b3457d89fbc6cf946359683632f29f9262bae08b6f0d2e3043a3a7a6d83b3",
+      "e492c96516439b38bfa204cc3bc5586ba2b303b7250ee9db3564aa65ffbee118",
     );
   });
 
@@ -671,11 +671,11 @@ describe("real G2 runtime adapter boundaries", () => {
         sha256: harness.confirmedMapSha256,
       },
       artifact: {
-        tag: "v0.10.1-gmk.4",
-        commit: "e95633101d93f8448b0f906e918b5d836ab95273",
-        coreBytes: 18_866_688,
+        tag: "v0.10.1-gmk.4.punctuation.1",
+        commit: "3dddb882e7f54f77b7847a3e65f1acd815b3ea4f",
+        coreBytes: 18_869_248,
         coreSha256:
-          "224b3457d89fbc6cf946359683632f29f9262bae08b6f0d2e3043a3a7a6d83b3",
+          "e492c96516439b38bfa204cc3bc5586ba2b303b7250ee9db3564aa65ffbee118",
         layoutEngine: "orthogonal",
       },
       content: {

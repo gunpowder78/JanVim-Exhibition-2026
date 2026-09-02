@@ -1691,7 +1691,7 @@ function runSecondaryFaultContract(
       hwnd: "0x0000000000001F43",
       executableRelativePath: "janvim-core.exe",
       executableSha256:
-        "224b3457d89fbc6cf946359683632f29f9262bae08b6f0d2e3043a3a7a6d83b3",
+        "e492c96516439b38bfa204cc3bc5586ba2b303b7250ee9db3564aa65ffbee118",
     },
   };
   writeFileSync(join(root, "run-lease.json"), JSON.stringify(lease), "utf8");
@@ -1863,7 +1863,7 @@ $lease = [ordered]@{
         hwnd = ('0x{0:X16}' -f $leaseWindow.ToInt64())
         executableRelativePath = 'janvim-core.exe'
         executableSha256 =
-            '224b3457d89fbc6cf946359683632f29f9262bae08b6f0d2e3043a3a7a6d83b3'
+            'e492c96516439b38bfa204cc3bc5586ba2b303b7250ee9db3564aa65ffbee118'
     }
 }
 $lease | ConvertTo-Json -Depth 8 |
@@ -2539,11 +2539,11 @@ describe("Task 9 recovery operations", () => {
     }
     for (const literal of [
       "$artifactLock.sourceRepository -cne 'D:/github/JanVim'",
-      "$artifactLock.tag -cne 'v0.10.1-gmk.4'",
-      "$artifactLock.commit -cne 'e95633101d93f8448b0f906e918b5d836ab95273'",
+      "$artifactLock.tag -cne 'v0.10.1-gmk.4.punctuation.1'",
+      "$artifactLock.commit -cne '3dddb882e7f54f77b7847a3e65f1acd815b3ea4f'",
       "$artifactLock.core -cne 'janvim-core.exe'",
-      "$artifactLock.coreBytes -ne 18866688",
-      "$artifactLock.coreSha256 -cne '224b3457d89fbc6cf946359683632f29f9262bae08b6f0d2e3043a3a7a6d83b3'",
+      "$artifactLock.coreBytes -ne 18869248",
+      "$artifactLock.coreSha256 -cne 'e492c96516439b38bfa204cc3bc5586ba2b303b7250ee9db3564aa65ffbee118'",
       "$artifactLock.config -cne 'show/janvim-show.toml'",
       "$artifactLock.layoutEngine -cne 'orthogonal'",
       "$artifactLock.role -cne 'primary-projector'",

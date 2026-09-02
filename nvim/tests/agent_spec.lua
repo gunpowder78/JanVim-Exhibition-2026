@@ -104,18 +104,18 @@ run("prepare creates a nameless nofile buffer and never touches a source poem", 
   agent:dispose()
 end)
 
-run("single-cell vermilion punctuation is display-only and survives reset", function()
-  local compact_text = "甲，乙。丙；丁：戊？己！庚、辛"
+run("native vermilion punctuation is display-only and survives reset", function()
+  local punctuation_text = "甲，乙。丙；丁：戊？己！庚、辛"
   local mappings = {
-    { source = "，", replacement = "," },
-    { source = "。", replacement = "." },
-    { source = "；", replacement = ";" },
-    { source = "：", replacement = ":" },
-    { source = "？", replacement = "?" },
-    { source = "！", replacement = "!" },
-    { source = "、", replacement = "," },
+    { source = "，", group = "JanVimCompactComma" },
+    { source = "。", group = "JanVimCompactFullStop" },
+    { source = "；", group = "JanVimCompactSemicolon" },
+    { source = "：", group = "JanVimCompactColon" },
+    { source = "？", group = "JanVimCompactQuestion" },
+    { source = "！", group = "JanVimCompactExclamation" },
+    { source = "、", group = "JanVimCompactEnumeration" },
   }
-  local expected_buffer_text = compact_text .. "\n黄河入海流"
+  local expected_buffer_text = punctuation_text .. "\n黄河入海流"
   local expected_buffer_hash = vim.fn.sha256(expected_buffer_text)
   local original_conceal = vim.api.nvim_get_hl(0, { name = "Conceal", link = true })
   vim.api.nvim_set_hl(0, "Conceal", { fg = "#112233" })
@@ -126,7 +126,7 @@ run("single-cell vermilion punctuation is display-only and survives reset", func
     local replace_ack = dispatch(agent, command(cue_id, {
       type = "replace",
       rangeId = "opening",
-      text = compact_text,
+      text = punctuation_text,
     }))
     equal(replace_ack.outcome, "applied")
     equal(replace_ack.bufferSha256, expected_buffer_hash)
@@ -134,27 +134,32 @@ run("single-cell vermilion punctuation is display-only and survives reset", func
     local buffer_number = assert(agent:buffer_number())
     vim.api.nvim_set_current_buf(buffer_number)
     equal(buffer_text(buffer_number), expected_buffer_text)
-    equal(vim.wo.conceallevel, 2)
-    equal(vim.wo.concealcursor, "nvic")
+    equal(vim.wo.conceallevel, 0)
+    equal(vim.wo.concealcursor, "")
 
     local line = vim.api.nvim_buf_get_lines(buffer_number, 0, 1, true)[1]
     for _, mapping in ipairs(mappings) do
-      equal(vim.fn.strdisplaywidth(mapping.replacement), 1)
       local byte_column = assert(line:find(mapping.source, 1, true))
       local concealed = vim.fn.synconcealed(1, byte_column)
-      equal(concealed[1], 1)
-      equal(concealed[2], mapping.replacement)
+      equal(concealed[1], 0)
+      local syntax_id = vim.fn.synID(1, byte_column, 1)
+      equal(vim.fn.synIDattr(syntax_id, "name"), mapping.group)
     end
     local global_conceal = vim.api.nvim_get_hl(0, { name = "Conceal", link = true })
     equal(global_conceal.fg, 0x112233)
     local highlight_namespace = vim.api.nvim_get_hl_ns({ winid = window_number })
     expect(highlight_namespace > 0, "punctuation highlight namespace is not window-scoped")
-    local punctuation_highlight = vim.api.nvim_get_hl(highlight_namespace, { name = "Conceal", link = true })
-    equal(punctuation_highlight.fg, 0xB74133)
-    equal(punctuation_highlight.link, nil)
-    equal(punctuation_highlight.bg, nil)
-    equal(punctuation_highlight.bold, nil)
-    equal(punctuation_highlight.italic, nil)
+    for _, mapping in ipairs(mappings) do
+      local punctuation_highlight = vim.api.nvim_get_hl(
+        highlight_namespace,
+        { name = mapping.group, link = true }
+      )
+      equal(punctuation_highlight.fg, 0xB74133)
+      equal(punctuation_highlight.link, nil)
+      equal(punctuation_highlight.bg, nil)
+      equal(punctuation_highlight.bold, nil)
+      equal(punctuation_highlight.italic, nil)
+    end
   end
 
   local ok, error_message = xpcall(function()

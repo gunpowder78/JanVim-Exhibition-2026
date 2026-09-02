@@ -4,15 +4,14 @@ param()
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
-$ExpectedTag = 'v0.10.1-gmk.4'
-$ExpectedCommit = 'e95633101d93f8448b0f906e918b5d836ab95273'
+$ExpectedTag = 'v0.10.1-gmk.4.punctuation.1'
+$ExpectedCommit = '3dddb882e7f54f77b7847a3e65f1acd815b3ea4f'
 $ExpectedSourceRepository = 'D:/github/JanVim'
 $ExpectedProvenanceRepository = 'https://github.com/gunpowder78/JanVim.git'
 $ExpectedArchive = 'JanVim-win-x64.zip'
 $ExpectedChecksum = 'JanVim-win-x64.zip.sha256'
 $ExpectedProvenanceRecord = 'JanVim-win-x64.provenance.json'
 $ExpectedBuildLog = 'JanVim-win-x64.build.log'
-$ExpectedCiReference = 'https://github.com/gunpowder78/JanVim/actions/runs/31381575434#artifact-9060808838'
 $HashPattern = '^[0-9a-f]{64}$'
 $MinimumCoreBytes = [long]1048576
 
@@ -266,16 +265,13 @@ function Assert-ProvenanceRecord {
     Assert-ExactProperty -InputObject $Record -Name 'archive' -Expected $ExpectedArchive -Reason 'provenance-archive-mismatch' -ReasonPrefix 'provenance'
 
     $kind = [string](Get-RequiredProperty -InputObject $Record -Name 'kind' -ReasonPrefix 'provenance')
-    if ($kind -notin @('preserved-ci-artifact', 'verified-portable-directory', 'isolated-tag-rebuild')) {
+    if ($kind -notin @('verified-portable-directory', 'isolated-tag-rebuild')) {
         throw 'provenance-kind-invalid'
     }
     Assert-ExactProperty -InputObject $Lock -Name 'provenanceKind' -Expected $kind -Reason 'provenance-kind-lock-mismatch' -ReasonPrefix 'lock'
     $reference = Get-RequiredProperty -InputObject $Record -Name 'evidenceReference' -ReasonPrefix 'provenance'
     if ($reference -isnot [string] -or $reference.Length -lt 8 -or $reference.Length -gt 512) {
         throw 'provenance-reference-invalid'
-    }
-    if ($kind -ceq 'preserved-ci-artifact' -and $reference -cne $ExpectedCiReference) {
-        throw 'provenance-ci-reference-mismatch'
     }
     Assert-ExactProperty -InputObject $Lock -Name 'provenanceReference' -Expected $reference -Reason 'provenance-reference-lock-mismatch' -ReasonPrefix 'lock'
 
@@ -382,16 +378,11 @@ if ($layoutEngine -notin @('dynamic', 'orthogonal')) {
     throw 'lock-layout-engine-invalid'
 }
 $provenanceKind = [string](Get-RequiredProperty -InputObject $lock -Name 'provenanceKind' -ReasonPrefix 'lock')
-if ($provenanceKind -notin @('preserved-ci-artifact', 'verified-portable-directory', 'isolated-tag-rebuild')) {
+if ($provenanceKind -notin @('verified-portable-directory', 'isolated-tag-rebuild')) {
     throw 'lock-provenance-kind-invalid'
 }
 $evidenceRecord = [string](Get-RequiredProperty -InputObject $lock -Name 'evidenceRecord' -ReasonPrefix 'lock')
-if ($provenanceKind -ceq 'preserved-ci-artifact') {
-    if ($evidenceRecord -cne $ExpectedProvenanceRecord) {
-        throw 'lock-evidence-path-mismatch'
-    }
-}
-elseif ($evidenceRecord -cne $ExpectedBuildLog) {
+if ($evidenceRecord -cne $ExpectedBuildLog) {
     throw 'lock-evidence-path-mismatch'
 }
 $evidencePath = Join-Path $runtimeRoot $evidenceRecord
@@ -454,17 +445,10 @@ if ($Matches[1] -cne $lockedHashes['archiveSha256']) {
 
 $provenance = Read-JsonObject -Path $provenancePath -Reason 'provenance-invalid-json'
 Assert-ProvenanceRecord -Record $provenance -Lock $lock
-if ($provenanceKind -ceq 'preserved-ci-artifact') {
-    if ($lockedHashes['evidenceSha256'] -cne $lockedHashes['provenanceSha256']) {
-        throw 'ci-evidence-hash-mismatch'
-    }
-}
-elseif ([string]$provenance.evidenceReference -cne "build-log-sha256:$($lockedHashes['evidenceSha256'])") {
+if ([string]$provenance.evidenceReference -cne "build-log-sha256:$($lockedHashes['evidenceSha256'])") {
     throw 'build-evidence-hash-mismatch'
 }
-else {
-    Assert-BuildEvidenceContent -Path $evidencePath
-}
+Assert-BuildEvidenceContent -Path $evidencePath
 
 $agentSourceRoot = Join-Path $repositoryRoot 'nvim\lua\janvim_exhibition'
 $agentTargetRoot = Join-Path $repositoryRoot 'runtime\user-root\plugin-lab\local\janvim-exhibition\lua\janvim_exhibition'

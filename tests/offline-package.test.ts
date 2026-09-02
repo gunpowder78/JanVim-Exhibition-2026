@@ -16,8 +16,8 @@ import { tmpdir } from "node:os";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-const EXPECTED_TAG = "v0.10.1-gmk.4";
-const EXPECTED_COMMIT = "e95633101d93f8448b0f906e918b5d836ab95273";
+const EXPECTED_TAG = "v0.10.1-gmk.4.punctuation.1";
+const EXPECTED_COMMIT = "3dddb882e7f54f77b7847a3e65f1acd815b3ea4f";
 const ARCHIVE_NAME = "JanVim-win-x64.zip";
 const PROVENANCE_NAME = "JanVim-win-x64.provenance.json";
 const BUILD_LOG_NAME = "JanVim-win-x64.build.log";
@@ -308,6 +308,7 @@ describe("offline JanVim artifact scripts", () => {
     expect(prepared.status).toBe(0);
     const runtimeRoot = join(fixture.root, "runtime", "janvim");
     const lockPath = join(fixture.root, "janvim-artifact.lock.json");
+    expect(readFileSync(lockPath).includes(13)).toBe(false);
     const lock = JSON.parse(readFileSync(lockPath, "utf8")) as Record<string, unknown>;
 
     expect(lock).toMatchObject({
@@ -463,6 +464,46 @@ describe("offline JanVim artifact scripts", () => {
       expect(existsSync(join(fixture.root, "runtime", "janvim"))).toBe(false);
       expect(existsSync(join(fixture.root, "janvim-artifact.lock.json"))).toBe(false);
     }
+  });
+
+  it("rejects the baseline preserved-CI provenance mode for the isolated candidate", () => {
+    const fixture = makeFixture();
+    writeProvenance(fixture, {
+      kind: "preserved-ci-artifact",
+      evidenceReference:
+        "https://github.com/gunpowder78/JanVim/actions/runs/31381575434#artifact-9060808838",
+    });
+
+    expectFailure(prepareFromArchive(fixture), /provenance-kind-invalid/i);
+    expect(existsSync(join(fixture.root, "runtime", "janvim"))).toBe(false);
+    expect(existsSync(join(fixture.root, "janvim-artifact.lock.json"))).toBe(false);
+  });
+
+  it("rejects a self-consistent baseline preserved-CI identity during verification", () => {
+    const fixture = makeFixture();
+    expect(prepareFromArchive(fixture).status).toBe(0);
+    const runtimeRoot = join(fixture.root, "runtime", "janvim");
+    const runtimeProvenance = join(runtimeRoot, PROVENANCE_NAME);
+    const lockPath = join(fixture.root, "janvim-artifact.lock.json");
+    const legacyReference =
+      "https://github.com/gunpowder78/JanVim/actions/runs/31381575434#artifact-9060808838";
+    const provenance = JSON.parse(readFileSync(runtimeProvenance, "utf8")) as Record<
+      string,
+      unknown
+    >;
+    provenance.kind = "preserved-ci-artifact";
+    provenance.evidenceReference = legacyReference;
+    writeText(runtimeProvenance, `${JSON.stringify(provenance, null, 2)}\n`);
+    const provenanceSha256 = sha256(runtimeProvenance);
+    const lock = JSON.parse(readFileSync(lockPath, "utf8")) as Record<string, unknown>;
+    lock.provenanceKind = "preserved-ci-artifact";
+    lock.provenanceReference = legacyReference;
+    lock.provenanceSha256 = provenanceSha256;
+    lock.evidenceRecord = PROVENANCE_NAME;
+    lock.evidenceSha256 = provenanceSha256;
+    writeText(lockPath, `${JSON.stringify(lock, null, 2)}\n`);
+
+    expectFailure(runScript(fixture.root, "verify-runtime.ps1"), /provenance-kind-invalid/i);
   });
 
   it("requires the actual isolated-build log and matches its digest before copying", () => {

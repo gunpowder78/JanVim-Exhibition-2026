@@ -2046,9 +2046,9 @@ describe("real Task 9 show runtime adapters", () => {
       "read:D:\\VirtualData\\JanVim-Exhibition-Rehearsals\\show-001\\display-map.json",
       "read:D:\\show\\runtime\\janvim\\janvim-core.exe",
     ]);
-    expect(janVimCore.byteLength).toBe(18_866_688);
+    expect(janVimCore.byteLength).toBe(18_869_248);
     expect(createHash("sha256").update(janVimCore).digest("hex")).toBe(
-      "224b3457d89fbc6cf946359683632f29f9262bae08b6f0d2e3043a3a7a6d83b3",
+      "e492c96516439b38bfa204cc3bc5586ba2b303b7250ee9db3564aa65ffbee118",
     );
     expect(harness.processListeners).toHaveLength(0);
     expect(harness.appListeners).toHaveLength(0);
@@ -2058,7 +2058,7 @@ describe("real Task 9 show runtime adapters", () => {
     const changedLock = Buffer.from(
       artifactLock
         .toString("utf8")
-        .replace('"archiveBytes": 31345595', '"archiveBytes": 31345594'),
+        .replace('"archiveBytes": 31347910', '"archiveBytes": 31347909'),
       "utf8",
     );
     const harness = createValidationHarness({ artifactLockBytes: changedLock });
@@ -2204,7 +2204,7 @@ describe("real Task 9 show runtime adapters", () => {
           hwnd: "0x0000000000001F43",
           executableRelativePath: "janvim-core.exe",
           executableSha256:
-            "224b3457d89fbc6cf946359683632f29f9262bae08b6f0d2e3043a3a7a6d83b3",
+            "e492c96516439b38bfa204cc3bc5586ba2b303b7250ee9db3564aa65ffbee118",
         },
       },
     });
@@ -3485,7 +3485,7 @@ describe("real Task 9 show runtime adapters", () => {
     const changedLock = Buffer.from(
       artifactLock
         .toString("utf8")
-        .replace('"archiveBytes": 31345595', '"archiveBytes": 31345594'),
+        .replace('"archiveBytes": 31347910', '"archiveBytes": 31347909'),
       "utf8",
     );
     const harness = createStartupHarness({ artifactLockBytes: changedLock });

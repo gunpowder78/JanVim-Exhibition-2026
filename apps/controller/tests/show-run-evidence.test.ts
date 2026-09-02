@@ -138,8 +138,8 @@ function validEvidenceRecord(
       },
     },
     artifact: {
-      tag: "v0.10.1-gmk.4",
-      commit: "e95633101d93f8448b0f906e918b5d836ab95273",
+      tag: "v0.10.1-gmk.4.punctuation.1",
+      commit: "3dddb882e7f54f77b7847a3e65f1acd815b3ea4f",
       layoutEngine: "orthogonal",
       ...TASK9_ARTIFACT_IDENTITY,
     },
@@ -395,10 +395,10 @@ describe("strict show-run evidence schema", () => {
   it("binds evidence to the exact frozen Task 9 artifact identity", () => {
     expect(TASK9_ARTIFACT_IDENTITY).toEqual({
       lockSha256:
-        "303966c4c07eb8fd69458e90c5769198f9eef9e1a639c76d8bc58c5587d363b4",
-      coreBytes: 18_866_688,
+        "a2f857d8a1dc832c7a02a23ca816fd2e3e6cc21386956bc608f8fe34dbbae3a2",
+      coreBytes: 18_869_248,
       coreSha256:
-        "224b3457d89fbc6cf946359683632f29f9262bae08b6f0d2e3043a3a7a6d83b3",
+        "e492c96516439b38bfa204cc3bc5586ba2b303b7250ee9db3564aa65ffbee118",
     });
     expect(Object.isFrozen(TASK9_ARTIFACT_IDENTITY)).toBe(true);
 

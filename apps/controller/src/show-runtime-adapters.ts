@@ -901,8 +901,8 @@ function buildShowEvidence(
       },
     },
     artifact: {
-      tag: "v0.10.1-gmk.4",
-      commit: "e95633101d93f8448b0f906e918b5d836ab95273",
+      tag: "v0.10.1-gmk.4.punctuation.1",
+      commit: "3dddb882e7f54f77b7847a3e65f1acd815b3ea4f",
       layoutEngine: "orthogonal",
       ...TASK9_ARTIFACT_IDENTITY,
     },
@@ -2474,8 +2474,8 @@ const artifactLockSchema = z
   .object({
     schema: z.literal(1),
     sourceRepository: z.literal("D:/github/JanVim"),
-    tag: z.literal("v0.10.1-gmk.4"),
-    commit: z.literal("e95633101d93f8448b0f906e918b5d836ab95273"),
+    tag: z.literal("v0.10.1-gmk.4.punctuation.1"),
+    commit: z.literal("3dddb882e7f54f77b7847a3e65f1acd815b3ea4f"),
     archive: z.string().min(1),
     archiveBytes: z.number().int().positive(),
     archiveSha256: hashSchema,
