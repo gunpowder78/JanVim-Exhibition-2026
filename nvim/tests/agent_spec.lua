@@ -104,18 +104,23 @@ run("prepare creates a nameless nofile buffer and never touches a source poem", 
   agent:dispose()
 end)
 
-run("compact punctuation is display-only and survives reset", function()
+run("single-cell vermilion punctuation is display-only and survives reset", function()
   local compact_text = "甲，乙。丙；丁：戊？己！庚、辛"
   local mappings = {
-    { source = "，", replacement = "﹐" },
-    { source = "。", replacement = "﹒" },
-    { source = "；", replacement = "﹔" },
-    { source = "：", replacement = "﹕" },
-    { source = "？", replacement = "﹖" },
-    { source = "！", replacement = "﹗" },
-    { source = "、", replacement = "﹑" },
+    { source = "，", replacement = "," },
+    { source = "。", replacement = "." },
+    { source = "；", replacement = ";" },
+    { source = "：", replacement = ":" },
+    { source = "？", replacement = "?" },
+    { source = "！", replacement = "!" },
+    { source = "、", replacement = "," },
   }
+  local expected_buffer_text = compact_text .. "\n黄河入海流"
+  local expected_buffer_hash = vim.fn.sha256(expected_buffer_text)
+  local original_conceal = vim.api.nvim_get_hl(0, { name = "Conceal", link = true })
+  vim.api.nvim_set_hl(0, "Conceal", { fg = "#112233" })
   local agent = new_agent()
+  local window_number = vim.api.nvim_get_current_win()
 
   local function replace_and_assert(cue_id)
     local replace_ack = dispatch(agent, command(cue_id, {
@@ -124,27 +129,48 @@ run("compact punctuation is display-only and survives reset", function()
       text = compact_text,
     }))
     equal(replace_ack.outcome, "applied")
+    equal(replace_ack.bufferSha256, expected_buffer_hash)
 
     local buffer_number = assert(agent:buffer_number())
     vim.api.nvim_set_current_buf(buffer_number)
-    equal(buffer_text(buffer_number), compact_text .. "\n黄河入海流")
+    equal(buffer_text(buffer_number), expected_buffer_text)
     equal(vim.wo.conceallevel, 2)
     equal(vim.wo.concealcursor, "nvic")
 
     local line = vim.api.nvim_buf_get_lines(buffer_number, 0, 1, true)[1]
     for _, mapping in ipairs(mappings) do
+      equal(vim.fn.strdisplaywidth(mapping.replacement), 1)
       local byte_column = assert(line:find(mapping.source, 1, true))
       local concealed = vim.fn.synconcealed(1, byte_column)
       equal(concealed[1], 1)
       equal(concealed[2], mapping.replacement)
     end
+    local global_conceal = vim.api.nvim_get_hl(0, { name = "Conceal", link = true })
+    equal(global_conceal.fg, 0x112233)
+    local highlight_namespace = vim.api.nvim_get_hl_ns({ winid = window_number })
+    expect(highlight_namespace > 0, "punctuation highlight namespace is not window-scoped")
+    local punctuation_highlight = vim.api.nvim_get_hl(highlight_namespace, { name = "Conceal", link = true })
+    equal(punctuation_highlight.fg, 0xB74133)
+    equal(punctuation_highlight.link, nil)
+    equal(punctuation_highlight.bg, nil)
+    equal(punctuation_highlight.bold, nil)
+    equal(punctuation_highlight.italic, nil)
   end
 
-  prepare(agent)
-  replace_and_assert("cue-compact-before-reset")
-  dispatch(agent, command("cue-compact-reset", { type = "reset" }))
-  replace_and_assert("cue-compact-after-reset")
+  local ok, error_message = xpcall(function()
+    prepare(agent)
+    replace_and_assert("cue-compact-before-reset")
+    local reset_ack = dispatch(agent, command("cue-compact-reset", { type = "reset" }))
+    equal(reset_ack.bufferSha256, POEM_HASH)
+    replace_and_assert("cue-compact-after-reset")
+    agent:dispose()
+    equal(vim.api.nvim_get_hl_ns({ winid = window_number }), -1)
+  end, debug.traceback)
   agent:dispose()
+  vim.api.nvim_set_hl(0, "Conceal", original_conceal)
+  if not ok then
+    error(error_message, 0)
+  end
 end)
 
 run("balanced semantic palette is display-only and survives reset", function()

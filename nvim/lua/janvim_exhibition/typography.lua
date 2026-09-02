@@ -1,16 +1,17 @@
 local Typography = {}
+local HIGHLIGHT_NAMESPACE = vim.api.nvim_create_namespace("janvim-exhibition-typography")
 
 local SETTINGS = {
   conceal_level = 2,
   conceal_cursor = "nvic",
   punctuation = {
-    { group = "JanVimCompactComma", source = "，", replacement = "﹐" },
-    { group = "JanVimCompactFullStop", source = "。", replacement = "﹒" },
-    { group = "JanVimCompactSemicolon", source = "；", replacement = "﹔" },
-    { group = "JanVimCompactColon", source = "：", replacement = "﹕" },
-    { group = "JanVimCompactQuestion", source = "？", replacement = "﹖" },
-    { group = "JanVimCompactExclamation", source = "！", replacement = "﹗" },
-    { group = "JanVimCompactEnumeration", source = "、", replacement = "﹑" },
+    { group = "JanVimCompactComma", source = "，", replacement = "," },
+    { group = "JanVimCompactFullStop", source = "。", replacement = "." },
+    { group = "JanVimCompactSemicolon", source = "；", replacement = ";" },
+    { group = "JanVimCompactColon", source = "：", replacement = ":" },
+    { group = "JanVimCompactQuestion", source = "？", replacement = "?" },
+    { group = "JanVimCompactExclamation", source = "！", replacement = "!" },
+    { group = "JanVimCompactEnumeration", source = "、", replacement = "," },
   },
   semantic_highlights = {
     {
@@ -47,8 +48,11 @@ local SETTINGS = {
 }
 
 function Typography.apply()
+  local window_number = vim.api.nvim_get_current_win()
   vim.wo.conceallevel = SETTINGS.conceal_level
   vim.wo.concealcursor = SETTINGS.conceal_cursor
+  vim.api.nvim_set_hl(HIGHLIGHT_NAMESPACE, "Conceal", { fg = "#b74133" })
+  vim.api.nvim_win_set_hl_ns(window_number, HIGHLIGHT_NAMESPACE)
 
   for _, mapping in ipairs(SETTINGS.punctuation) do
     vim.cmd(string.format(
@@ -70,6 +74,17 @@ function Typography.apply()
       mapping.group,
       mapping.highlight
     ))
+  end
+
+  return window_number
+end
+
+function Typography.clear(window_number)
+  if type(window_number) ~= "number" or not vim.api.nvim_win_is_valid(window_number) then
+    return
+  end
+  if vim.api.nvim_get_hl_ns({ winid = window_number }) == HIGHLIGHT_NAMESPACE then
+    vim.api.nvim_win_set_hl_ns(window_number, -1)
   end
 end
 

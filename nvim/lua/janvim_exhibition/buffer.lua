@@ -66,6 +66,7 @@ function Buffer.new(options)
     buffer = nil,
     snapshot = nil,
     snapshot_hash = nil,
+    typography_window = nil,
   }, Buffer)
 end
 
@@ -84,6 +85,7 @@ function Buffer:prepare(poem, expected_hash)
   end
 
   local new_buffer = vim.api.nvim_create_buf(false, true)
+  local typography_window
   local ok, error_message = pcall(function()
     vim.api.nvim_set_option_value("buftype", "nofile", { buf = new_buffer })
     vim.api.nvim_set_option_value("bufhidden", "hide", { buf = new_buffer })
@@ -96,7 +98,7 @@ function Buffer:prepare(poem, expected_hash)
     vim.api.nvim_set_option_value("syntax", "markdown", { buf = new_buffer })
     vim.api.nvim_set_option_value("modified", false, { buf = new_buffer })
     vim.api.nvim_set_current_buf(new_buffer)
-    typography.apply()
+    typography_window = typography.apply()
   end)
   if not ok then
     if vim.api.nvim_buf_is_valid(new_buffer) then
@@ -106,10 +108,16 @@ function Buffer:prepare(poem, expected_hash)
   end
 
   local old_buffer = self.buffer
+  local old_typography_window = self.typography_window
   self.buffer = new_buffer
   self.snapshot = poem
   self.snapshot_hash = expected_hash
   self.ranges = ranges
+  self.typography_window = typography_window
+
+  if old_typography_window and old_typography_window ~= typography_window then
+    typography.clear(old_typography_window)
+  end
 
   if old_buffer and old_buffer ~= new_buffer and vim.api.nvim_buf_is_valid(old_buffer) then
     vim.api.nvim_buf_delete(old_buffer, { force = true })
@@ -201,10 +209,13 @@ end
 
 function Buffer:dispose()
   local buffer_number = self:number()
+  local typography_window = self.typography_window
   self.buffer = nil
   self.ranges = {}
   self.snapshot = nil
   self.snapshot_hash = nil
+  self.typography_window = nil
+  typography.clear(typography_window)
   if buffer_number and vim.api.nvim_buf_is_valid(buffer_number) then
     vim.api.nvim_buf_delete(buffer_number, { force = true })
   end
