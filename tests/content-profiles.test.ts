@@ -128,6 +128,30 @@ describe("P0.1 frozen content profiles", () => {
     expect(manifest.loopDurationMs).toBe(165_000);
     expect(manifest.poemSha256).toBe(poemHash);
     expect(manifest.contentRevision).toBe(profile.revision);
+    const firstEditorIndex = manifest.cues.findIndex(
+      (cue) =>
+        cue.kind === "editor-action" && cue.payload.action.type !== "reset",
+    );
+    const completionIndex = manifest.cues.findIndex(
+      (cue) =>
+        cue.kind === "token-stream" &&
+        cue.target !== "main" &&
+        cue.payload.complete === true &&
+        typeof cue.payload.text === "string" &&
+        cue.payload.text.trim().length > 0,
+    );
+    const acceptanceIndex = manifest.cues.findIndex(
+      (cue) =>
+        cue.kind === "token-stream" &&
+        cue.target !== "main" &&
+        cue.payload.accepted === true &&
+        typeof cue.payload.summary === "string" &&
+        cue.payload.summary.trim().length > 0,
+    );
+    expect(firstEditorIndex).toBeGreaterThan(0);
+    expect(completionIndex).toBeGreaterThanOrEqual(0);
+    expect(acceptanceIndex).toBeGreaterThan(completionIndex);
+    expect(firstEditorIndex).toBeGreaterThan(acceptanceIndex);
     const actions = manifest.cues
       .filter((cue) => cue.kind === "editor-action")
       .map((cue) => cue.payload.action);

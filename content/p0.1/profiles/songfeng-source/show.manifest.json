@@ -3,7 +3,7 @@
   "loopId": "p0.1-songfeng-source-165s",
   "loopDurationMs": 165000,
   "poemSha256": "b699de273f5bbaedb08241495f52ce863d3e8e1851275ce3b6251484d75190a8",
-  "contentRevision": "20260902-songfeng-source-r1",
+  "contentRevision": "20260902-songfeng-source-r2",
   "preparedBy": "JanVim Exhibition Team",
   "cues": [
     {
@@ -25,6 +25,16 @@
       "payload": {
         "text": "松风信源：山林中一份关于熵与编码的开山札记",
         "complete": true
+      }
+    },
+    {
+      "id": "songfeng-source-accept",
+      "atMs": 9000,
+      "target": "secondary",
+      "kind": "token-stream",
+      "payload": {
+        "accepted": true,
+        "summary": "长文已冻结并通过内容审阅，准备写回松风信源。"
       }
     },
     {

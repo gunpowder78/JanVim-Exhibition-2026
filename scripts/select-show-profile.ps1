@@ -8,7 +8,7 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
-$expectedContentLockSha256 = '0f718738cd00b06dfb3b7f7a12c8bafd10ebc7b1820be4a011e0683426ad7bdd'
+$expectedContentLockSha256 = '10ed862d810ca9ce8bbf864974e6795de2dbfb47784829ebbad84879c15efb44'
 $expectedContentLockBytes = 2332L
 $expectedPoemSha256 = 'b699de273f5bbaedb08241495f52ce863d3e8e1851275ce3b6251484d75190a8'
 $allowedProfiles = @('p0-baseline', 'songfeng-source', 'river-channel', 'tower-codebook')
@@ -299,7 +299,7 @@ $lock = Convert-BoundedJson -Snapshot $lockSnapshot -Reason 'content-lock-invali
 Assert-ExactProperties -Value $lock -Names @('schema', 'revision', 'poem', 'profiles') -Reason 'content-lock-invalid'
 if (
     -not (Test-ExactInteger -Value (Get-Property $lock 'schema' 'content-lock-invalid') -Expected 1) -or
-    (Get-Property $lock 'revision' 'content-lock-invalid') -cne '20260902-p0.1-r1'
+    (Get-Property $lock 'revision' 'content-lock-invalid') -cne '20260902-p0.1-r2'
 ) {
     throw 'content-lock-invalid'
 }
