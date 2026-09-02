@@ -5,7 +5,9 @@ coverage/
 *.log
 .DS_Store
 Thumbs.db
+.worktrees/
 
 # Prepared show artifacts are staged locally and identified by lock/manifests.
 runtime/janvim/
+runtime/user-root/
 content/media-local/

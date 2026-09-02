@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Secondary Screen Visual Fixture</title>
+    <link rel="stylesheet" href="/src/styles.css" />
+  </head>
+  <body>
+    <main id="root"></main>
+    <script type="module">
+      import { SecondarySceneController } from "/src/scene-controller.ts";
+
+      const root = document.querySelector("#root");
+      const scene = new SecondarySceneController(root, {
+        seed: "task4-visual-fixture",
+        prefersReducedMotion: false,
+        measuredFps: 60,
+      });
+
+      const preparePrompt = {
+        id: "cue-prepare",
+        atMs: 0,
+        target: "both",
+        kind: "prompt",
+        payload: {
+          poem: "白日依山尽\n黄河入海流\n欲穷千里目\n更上一层楼",
+        },
+      };
+      const showPrompt = {
+        id: "cue-prompt",
+        atMs: 5_000,
+        target: "secondary",
+        kind: "prompt",
+        payload: {
+          title: "第一轮生成",
+          text: "启动工程闭环：从诗句派生信息论表达。",
+        },
+      };
+      const response = {
+        id: "cue-result",
+        atMs: 12_000,
+        target: "secondary",
+        kind: "token-stream",
+        payload: {
+          text: "尝试生成首轮信息论文本。",
+        },
+      };
+      const accepted = {
+        id: "cue-accept",
+        atMs: 45_000,
+        target: "both",
+        kind: "token-stream",
+        payload: {
+          accepted: true,
+          summary: "准备写回第一段生成文本。",
+        },
+      };
+      const editorAction = {
+        id: "cue-move",
+        atMs: 48_000,
+        target: "main",
+        kind: "editor-action",
+        payload: {
+          action: { type: "select", rangeId: "opening" },
+          displayKeys: ["gg", "/"],
+          semanticLabel: "move to acceptance range",
+          critical: true,
+        },
+      };
+
+      const state = new URLSearchParams(window.location.search).get("state") ?? "ready";
+      if (state === "prompt" || state === "accepted") {
+        scene.apply(preparePrompt);
+        scene.apply(showPrompt);
+      }
+      if (state === "accepted") {
+        scene.apply(response);
+        scene.apply(accepted);
+        scene.apply(editorAction);
+      }
+    </script>
+  </body>
+</html>

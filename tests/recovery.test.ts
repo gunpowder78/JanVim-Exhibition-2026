@@ -1,0 +1,3585 @@
+import { spawnSync } from "node:child_process";
+import { EventEmitter } from "node:events";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, win32 } from "node:path";
+import { PassThrough } from "node:stream";
+
+import { describe, expect, it } from "vitest";
+
+import type {
+  AgentAck,
+  AgentCommand,
+  RendererToControllerEvent,
+  RunCueEvent,
+  RunStatusEvent,
+} from "@janvim-exhibition/show-schema";
+import {
+  DEFAULT_LOG_FILE_BYTES,
+  DEFAULT_LOG_TOTAL_BYTES,
+  RunLogBudget,
+  type LogStorage,
+  type RunLogStream,
+} from "../apps/controller/src/bounded-log.ts";
+import { MultiLoopDriver } from "../apps/controller/src/multi-loop-driver.ts";
+import type {
+  OneLoopRuntime,
+  OneLoopTimerAdapter,
+  OneLoopTimerHandle,
+} from "../apps/controller/src/one-loop-driver.ts";
+import { ResourceSampler } from "../apps/controller/src/resource-sampler.ts";
+import { RunTelemetry } from "../apps/controller/src/run-telemetry.ts";
+import type { RunLease } from "../apps/controller/src/run-lease.ts";
+import {
+  parseShowCommand,
+  type ShowCommand,
+} from "../apps/controller/src/show-command.ts";
+import {
+  ShowRunCoordinator,
+  type PrimaryCueCompletionEvent,
+  type ShowRunCoordinatorDependencies,
+  type ShowRunSession,
+  type ShowSecondarySurface,
+} from "../apps/controller/src/show-run-coordinator.ts";
+import { parseShowRunEvidence } from "../apps/controller/src/show-run-evidence.ts";
+import {
+  createShowRuntimeAdapters,
+  type ShowRuntimeAdapterHost,
+} from "../apps/controller/src/show-runtime-adapters.ts";
+
+const repositoryRoot = process.cwd();
+const runbookPath = join(repositoryRoot, "docs", "operations", "rehearsal-runbook.md");
+const incidentTemplatePath = join(
+  repositoryRoot,
+  "docs",
+  "operations",
+  "incident-log-template.md",
+);
+const originalPoemSha256 = "a".repeat(64);
+const fixturePoemSha256 =
+  "b699de273f5bbaedb08241495f52ce863d3e8e1851275ce3b6251484d75190a8";
+const composedRepositoryRoot = "D:\\show";
+const composedRehearsalRoot =
+  "D:\\VirtualData\\JanVim-Exhibition-Rehearsals\\recovery-composed";
+const composedDisplayMapPath = `${composedRehearsalRoot}\\display-map.json`;
+const fixtureArtifactLock = readFileSync(
+  join(repositoryRoot, "janvim-artifact.lock.json"),
+);
+const fixtureShowConfig = readFileSync(
+  join(repositoryRoot, "show", "janvim-show.toml"),
+);
+const fixtureManifest = readFileSync(
+  join(repositoryRoot, "content", "fixture", "show.manifest.json"),
+);
+const fixturePoem = readFileSync(
+  join(repositoryRoot, "content", "fixture", "poem.txt"),
+);
+const fixturePluginInit = readFileSync(
+  join(
+    repositoryRoot,
+    "runtime",
+    "user-root",
+    "plugin-lab",
+    "config",
+    "init.lua",
+  ),
+);
+const fixtureJanVimCore = readFileSync(
+  join(repositoryRoot, "runtime", "janvim", "janvim-core.exe"),
+);
+
+async function settle(): Promise<void> {
+  for (let index = 0; index < 64; index += 1) await Promise.resolve();
+}
+
+function deferred(): { promise: Promise<void>; resolve(): void } {
+  let resolve!: () => void;
+  return { promise: new Promise<void>((settlePromise) => { resolve = settlePromise; }), resolve };
+}
+
+type Scheduled = { id: number; delayMs: number; callback: () => unknown };
+
+class FakeClock implements OneLoopTimerAdapter {
+  public now = 0;
+  private nextId = 1;
+  private readonly intervals = new Map<number, Scheduled>();
+  private readonly timeouts = new Map<number, Scheduled>();
+
+  public nowMonotonic(): number {
+    return this.now;
+  }
+
+  public advanceBy(delayMs: number): void {
+    this.now += delayMs;
+  }
+
+  public setInterval(callback: () => void, delayMs: number): number {
+    const entry = { id: this.nextId++, delayMs, callback };
+    this.intervals.set(entry.id, entry);
+    return entry.id;
+  }
+
+  public clearInterval(id: OneLoopTimerHandle): void {
+    if (typeof id === "number") this.intervals.delete(id);
+  }
+
+  public setTimeout(callback: () => void, delayMs: number): number {
+    const entry = { id: this.nextId++, delayMs, callback };
+    this.timeouts.set(entry.id, entry);
+    return entry.id;
+  }
+
+  public clearTimeout(id: OneLoopTimerHandle): void {
+    if (typeof id === "number") this.timeouts.delete(id);
+  }
+
+  public async fireTimeout(delayMs: number): Promise<void> {
+    const entry = [...this.timeouts.values()].find((candidate) => candidate.delayMs === delayMs);
+    if (entry === undefined) throw new Error(`timeout ${delayMs} was not scheduled`);
+    this.timeouts.delete(entry.id);
+    await entry.callback();
+  }
+
+  public async fireInterval(delayMs: number): Promise<void> {
+    const entry = [...this.intervals.values()].find((candidate) => candidate.delayMs === delayMs);
+    if (entry === undefined) throw new Error(`interval ${delayMs} was not scheduled`);
+    await entry.callback();
+  }
+
+  public active(delayMs?: number): number {
+    return [...this.intervals.values(), ...this.timeouts.values()].filter(
+      (entry) => delayMs === undefined || entry.delayMs === delayMs,
+    ).length;
+  }
+}
+
+class MemorySurface implements ShowSecondarySurface {
+  public readonly rendererPid = 2026;
+  public readonly sent: Array<RunCueEvent | RunStatusEvent> = [];
+  private readonly events = new Set<(event: RendererToControllerEvent) => void>();
+  private readonly destroyed = new Set<() => void>();
+
+  public send(event: RunCueEvent | RunStatusEvent): void {
+    this.sent.push(event);
+  }
+
+  public onEvent(listener: (event: RendererToControllerEvent) => void): () => void {
+    this.events.add(listener);
+    return () => this.events.delete(listener);
+  }
+
+  public onDestroyed(listener: () => void): () => void {
+    this.destroyed.add(listener);
+    return () => this.destroyed.delete(listener);
+  }
+
+  public emit(event: RendererToControllerEvent): void {
+    for (const listener of [...this.events]) listener(event);
+  }
+
+  public destroy(): void {
+    for (const listener of [...this.destroyed]) listener();
+  }
+
+  public close(): void {}
+
+  public diagnostics(): { listeners: number } {
+    return { listeners: this.events.size + this.destroyed.size };
+  }
+}
+
+async function waitForAbort(operation: Promise<void>, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) throw new Error("operation aborted");
+  await new Promise<void>((resolve, reject) => {
+    const abort = (): void => reject(new Error("operation aborted"));
+    signal.addEventListener("abort", abort, { once: true });
+    void operation.then(
+      () => {
+        signal.removeEventListener("abort", abort);
+        resolve();
+      },
+      (error: unknown) => {
+        signal.removeEventListener("abort", abort);
+        reject(error);
+      },
+    );
+  });
+}
+
+class MemorySession implements ShowRunSession {
+  public readonly sessionId: string;
+  public readonly runtime: OneLoopRuntime = {
+    state: "ready",
+    completedLoops: 0,
+    start: () => {
+      this.runtime.state = "running";
+      return true;
+    },
+    advance: async () => 0,
+    stop: () => {
+      this.runtime.state = "stopped";
+    },
+  };
+  public editorCommandPending = false;
+  public loopSurface: MemorySurface | undefined;
+  public reserveNextLoopId: (() => string) | undefined;
+  public resetCalls = 0;
+  public leaseRemoved = false;
+  public readonly shutdownCalls: string[] = [];
+  private generationId: number;
+  private readonly faults = new Set<
+    (fault: "agent-disconnected" | "critical-ack-failed" | "janvim-exited") => void
+  >();
+  private readonly primary = new Set<(event: PrimaryCueCompletionEvent) => void>();
+
+  public constructor(
+    generationId: number,
+    private readonly recoveryGate: Promise<void> | undefined,
+    private readonly shutdownGate: Promise<void> | undefined,
+    private readonly shutdownFailures: ReadonlySet<string>,
+  ) {
+    this.generationId = generationId;
+    this.sessionId = `session-${generationId}`;
+  }
+
+  public currentGenerationId(): number {
+    return this.generationId;
+  }
+
+  public async rebindGeneration(
+    generationId: number,
+    _signal: AbortSignal,
+  ): Promise<void> {
+    this.generationId = generationId;
+  }
+
+  public async startBridge(signal: AbortSignal): Promise<void> {
+    if (this.generationId > 1 && this.recoveryGate !== undefined) {
+      await waitForAbort(this.recoveryGate, signal);
+    }
+  }
+
+  public async launchJanVim(_signal: AbortSignal): Promise<void> {}
+  public async placeJanVim(_signal: AbortSignal): Promise<void> {}
+  public async awaitAgent(_signal: AbortSignal): Promise<void> {}
+
+  public async prepareOriginalPoem(_signal: AbortSignal): Promise<{ bufferSha256: string }> {
+    return { bufferSha256: originalPoemSha256 };
+  }
+
+  public createLoop(
+    _loopId: string,
+    surface: ShowSecondarySurface,
+    reserveNextLoopId: () => string,
+  ): OneLoopRuntime {
+    this.loopSurface = surface as MemorySurface;
+    this.reserveNextLoopId = reserveNextLoopId;
+    return this.runtime;
+  }
+
+  public onFault(
+    listener: (fault: "agent-disconnected" | "critical-ack-failed" | "janvim-exited") => void,
+  ): () => void {
+    this.faults.add(listener);
+    return () => this.faults.delete(listener);
+  }
+
+  public onPrimaryCompletion(listener: (event: PrimaryCueCompletionEvent) => void): () => void {
+    this.primary.add(listener);
+    return () => this.primary.delete(listener);
+  }
+
+  public emitFault(fault: "agent-disconnected" | "critical-ack-failed" | "janvim-exited"): void {
+    for (const listener of [...this.faults]) listener(fault);
+  }
+
+  public emitPrimary(event: PrimaryCueCompletionEvent): void {
+    for (const listener of [...this.primary]) listener(event);
+  }
+
+  public diagnostics() {
+    return {
+      connections: 1,
+      pendingCommands: Number(this.editorCommandPending),
+      editorCommandPending: this.editorCommandPending,
+      leaseRemoved: this.leaseRemoved,
+    };
+  }
+
+  public async resetToOriginal(_loopId: string, _signal: AbortSignal): Promise<{ bufferSha256: string }> {
+    this.resetCalls += 1;
+    return { bufferSha256: originalPoemSha256 };
+  }
+
+  public async sendAgentShutdown(_timeoutMs = 2_000, _retryLimit = 1): Promise<void> {
+    this.shutdownCalls.push("agent-shutdown");
+    if (this.shutdownGate !== undefined) await this.shutdownGate;
+    if (this.shutdownFailures.has("agent-shutdown")) throw new Error("timeout");
+  }
+  public async closePlacedWindow(_timeoutMs = 2_000, _maxOutputBytes = 4_096): Promise<void> {
+    this.shutdownCalls.push("close-window");
+    if (this.shutdownFailures.has("close-window")) throw new Error("timeout");
+  }
+  public async waitForJanVimExit(_timeoutMs = 5_000): Promise<"natural" | "still-running"> {
+    this.shutdownCalls.push("wait-janvim");
+    if (this.shutdownFailures.has("wait-janvim")) throw new Error("timeout");
+    if (
+      this.shutdownFailures.has("terminate-exact") ||
+      this.shutdownFailures.has("wait-forced")
+    ) {
+      return "still-running";
+    }
+    this.leaseRemoved = true;
+    return "natural";
+  }
+  public async terminateExactJanVim(): Promise<void> {
+    this.shutdownCalls.push("terminate-exact");
+    if (this.shutdownFailures.has("terminate-exact")) throw new Error("timeout");
+  }
+  public async waitForForcedExit(_timeoutMs = 5_000): Promise<boolean> {
+    this.shutdownCalls.push("wait-forced");
+    if (this.shutdownFailures.has("wait-forced")) throw new Error("timeout");
+    this.leaseRemoved = true;
+    return true;
+  }
+  public async closeBridge(_timeoutMs = 5_000): Promise<void> {
+    this.shutdownCalls.push("close-bridge");
+    if (this.shutdownFailures.has("close-bridge")) throw new Error("timeout");
+  }
+  public dispose(): void {
+    this.faults.clear();
+    this.primary.clear();
+  }
+}
+
+function createHost(options: {
+  mode?: "Soak3" | "Show";
+  recoveryGate?: Promise<void>;
+  shutdownGate?: Promise<void>;
+  shutdownFailures?: ReadonlySet<string>;
+} = {}) {
+  const clock = new FakeClock();
+  const surfaces: MemorySurface[] = [];
+  const sessions: MemorySession[] = [];
+  const evidence: ReturnType<ShowRunCoordinator["diagnostics"]>[] = [];
+  const logs: Record<string, unknown>[] = [];
+  let terminalWrites = 0;
+  const command = parseShowCommand(
+    [
+      `--show-mode=${(options.mode ?? "Soak3").toLowerCase()}`,
+      "--rehearsal-root=D:\\VirtualData\\JanVim-Exhibition-Rehearsals\\recovery-001",
+      "--display-map=D:\\VirtualData\\JanVim-Exhibition-Rehearsals\\recovery-001\\display-map.json",
+      "--run-id=recovery-001",
+      "--controller-run-id=recovery-controller-001",
+      "--network-policy=offline-required",
+    ],
+    "D:\\show",
+  );
+  const dependencies: ShowRunCoordinatorDependencies = {
+    mode: command.mode === "Soak3" ? "Soak3" : "Show",
+    originalPoemSha256,
+    validate: async () => undefined,
+    openSecondary: async () => {
+      const surface = new MemorySurface();
+      surfaces.push(surface);
+      return surface;
+    },
+    createSession: (generationId) => {
+      const session = new MemorySession(
+        generationId,
+        options.recoveryGate,
+        options.shutdownGate,
+        options.shutdownFailures ?? new Set(),
+      );
+      sessions.push(session);
+      return session;
+    },
+    createDriver: (driverOptions) => new MultiLoopDriver(driverOptions),
+    timers: clock,
+    createTelemetry: () => new RunTelemetry(),
+    createResourceSampler: () => {
+      const sampler = new ResourceSampler({
+        adapter: { sample: async (pid) => ({ rssBytes: pid * 1_000, handleCount: pid }) },
+        timers: clock,
+      });
+      sampler.start({ controller: 11, renderer: 22, janvim: 33 });
+      return sampler;
+    },
+    sampleNetwork: async () => ({
+      sampledAtMs: clock.now,
+      activeExternalDefaultRoutes: 0,
+      connectedExternalProfiles: 0,
+      offline: true,
+    }),
+    finalizeEvidence: async (_result, diagnostics) => {
+      evidence.push(diagnostics);
+    },
+    writeTerminalMarker: async () => {
+      terminalWrites += 1;
+    },
+    flushLogs: async () => undefined,
+    nextLoopId: (generationId, loopNumber) => `g${generationId}-loop-${loopNumber}`,
+    nowMs: () => clock.nowMonotonic(),
+    log: (event) => logs.push(event),
+  };
+  return {
+    clock,
+    coordinator: new ShowRunCoordinator(dependencies),
+    evidence,
+    logs,
+    sessions,
+    surfaces,
+    get terminalWrites() {
+      return terminalWrites;
+    },
+  };
+}
+
+async function bootAndStart(host: ReturnType<typeof createHost>): Promise<void> {
+  await expect(host.coordinator.boot()).resolves.toEqual({ ready: true });
+  expect(host.coordinator.handleRendererEvent({ schema: 1, type: "operator-action", action: "start" })).toBe(true);
+}
+
+const confirmedDisplayMap = {
+  schema: 1,
+  mappingStatus: "confirmed",
+  expectedDisplayCount: 2,
+  primary: {
+    displayId: "111",
+    bounds: { x: 0, y: 0, width: 1920, height: 1080 },
+    scaleFactor: 1,
+    geometrySha256:
+      "b2bc82d7bea454184acfb21ae9139e97c32aefb994443034423653e85f9c83cc",
+  },
+  secondary: {
+    displayId: "222",
+    bounds: { x: 1920, y: 0, width: 1920, height: 1080 },
+    scaleFactor: 1,
+    geometrySha256:
+      "2ebac5faac6c5f34562d1e91088736c9e70943c9c42846616a418db904319928",
+  },
+} as const;
+
+const composedDisplays = [
+  {
+    id: 111,
+    bounds: { x: 0, y: 0, width: 1920, height: 1080 },
+    workArea: { x: 0, y: 0, width: 1920, height: 1040 },
+    scaleFactor: 1,
+    rotation: 0,
+  },
+  {
+    id: 222,
+    bounds: { x: 1920, y: 0, width: 1920, height: 1080 },
+    workArea: { x: 1920, y: 0, width: 1920, height: 1040 },
+    scaleFactor: 1,
+    rotation: 0,
+  },
+] as const;
+
+class MemoryLogStorage implements LogStorage {
+  public readonly files = new Map<string, string>();
+
+  public append(path: string, text: string): void {
+    this.files.set(path, (this.files.get(path) ?? "") + text);
+  }
+
+  public size(path: string): number {
+    return Buffer.byteLength(this.files.get(path) ?? "", "utf8");
+  }
+
+  public exists(path: string): boolean {
+    return this.files.has(path);
+  }
+
+  public rename(from: string, to: string): void {
+    const value = this.files.get(from);
+    if (value === undefined) return;
+    this.files.set(to, value);
+    this.files.delete(from);
+  }
+
+  public remove(path: string): void {
+    this.files.delete(path);
+  }
+}
+
+type ExternalProtocol = "dns" | "http" | "https" | "ws" | "wss";
+type NetworkBoundaryEvent = {
+  kind: "exec-file" | "load-url" | "spawn" | "web-request";
+  value: string;
+};
+
+function createComposedHost(options: {
+  resetPrimaryDelaysMs?: readonly number[];
+  resetSecondaryPresentationDelaysMs?: readonly number[];
+  ageOutFirstLoopAcceptanceViolations?: boolean;
+} = {}) {
+  const clock = new FakeClock();
+  const logStorage = new MemoryLogStorage();
+  const trace: string[] = [];
+  const sent: Array<{ channel: string; payload: unknown }> = [];
+  const rendererEvents: RendererToControllerEvent[] = [];
+  const agentCommands: AgentCommand[] = [];
+  const evidenceAttempts: unknown[] = [];
+  const evidenceValues: ReturnType<typeof parseShowRunEvidence>[] = [];
+  const terminalValues: unknown[] = [];
+  const leases: RunLease[] = [];
+  const bridgeDisconnectListeners = new Set<() => void>();
+  const networkAttempts: ExternalProtocol[] = [];
+  const networkBoundaryEvents: NetworkBoundaryEvent[] = [];
+  const ipcListeners = new Map<
+    string,
+    (
+      event: { sender?: unknown; senderFrame: { url: string } | null },
+      payload: unknown,
+    ) => void
+  >();
+  const processListeners = new Set<() => void>();
+  const appListeners = new Set<(event: { preventDefault(): void }) => void>();
+  let loadedUrl: string | undefined;
+  let currentWindow: ComposedBrowserWindow | undefined;
+  let beforeRequest:
+    | ((
+        details: { url: string },
+        callback: (result: { cancel: boolean }) => void,
+      ) => void)
+    | undefined;
+  let runtimeNetworkBoundaryStart = 0;
+  let resetIndex = 0;
+  let resetSecondaryPresentationIndex = 0;
+  let networkSampleCount = 0;
+  let processSampleCount = 0;
+  let authenticatedConnections = 1;
+
+  const recordPotentialAttempt = (
+    kind: NetworkBoundaryEvent["kind"],
+    value: string,
+  ): void => {
+    networkBoundaryEvents.push({ kind, value });
+    for (const protocol of ["http", "https", "ws", "wss"] as const) {
+      if (value.toLowerCase().includes(`${protocol}://`)) {
+        networkAttempts.push(protocol);
+      }
+    }
+    if (/\bdns(?:\.|:|\/)/iu.test(value)) networkAttempts.push("dns");
+  };
+
+  const routeRendererEvent = (payload: RendererToControllerEvent): void => {
+    const listener = [...ipcListeners.values()][0];
+    if (
+      listener === undefined ||
+      loadedUrl === undefined ||
+      currentWindow === undefined
+    ) {
+      throw new Error("composed renderer is not bound");
+    }
+    rendererEvents.push(structuredClone(payload));
+    listener(
+      {
+        sender: currentWindow.webContents,
+        senderFrame: { url: loadedUrl },
+      },
+      payload,
+    );
+  };
+
+  class ComposedWebContents extends EventEmitter {
+    public readonly session = {
+      webRequest: {
+        onBeforeRequest: (
+          _filter: { urls: string[] } | null,
+          _listener?: (
+            details: { url: string },
+            callback: (result: { cancel: boolean }) => void,
+          ) => void,
+        ) => {
+          if (_filter === null) {
+            beforeRequest = undefined;
+            return;
+          }
+          beforeRequest = (details, callback) => {
+            recordPotentialAttempt("web-request", details.url);
+            _listener?.(details, callback);
+          };
+        },
+      },
+    };
+
+    public send(channel: string, payload: unknown): void {
+      sent.push({ channel, payload });
+      if (
+        payload !== null &&
+        typeof payload === "object" &&
+        "type" in payload &&
+        payload.type === "run-cue" &&
+        "requiresPresentationAck" in payload &&
+        payload.requiresPresentationAck === true &&
+        "generationId" in payload &&
+        typeof payload.generationId === "number" &&
+        "loopId" in payload &&
+        typeof payload.loopId === "string" &&
+        "cue" in payload &&
+        payload.cue !== null &&
+        typeof payload.cue === "object" &&
+        "id" in payload.cue &&
+        typeof payload.cue.id === "string"
+      ) {
+        if (options.ageOutFirstLoopAcceptanceViolations) {
+          if (
+            payload.loopId === "recovery-composed-g1-l1" &&
+            payload.cue.id === "cue-reset"
+          ) {
+            authenticatedConnections = 2;
+          } else if (payload.loopId === "recovery-composed-g1-l2") {
+            authenticatedConnections = 1;
+          }
+        }
+        if (payload.cue.id === "cue-reset") {
+          clock.advanceBy(
+            options.resetSecondaryPresentationDelaysMs?.[
+              resetSecondaryPresentationIndex
+            ] ?? 0,
+          );
+          resetSecondaryPresentationIndex += 1;
+        }
+        routeRendererEvent({
+          schema: 1,
+          type: "presentation-ack",
+          generationId: payload.generationId,
+          loopId: payload.loopId,
+          cueId: payload.cue.id,
+        });
+      }
+    }
+
+    public setWindowOpenHandler(
+      _handler: (details: { url: string }) => { action: "deny" },
+    ): void {}
+
+    public getOSProcessId(): number {
+      return 8_002;
+    }
+  }
+
+  class ComposedBrowserWindow extends EventEmitter {
+    public readonly webContents = new ComposedWebContents();
+    private destroyed = false;
+
+    public constructor(_options: Record<string, unknown>) {
+      super();
+      currentWindow = this;
+      trace.push("browser-window");
+    }
+
+    public async loadURL(url: string): Promise<void> {
+      recordPotentialAttempt("load-url", url);
+      loadedUrl = url;
+      trace.push("load-secondary");
+    }
+
+    public close(): void {
+      this.emit("close");
+      this.destroyed = true;
+      this.emit("closed");
+    }
+
+    public destroy(): void {
+      this.destroyed = true;
+      this.emit("closed");
+    }
+
+    public isDestroyed(): boolean {
+      return this.destroyed;
+    }
+  }
+
+  const child = new (class extends EventEmitter {
+    public readonly pid = 8_003;
+    public readonly stdout = new PassThrough();
+    public readonly stderr = new PassThrough();
+    public kill(): boolean {
+      queueMicrotask(() => {
+        this.emit("exit", 1, null);
+        this.emit("close", 1);
+      });
+      return true;
+    }
+  })();
+
+  const files = new Map<string, Buffer>([
+    [win32.join(composedRepositoryRoot, "janvim-artifact.lock.json"), fixtureArtifactLock],
+    [win32.join(composedRepositoryRoot, "show", "janvim-show.toml"), fixtureShowConfig],
+    [
+      win32.join(composedRepositoryRoot, "content", "fixture", "show.manifest.json"),
+      fixtureManifest,
+    ],
+    [win32.join(composedRepositoryRoot, "content", "fixture", "poem.txt"), fixturePoem],
+    [
+      win32.join(
+        composedRepositoryRoot,
+        "runtime",
+        "user-root",
+        "plugin-lab",
+        "config",
+        "init.lua",
+      ),
+      fixturePluginInit,
+    ],
+    [
+      win32.join(
+        composedRepositoryRoot,
+        "runtime",
+        "janvim",
+        "janvim-core.exe",
+      ),
+      fixtureJanVimCore,
+    ],
+    [
+      composedDisplayMapPath,
+      Buffer.from(`${JSON.stringify(confirmedDisplayMap)}\n`, "utf8"),
+    ],
+  ]);
+  const valueAfter = (args: readonly string[], flag: string): number => {
+    const index = args.indexOf(flag);
+    return Number(args[index + 1]);
+  };
+
+  const host = {
+    repositoryRoot: composedRepositoryRoot,
+    BrowserWindow: ComposedBrowserWindow,
+    ipcMain: {
+      on: (
+        channel: string,
+        listener: (
+          event: { sender?: unknown; senderFrame: { url: string } | null },
+          payload: unknown,
+        ) => void,
+      ) => ipcListeners.set(channel, listener),
+      removeListener: (channel: string) => ipcListeners.delete(channel),
+    },
+    screen: { getAllDisplays: () => composedDisplays },
+    controllerProcess: {
+      pid: 8_001,
+      startedAtUtc: "2026-08-30T00:00:00.000Z",
+      on: (_event: "SIGINT", listener: () => void) => processListeners.add(listener),
+      removeListener: (_event: "SIGINT", listener: () => void) =>
+        processListeners.delete(listener),
+    },
+    electronApp: {
+      on: (
+        _event: "before-quit",
+        listener: (event: { preventDefault(): void }) => void,
+      ) => appListeners.add(listener),
+      removeListener: (
+        _event: "before-quit",
+        listener: (event: { preventDefault(): void }) => void,
+      ) => appListeners.delete(listener),
+    },
+    baseEnvironment: { PATH: "C:\\Windows\\System32" },
+    readFile: (path: string) => {
+      const value = files.get(win32.resolve(path));
+      if (value === undefined) throw new Error(`missing composed file: ${path}`);
+      return Buffer.from(value);
+    },
+    realpath: (path: string) => win32.resolve(path),
+    execFile: async (
+      file: string,
+      args: readonly string[],
+      _limits: { timeoutMs: number; maxStdoutBytes: number; maxStderrBytes: number },
+    ) => {
+      expect(file).toBe("pwsh");
+      recordPotentialAttempt("exec-file", args.join(" "));
+      if (args.some((argument) => argument.endsWith("verify-runtime.ps1"))) {
+        trace.push("verify-runtime");
+        return { exitCode: 0, stdout: "verified\n", stderr: "" };
+      }
+      if (args.some((argument) => argument.includes("Get-NetRoute"))) {
+        trace.push("network-snapshot");
+        clock.advanceBy(1);
+        networkSampleCount += 1;
+        const online =
+          options.ageOutFirstLoopAcceptanceViolations === true &&
+          networkSampleCount === 2;
+        return {
+          exitCode: 0,
+          stdout: JSON.stringify({
+            schema: 1,
+            activeExternalDefaultRoutes: online ? 1 : 0,
+            connectedExternalProfiles: online ? 1 : 0,
+          }),
+          stderr: "",
+        };
+      }
+      if (args.some((argument) => argument.endsWith("place-janvim-window.ps1"))) {
+        const requested = {
+          x: valueAfter(args, "-X"),
+          y: valueAfter(args, "-Y"),
+          width: valueAfter(args, "-Width"),
+          height: valueAfter(args, "-Height"),
+        };
+        return {
+          exitCode: 0,
+          stdout: JSON.stringify({
+            schema: 1,
+            pid: valueAfter(args, "-ChildProcessId"),
+            matchedWindowCount: 1,
+            hwnd: "0x0000000000001F43",
+            visible: true,
+            owned: false,
+            requested,
+            actual: requested,
+          }),
+          stderr: "",
+        };
+      }
+      if (args.some((argument) => argument.endsWith("close-janvim-window.ps1"))) {
+        queueMicrotask(() => {
+          child.emit("exit", 0, null);
+          child.emit("close", 0);
+        });
+        return {
+          exitCode: 0,
+          stdout: JSON.stringify({
+            schema: 1,
+            pid: valueAfter(args, "-ChildProcessId"),
+            hwnd: args[args.indexOf("-Hwnd") + 1],
+            ownershipVerified: true,
+            topLevel: true,
+            closePosted: true,
+          }),
+          stderr: "",
+        };
+      }
+      throw new Error(`unexpected composed command: ${args.join(" ")}`);
+    },
+    verifyArtifact: async () => ({ ok: true as const }),
+    spawn: (
+      file: string,
+      args: readonly string[],
+      spawnOptions: { env: NodeJS.ProcessEnv },
+    ) => {
+      recordPotentialAttempt(
+        "spawn",
+        `${file} ${args.join(" ")} ${JSON.stringify(spawnOptions.env)}`,
+      );
+      return child;
+    },
+    inspectProcessStartedAtUtc: async () => "2026-08-30T00:00:00.500Z",
+    randomBytes: () => Buffer.from("ab".repeat(24), "hex"),
+    createBridge: (token: string) => ({
+      listen: async () => {
+        return { host: "127.0.0.1" as const, port: 32_123, family: "IPv4" };
+      },
+      waitForAgent: async () => undefined,
+      dispatch: async (command: AgentCommand): Promise<AgentAck> => {
+        agentCommands.push(structuredClone(command));
+        if (command.action.type === "reset") {
+          clock.advanceBy(options.resetPrimaryDelaysMs?.[resetIndex] ?? 0);
+          resetIndex += 1;
+        }
+        return {
+          schema: 1,
+          loopId: command.loopId,
+          cueId: command.cueId,
+          outcome: "applied",
+          mode: "n",
+          cursor: { row: 0, col: 0 },
+          bufferSha256:
+            command.action.type === "prepare"
+              ? command.action.expectedSha256
+              : fixturePoemSha256,
+        };
+      },
+      onAgentDisconnected: (listener: () => void) => {
+        bridgeDisconnectListeners.add(listener);
+        return () => bridgeDisconnectListeners.delete(listener);
+      },
+      close: async () => {
+        bridgeDisconnectListeners.clear();
+      },
+      diagnostics: () => ({
+        activeConnections: authenticatedConnections,
+        authenticatedConnections,
+        pendingCommands: 0,
+        pendingTimers: 0,
+        sessionListeners: 3,
+        readyWaiters: 0,
+      }),
+    }),
+    runWithDeadline: async <T>(_timeoutMs: number, operation: () => Promise<T>) =>
+      operation(),
+    logStorage,
+    nowMonotonic: () => clock.nowMonotonic(),
+    timers: clock,
+    nowUtc: () => "2026-08-30T00:00:01.000Z",
+    sampleProcess: async (pid: number) => {
+      processSampleCount += 1;
+      if (
+        options.ageOutFirstLoopAcceptanceViolations === true &&
+        processSampleCount === 1
+      ) {
+        throw new Error("first-loop-resource-sample-failed");
+      }
+      return { rssBytes: pid * 10, handleCount: pid };
+    },
+    writeRunLease: async (_path: string, lease: RunLease) => {
+      leases.push(lease);
+    },
+    replaceRunLease: async (
+      _path: string,
+      lease: RunLease,
+      generationId: number,
+    ) => ({ ...lease, generationId }),
+    removeRunLease: async () => true,
+    writeShowEvidence: async (_path: string, value: unknown) => {
+      evidenceAttempts.push(structuredClone(value));
+      evidenceValues.push(parseShowRunEvidence(value));
+    },
+    writeTerminalMarker: async (_path: string, value: unknown) => {
+      terminalValues.push(structuredClone(value));
+    },
+  } as unknown as ShowRuntimeAdapterHost;
+
+  const adapters = createShowRuntimeAdapters(host);
+  return {
+    adapters,
+    clock,
+    logStorage,
+    trace,
+    sent,
+    rendererEvents,
+    agentCommands,
+    evidenceAttempts,
+    evidenceValues,
+    terminalValues,
+    leases,
+    networkAttempts,
+    get runtimeNetworkBoundaryEvents() {
+      return networkBoundaryEvents.slice(runtimeNetworkBoundaryStart);
+    },
+    ipcListeners,
+    get loadedUrl() {
+      return loadedUrl;
+    },
+    probeRemoteRequest: (url: string) => {
+      let result: { cancel: boolean } | undefined;
+      beforeRequest?.({ url }, (value) => {
+        result = value;
+      });
+      return result;
+    },
+    clearNetworkAttempts: () => networkAttempts.splice(0),
+    beginRuntimeNetworkObservation: () => {
+      runtimeNetworkBoundaryStart = networkBoundaryEvents.length;
+    },
+    emitRenderer: routeRendererEvent,
+    destroySecondary: () => currentWindow?.destroy(),
+    emitAgentDisconnect: () => {
+      for (const listener of [...bridgeDisconnectListeners]) listener();
+    },
+    bridgeDisconnectListenerCount: () => bridgeDisconnectListeners.size,
+  };
+}
+
+function composedCommand(mode: "Soak3" | "Show"): ShowCommand & { mode: typeof mode } {
+  const command = parseShowCommand(
+    [
+      `--show-mode=${mode.toLowerCase()}`,
+      `--rehearsal-root=${composedRehearsalRoot}`,
+      `--display-map=${composedDisplayMapPath}`,
+      "--run-id=recovery-composed",
+      "--controller-run-id=recovery-composed-controller",
+      "--network-policy=offline-required",
+    ],
+    composedRepositoryRoot,
+  );
+  if (command.mode !== mode) throw new Error("strict command mode mismatch");
+  return command as ShowCommand & { mode: typeof mode };
+}
+
+const cueDeltasMs = [5_001, 7_001, 33_001, 10_001, 23_001, 12_001] as const;
+const forbiddenNetworkProbeUrls = [
+  "http://attempt-recorder.invalid/probe",
+  "https://dns.attempt-recorder.invalid/probe",
+  "ws://attempt-recorder.invalid/probe",
+  "wss://attempt-recorder.invalid/probe",
+] as const;
+
+function expectNoExternalNetworkAttempts(
+  host: ReturnType<typeof createComposedHost>,
+): void {
+  expect(host.networkAttempts).toEqual([]);
+}
+
+function probeCancelledForbiddenNetworkAttempts(
+  host: ReturnType<typeof createComposedHost>,
+): void {
+  for (const url of forbiddenNetworkProbeUrls) {
+    expect(host.probeRemoteRequest(url), url).toEqual({ cancel: true });
+  }
+}
+
+async function startComposedRun(
+  host: ReturnType<typeof createComposedHost>,
+  mode: "Soak3" | "Show",
+) {
+  const coordinator = host.adapters.createCoordinator(composedCommand(mode));
+  await expect(coordinator.boot()).resolves.toEqual({ ready: true });
+  expectNoExternalNetworkAttempts(host);
+  probeCancelledForbiddenNetworkAttempts(host);
+  expect(host.networkAttempts).toEqual(["http", "https", "dns", "ws", "wss"]);
+  host.clearNetworkAttempts();
+  host.beginRuntimeNetworkObservation();
+  host.emitRenderer({ schema: 1, type: "operator-action", action: "start" });
+  await settle();
+  expect(coordinator.diagnostics().state).toBe("running");
+  return coordinator;
+}
+
+async function advanceComposedLoop(
+  host: ReturnType<typeof createComposedHost>,
+  queueStopBeforeReset = false,
+): Promise<void> {
+  for (const [index, deltaMs] of cueDeltasMs.entries()) {
+    if (queueStopBeforeReset && index === cueDeltasMs.length - 1) {
+      host.emitRenderer({ schema: 1, type: "operator-action", action: "stop-show" });
+    }
+    host.clock.advanceBy(deltaMs);
+    await host.clock.fireInterval(16);
+    await settle();
+  }
+}
+
+function controllerLogEvents(storage: MemoryLogStorage): Record<string, unknown>[] {
+  return [...storage.files.entries()]
+    .filter(([path]) => path.includes(".controller"))
+    .flatMap(([, contents]) => contents.trim().split("\n"))
+    .filter(Boolean)
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+}
+
+function markdownSections(markdown: string): Map<string, string> {
+  const matches = [...markdown.matchAll(/^## (.+)$/gmu)];
+  return new Map(
+    matches.map((match, index) => {
+      const start = match.index! + match[0].length;
+      const end = matches[index + 1]?.index ?? markdown.length;
+      return [match[1]!, markdown.slice(start, end).trim()];
+    }),
+  );
+}
+
+type RawPowerShellFence = {
+  label: string;
+  block: string;
+  startOffset: number;
+  endOffset: number;
+};
+
+function rawPowershellFences(markdown: string): RawPowerShellFence[] {
+  const headers = [...markdown.matchAll(/^```powershell[^\r\n]*\r?$/gmu)];
+  const closedFences = [...markdown.matchAll(
+    /^(```powershell[^\r\n]*\r?)\n([\s\S]*?)^```[ \t]*\r?$/gmu,
+  )];
+  if (headers.length !== closedFences.length) {
+    throw new Error(
+      `PowerShell fence header/closure count mismatch: ${headers.length}/${closedFences.length}`,
+    );
+  }
+
+  return closedFences.map((match) => {
+    if (!/^```powershell[ \t]*\r?$/u.test(match[1]!)) {
+      throw new Error("PowerShell fence header must contain only the language label");
+    }
+    const lines = match[2]!.split(/\r?\n/u);
+    const labelMatch = /^# block: ([a-z][a-z0-9-]{0,31})$/u.exec(lines[0]!);
+    const labelLines = lines.filter((line) => /^[ \t]*# block:/u.test(line));
+    if (labelMatch === null || labelLines.length !== 1) {
+      throw new Error(
+        "PowerShell fence must have exactly one valid block label on its first line",
+      );
+    }
+    return {
+      label: labelMatch[1]!,
+      block: lines.slice(1).join("\n").trim(),
+      startOffset: match.index!,
+      endOffset: match.index! + match[0].length,
+    };
+  });
+}
+
+function powershellBlocks(markdownSection: string): Map<string, string> {
+  const blocks = new Map<string, string>();
+  for (const { label, block } of rawPowershellFences(markdownSection)) {
+    if (blocks.has(label)) throw new Error(`duplicate PowerShell block label: ${label}`);
+    blocks.set(label, block);
+  }
+  return blocks;
+}
+
+function normalizedPowershell(block: string): string {
+  return block.replace(/`\r?\n[ \t]*/gu, " ").replace(/\s+/gu, " ").trim();
+}
+
+function processCommandLines(block: string, command: string): string[] {
+  return block
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith(command));
+}
+
+type PowerShellAstCommand = {
+  name: string | null;
+  elements: string[];
+  startOffset: number;
+  endOffset: number;
+};
+
+type PowerShellAstMemberInvocation = {
+  name: string;
+  text: string;
+  startOffset: number;
+  endOffset: number;
+};
+
+type PowerShellAstSummary = {
+  key: string;
+  parseErrors: string[];
+  commands: PowerShellAstCommand[];
+  memberInvocations: PowerShellAstMemberInvocation[];
+};
+
+const powershellAstInspector = String.raw`
+$ErrorActionPreference = 'Stop'
+$payloadText = [Console]::In.ReadToEnd()
+$payload = ConvertFrom-Json -InputObject $payloadText -Depth 8 -DateKind String -NoEnumerate
+$summaries = foreach ($item in @($payload)) {
+    $tokens = $null
+    $parseErrors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseInput(
+        [string]$item.text,
+        [ref]$tokens,
+        [ref]$parseErrors
+    )
+    $commands = @($ast.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.CommandAst]
+    }, $true) | ForEach-Object {
+        [pscustomobject]@{
+            name = $_.GetCommandName()
+            elements = @($_.CommandElements | ForEach-Object { $_.Extent.Text })
+            startOffset = $_.Extent.StartOffset
+            endOffset = $_.Extent.EndOffset
+        }
+    })
+    $memberInvocations = @($ast.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.InvokeMemberExpressionAst]
+    }, $true) | ForEach-Object {
+        [pscustomobject]@{
+            name = $_.Member.Extent.Text
+            text = $_.Extent.Text
+            startOffset = $_.Extent.StartOffset
+            endOffset = $_.Extent.EndOffset
+        }
+    })
+    [pscustomobject]@{
+        key = [string]$item.key
+        parseErrors = @($parseErrors | ForEach-Object { $_.Message })
+        commands = $commands
+        memberInvocations = $memberInvocations
+    }
+}
+@($summaries) | ConvertTo-Json -Depth 8 -Compress
+`;
+
+function allPowershellBlocks(markdown: string): Map<string, string> {
+  const sections = [...markdown.matchAll(/^## (.+)$/gmu)].map(
+    (match, index, matches) => ({
+      name: match[1]!,
+      bodyStartOffset: match.index! + match[0].length,
+      endOffset: matches[index + 1]?.index ?? markdown.length,
+    }),
+  );
+  const fences = rawPowershellFences(markdown);
+  const flattened = new Map<string, string>();
+  const keys = new Set<string>();
+  for (const fence of fences) {
+    const owningSections = sections.filter(
+      (section) =>
+        fence.startOffset >= section.bodyStartOffset &&
+        fence.endOffset <= section.endOffset,
+    );
+    if (owningSections.length !== 1) {
+      throw new Error(
+        `PowerShell fence ${fence.label} must belong to exactly one level-two section`,
+      );
+    }
+    const key = owningSections[0]!.name + ":" + fence.label;
+    if (keys.has(key)) {
+      throw new Error(`duplicate PowerShell block label: ${key}`);
+    }
+    keys.add(key);
+    flattened.set(key, fence.block);
+  }
+  return flattened;
+}
+
+function parsePowershellAst(
+  blocks: ReadonlyMap<string, string>,
+): Map<string, PowerShellAstSummary> {
+  const payload = [...blocks].map(([key, text]) => ({ key, text }));
+  const result = spawnSync(
+    "pwsh",
+    ["-NoProfile", "-NonInteractive", "-Command", powershellAstInspector],
+    {
+      input: JSON.stringify(payload),
+      encoding: "utf8",
+      maxBuffer: 1024 * 1024,
+      timeout: 10_000,
+      windowsHide: true,
+    },
+  );
+  if (result.error !== undefined) throw result.error;
+  if (result.status !== 0) {
+    throw new Error("PowerShell AST inspection failed: " + result.stderr);
+  }
+  const value = JSON.parse(result.stdout) as
+    | PowerShellAstSummary
+    | PowerShellAstSummary[];
+  const summaries = Array.isArray(value) ? value : [value];
+  return new Map(summaries.map((summary) => [summary.key, summary]));
+}
+
+function commandsNamed(
+  summary: PowerShellAstSummary,
+  name: string,
+): PowerShellAstCommand[] {
+  return summary.commands.filter(
+    (command) => command.name?.toLowerCase() === name.toLowerCase(),
+  );
+}
+
+const expectedProcessControlTopology = new Map<
+  string,
+  { getProcess: string[][]; stopProcess: string[][] }
+>([
+  ["Preflight:setup", { getProcess: [], stopProcess: [] }],
+  [
+    "Display Capture and Confirmation:capture",
+    { getProcess: [], stopProcess: [] },
+  ],
+  [
+    "Display Capture and Confirmation:confirm",
+    { getProcess: [], stopProcess: [] },
+  ],
+  ["ValidateOnly:launch", { getProcess: [], stopProcess: [] }],
+  [
+    "ValidateOnly:diagnostic-connected",
+    { getProcess: [], stopProcess: [] },
+  ],
+  ["Soak3:launch", { getProcess: [], stopProcess: [] }],
+  ["Show:launch", { getProcess: [], stopProcess: [] }],
+  [
+    "Secondary Fault:fault-secondary",
+    {
+      getProcess: [
+        [
+          "Get-Process",
+          "-Id",
+          "$controllerPid",
+          "-ErrorAction",
+          "Stop",
+        ],
+        [
+          "Get-Process",
+          "-Id",
+          "$rendererPid",
+          "-ErrorAction",
+          "Stop",
+        ],
+      ],
+      stopProcess: [["Stop-Process", "-Id", "$rendererPid"]],
+    },
+  ],
+  [
+    "JanVim Fault:fault-janvim",
+    {
+      getProcess: [
+        [
+          "Get-Process",
+          "-Id",
+          "$controllerPid",
+          "-ErrorAction",
+          "Stop",
+        ],
+        [
+          "Get-Process",
+          "-Id",
+          "$janvimPid",
+          "-ErrorAction",
+          "Stop",
+        ],
+      ],
+      stopProcess: [["Stop-Process", "-Id", "$janvimPid"]],
+    },
+  ],
+  [
+    "Controller Fault:fault-controller",
+    {
+      getProcess: [
+        [
+          "Get-Process",
+          "-Id",
+          "$controllerPid",
+          "-ErrorAction",
+          "Stop",
+        ],
+      ],
+      stopProcess: [["Stop-Process", "-Id", "$controllerPid"]],
+    },
+  ],
+]);
+
+function expectProcessControlTopology(
+  summaries: ReadonlyMap<string, PowerShellAstSummary>,
+): void {
+  expect([...summaries.keys()]).toEqual([
+    ...expectedProcessControlTopology.keys(),
+  ]);
+  for (const [key, contract] of expectedProcessControlTopology) {
+    const summary = summaries.get(key)!;
+    const gets = commandsNamed(summary, "Get-Process");
+    const stops = commandsNamed(summary, "Stop-Process");
+    expect(
+      gets.map((command) => command.elements),
+      key,
+    ).toEqual(contract.getProcess);
+    expect(
+      stops.map((command) => command.elements),
+      key,
+    ).toEqual(contract.stopProcess);
+    if (stops.length > 0) {
+      expect(
+        stops[0]!.startOffset,
+        key,
+      ).toBeGreaterThan(Math.max(...gets.map((command) => command.endOffset)));
+    }
+  }
+  expect(
+    [...summaries.values()].flatMap((summary) =>
+      commandsNamed(summary, "Get-Process"),
+    ),
+  ).toHaveLength(5);
+  expect(
+    [...summaries.values()].flatMap((summary) =>
+      commandsNamed(summary, "Stop-Process"),
+    ),
+  ).toHaveLength(3);
+}
+
+function expectTextOrder(block: string, markers: readonly string[]): void {
+  let priorOffset = -1;
+  for (const marker of markers) {
+    const offset = block.indexOf(marker, priorOffset + 1);
+    expect(
+      offset,
+      "missing or out-of-order PowerShell marker: " + marker,
+    ).toBeGreaterThan(priorOffset);
+    priorOffset = offset;
+  }
+}
+
+const safePowerShellCommands = new Set(
+  [
+    "Add-Type",
+    "Assert-ExactPropertySet",
+    "Assert-NoDuplicateJsonProperties",
+    "Complete-StrictControllerLogRecord",
+    "Convert-StrictUtcInstant",
+    "ConvertFrom-Json",
+    "Format-List",
+    "Get-FileHash",
+    "Get-Item",
+    "Get-Location",
+    "Get-Process",
+    "pwsh",
+    "Read-BoundedControllerLogRecords",
+    "Read-BoundedUtf8Text",
+    "Read-Host",
+    "Read-StrictCurrentLease",
+    "Set-StrictMode",
+    "Stop-Process",
+    "Test-LowerSha256",
+    "Test-NonEmptyString",
+    "Test-Path",
+    "Test-PositiveSafeInteger",
+    "Write-Warning",
+  ].map((name) => name.toLowerCase()),
+);
+
+const safePowerShellMembers = new Set(
+  [
+    "Add",
+    "Append",
+    "Clear",
+    "Combine",
+    "Dispose",
+    "EnumerateArray",
+    "EnumerateObject",
+    "Equals",
+    "GetDirectoryName",
+    "GetFullPath",
+    "GetWindowThreadProcessId",
+    "IsNullOrWhiteSpace",
+    "IsWindow",
+    "new",
+    "Open",
+    "Parse",
+    "Pop",
+    "Push",
+    "Read",
+    "ReadToEnd",
+    "Substring",
+    "ToInt64",
+    "ToLowerInvariant",
+    "ToString",
+    "ToUInt64",
+    "ToUniversalTime",
+    "ToUnixTimeMilliseconds",
+    "TrimEnd",
+    "TryParse",
+  ].map((name) => name.toLowerCase()),
+);
+
+function unsafePowerShellAstReasons(summary: PowerShellAstSummary): string[] {
+  return [
+    ...summary.commands.flatMap((command) => {
+      const name = command.name?.toLowerCase();
+      return name !== undefined && safePowerShellCommands.has(name)
+        ? []
+        : ["command:" + (command.name ?? "<dynamic>")];
+    }),
+    ...summary.memberInvocations.flatMap((member) =>
+      safePowerShellMembers.has(member.name.toLowerCase())
+        ? []
+        : ["member:" + member.name],
+    ),
+  ];
+}
+
+const expectedJanVimFaultInteropSource = String.raw`@'
+using System;
+using System.Runtime.InteropServices;
+
+public static class JanVimExhibitionFaultWindowV1
+{
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool IsWindow(IntPtr window);
+
+    [DllImport("user32.dll")]
+    public static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
+}
+'@`;
+
+function normalizePowerShellExtent(value: string): string {
+  return value.replace(/\r\n?/gu, "\n").replace(/\s+/gu, " ").trim();
+}
+
+function expectJanVimFaultInteropTopology(
+  blocks: ReadonlyMap<string, string>,
+  summaries: ReadonlyMap<string, PowerShellAstSummary>,
+): void {
+  const addTypeCommands = [...summaries.entries()].flatMap(([key, summary]) =>
+    commandsNamed(summary, "Add-Type").map((command) => ({ key, command })),
+  );
+  expect(addTypeCommands).toHaveLength(1);
+  expect(addTypeCommands[0]!.key).toBe("JanVim Fault:fault-janvim");
+  expect(addTypeCommands[0]!.command.elements).toHaveLength(3);
+  expect(addTypeCommands[0]!.command.elements.slice(0, 2)).toEqual([
+    "Add-Type",
+    "-TypeDefinition",
+  ]);
+  expect(
+    addTypeCommands[0]!.command.elements[2]!.replace(/\r\n?/gu, "\n"),
+  ).toBe(expectedJanVimFaultInteropSource);
+
+  const interopMemberNames = new Set([
+    "iswindow",
+    "getwindowthreadprocessid",
+  ]);
+  const interopInvocations = [...summaries.entries()].flatMap(
+    ([key, summary]) =>
+      summary.memberInvocations.flatMap((member) =>
+        interopMemberNames.has(member.name.toLowerCase())
+          ? [{ key, member }]
+          : [],
+      ),
+  );
+  expect(
+    interopInvocations.map(({ key, member }) => ({
+      key,
+      name: member.name,
+      text: normalizePowerShellExtent(member.text),
+    })),
+  ).toEqual([
+    {
+      key: "JanVim Fault:fault-janvim",
+      name: "IsWindow",
+      text: "[JanVimExhibitionFaultWindowV1]::IsWindow($leaseWindow)",
+    },
+    {
+      key: "JanVim Fault:fault-janvim",
+      name: "GetWindowThreadProcessId",
+      text: normalizePowerShellExtent(
+        String.raw`[JanVimExhibitionFaultWindowV1]::GetWindowThreadProcessId(
+        $leaseWindow,
+        [ref]$leaseWindowOwnerPid
+    )`,
+      ),
+    },
+  ]);
+
+  const janvimFaultBlock = blocks.get("JanVim Fault:fault-janvim")!;
+  expect(janvimFaultInteropSource(janvimFaultBlock)).toBe(
+    expectedJanVimFaultInteropSource,
+  );
+}
+
+function singleJanVimFaultBlock(block: string): ReadonlyMap<string, string> {
+  const key = "JanVim Fault:fault-janvim";
+  return new Map([[key, block]]);
+}
+
+function janvimFaultInteropSource(block: string): string {
+  const match = /Add-Type -TypeDefinition (?<source>@'[\s\S]*?\n'@)/u.exec(
+    block,
+  );
+  if (match?.groups?.source === undefined) {
+    throw new Error("JanVim fault Add-Type source is missing");
+  }
+  return match.groups.source;
+}
+
+function expectJanVimFaultInteropMutationRejected(block: string): void {
+  const blocks = singleJanVimFaultBlock(block);
+  const summaries = parsePowershellAst(blocks);
+  const summary = summaries.get("JanVim Fault:fault-janvim")!;
+  expect(summary.parseErrors).toEqual([]);
+  expect(commandsNamed(summary, "Add-Type")).toHaveLength(1);
+  expect(
+    summary.memberInvocations.filter((member) =>
+      ["iswindow", "getwindowthreadprocessid"].includes(
+        member.name.toLowerCase(),
+      ),
+    ),
+  ).toHaveLength(2);
+  expect(() =>
+    expectJanVimFaultInteropTopology(blocks, summaries),
+  ).toThrow();
+}
+
+function markdownCells(row: string): string[] {
+  return row
+    .slice(1, -1)
+    .split("|")
+    .map((cell) => cell.trim());
+}
+
+function rawMetricArrayPaths(value: unknown, path = "root"): string[] {
+  if (Array.isArray(value)) {
+    const result = /(?:raw|rss|ack)/iu.test(path) ? [path] : [];
+    return result.concat(
+      value.flatMap((item, index) => rawMetricArrayPaths(item, `${path}[${index}]`)),
+    );
+  }
+  if (value === null || typeof value !== "object") return [];
+  return Object.entries(value).flatMap(([key, item]) =>
+    rawMetricArrayPaths(item, `${path}.${key}`),
+  );
+}
+
+function assertDefaultLogBudgetBounds(storage: MemoryLogStorage): void {
+  expect(DEFAULT_LOG_FILE_BYTES).toBe(8 * 1024 * 1024);
+  expect(DEFAULT_LOG_TOTAL_BYTES).toBe(32 * 1024 * 1024);
+  const budget = new RunLogBudget({
+    storage,
+    basePath: "D:\\logs\\bounded-show.log",
+    secrets: [],
+  });
+  const chunk = "x".repeat(4 * 1024 * 1024);
+  const streams: RunLogStream[] = [
+    "controller",
+    "recovery",
+    "janvim-stdout",
+    "janvim-stderr",
+  ];
+  for (let index = 0; index < 12; index += 1) {
+    expect(budget.write(streams[index % streams.length]!, chunk)).toBe(true);
+  }
+  const sizes = [...storage.files.keys()].map((path) => storage.size(path));
+  expect(Math.max(...sizes)).toBeLessThanOrEqual(DEFAULT_LOG_FILE_BYTES);
+  expect(sizes.reduce((total, bytes) => total + bytes, 0)).toBeLessThanOrEqual(
+    DEFAULT_LOG_TOTAL_BYTES,
+  );
+  expect([...storage.files.keys()].some((path) => /\.1$/u.test(path))).toBe(true);
+  expect(storage.files.size).toBeLessThanOrEqual(16);
+  expect(budget.snapshot()).toEqual({
+    totalBytes: sizes.reduce((total, bytes) => total + bytes, 0),
+    fileCount: storage.files.size,
+    incomplete: false,
+  });
+}
+
+function assertRuntimeLogBounds(storage: MemoryLogStorage): void {
+  const entries = [...storage.files.entries()];
+  expect(entries.length).toBeGreaterThan(0);
+  for (const [path] of entries) {
+    expect(path).toMatch(
+      /show-run\.log\.(?:controller|recovery|janvim-stdout|janvim-stderr)(?:\.[1-3])?$/u,
+    );
+    expect(storage.size(path)).toBeLessThanOrEqual(DEFAULT_LOG_FILE_BYTES);
+  }
+  expect(
+    entries.reduce((total, [path]) => total + storage.size(path), 0),
+  ).toBeLessThanOrEqual(DEFAULT_LOG_TOTAL_BYTES);
+  expect(entries.length).toBeLessThanOrEqual(16);
+}
+
+interface SecondaryFaultContractResult {
+  readonly ok: boolean;
+  readonly error: string | null;
+  readonly stoppedPids: readonly number[];
+}
+
+interface JanVimFaultContractResult {
+  readonly ok: boolean;
+  readonly error: string | null;
+  readonly expectedJanVimPid: number;
+  readonly stoppedPids: readonly number[];
+}
+
+type JanVimFaultContractMode =
+  | "valid"
+  | "destroyed-hwnd"
+  | "wrong-owner"
+  | "type-collision";
+
+function runSecondaryFaultContract(
+  records: readonly Record<string, unknown>[],
+  actualRendererStartedAtUtc = "2026-08-30T00:00:00.250Z",
+): SecondaryFaultContractResult {
+  const runbook = readFileSync(runbookPath, "utf8");
+  const secondary = powershellBlocks(
+    markdownSections(runbook).get("Secondary Fault")!,
+  ).get("fault-secondary")!;
+  const root = mkdtempSync(join(tmpdir(), "janvim-r3-secondary-fault-"));
+  const lease = {
+    schema: 1,
+    runId: "show-001",
+    controllerRunId: "controller-001",
+    generationId: 1,
+    controller: {
+      pid: 8001,
+      startedAtUtc: "2026-08-30T00:00:00.000Z",
+    },
+    janvim: {
+      pid: 8003,
+      startedAtUtc: "2026-08-30T00:00:00.500Z",
+      hwnd: "0x0000000000001F43",
+      executableRelativePath: "janvim-core.exe",
+      executableSha256:
+        "224b3457d89fbc6cf946359683632f29f9262bae08b6f0d2e3043a3a7a6d83b3",
+    },
+  };
+  writeFileSync(join(root, "run-lease.json"), JSON.stringify(lease), "utf8");
+  writeFileSync(
+    join(root, "show-run.log.controller"),
+    records.map((record) => JSON.stringify(record)).join("\n") + "\n",
+    "utf8",
+  );
+
+  const wrapper = `
+$root = $env:JANVIM_R3_ROOT
+$runId = 'show-001'
+$script:StoppedPids = [Collections.Generic.List[int]]::new()
+function global:Get-Process {
+    param([int]$Id, [object]$ErrorAction)
+    $startedAtUtc = if ($Id -eq 8001) {
+        '2026-08-30T00:00:00.000Z'
+    }
+    else {
+        $env:JANVIM_R3_RENDERER_STARTED_AT_UTC
+    }
+    $candidate = [pscustomobject]@{
+        Handle = [IntPtr]1
+        StartTime = [DateTimeOffset]::Parse($startedAtUtc).UtcDateTime
+    }
+    $candidate | Add-Member -MemberType ScriptMethod -Name Dispose -Value { }
+    return $candidate
+}
+function global:Stop-Process {
+    param([int]$Id)
+    [void]$script:StoppedPids.Add($Id)
+}
+try {
+${secondary}
+    [ordered]@{ok=$true;error=$null;stoppedPids=@($script:StoppedPids)} |
+        ConvertTo-Json -Compress
+}
+catch {
+    [ordered]@{ok=$false;error=$_.Exception.Message;stoppedPids=@($script:StoppedPids)} |
+        ConvertTo-Json -Compress
+}
+`;
+
+  try {
+    const result = spawnSync(
+      "pwsh",
+      ["-NoProfile", "-NonInteractive", "-Command", wrapper],
+      {
+        cwd: repositoryRoot,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          JANVIM_R3_ROOT: root,
+          JANVIM_R3_RENDERER_STARTED_AT_UTC: actualRendererStartedAtUtc,
+        },
+        maxBuffer: 1024 * 1024,
+        timeout: 10_000,
+        windowsHide: true,
+      },
+    );
+    if (result.status !== 0) {
+      throw new Error(`secondary fault contract failed: ${result.stderr}`);
+    }
+    const output = result.stdout.trim();
+    if (output.length === 0) {
+      throw new Error("secondary fault contract returned no result");
+    }
+    return JSON.parse(output) as SecondaryFaultContractResult;
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+function runJanVimFaultContractWithDistinctHelperWindow(
+  mode: JanVimFaultContractMode = "valid",
+): JanVimFaultContractResult {
+  const runbook = readFileSync(runbookPath, "utf8");
+  const janvim = powershellBlocks(
+    markdownSections(runbook).get("JanVim Fault")!,
+  ).get("fault-janvim")!;
+  const encodedJanVim = Buffer.from(janvim, "utf8").toString("base64");
+  const root = mkdtempSync(join(tmpdir(), "janvim-r3-janvim-fault-"));
+
+  const wrapper = `
+$repo = $env:JANVIM_R3_REPOSITORY_ROOT
+$root = $env:JANVIM_R3_ROOT
+$runId = 'show-001'
+$controllerStartedAtUtc = '2026-09-01T00:00:00.000Z'
+$janvimStartedAtUtc = '2026-09-01T00:00:00.500Z'
+$leaseJanVimPid = if ($env:JANVIM_R3_FAULT_MODE -ceq 'wrong-owner') {
+    [int]1
+}
+else {
+    $PID
+}
+$janvimExecutable = [IO.Path]::GetFullPath(
+    (Join-Path $repo 'runtime\\janvim\\janvim-core.exe')
+)
+$script:StoppedPids = [Collections.Generic.List[int]]::new()
+
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+public static class JanVimFaultContractWindowHostV1
+{
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern IntPtr CreateWindowExW(
+        uint extendedStyle,
+        string className,
+        string windowName,
+        uint style,
+        int x,
+        int y,
+        int width,
+        int height,
+        IntPtr parent,
+        IntPtr menu,
+        IntPtr instance,
+        IntPtr parameter
+    );
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool DestroyWindow(IntPtr window);
+
+    public static IntPtr Create(int width, int height)
+    {
+        return CreateWindowExW(
+            0,
+            "STATIC",
+            "JanVim fault contract",
+            0,
+            0,
+            0,
+            width,
+            height,
+            IntPtr.Zero,
+            IntPtr.Zero,
+            IntPtr.Zero,
+            IntPtr.Zero
+        );
+    }
+}
+'@
+
+$helperWindow = [JanVimFaultContractWindowHostV1]::Create(0, 0)
+$leaseWindow = [JanVimFaultContractWindowHostV1]::Create(320, 200)
+if (
+    $helperWindow -eq [IntPtr]::Zero -or
+    $leaseWindow -eq [IntPtr]::Zero -or
+    $helperWindow -eq $leaseWindow
+) {
+    throw 'fault-contract-window-create-failed'
+}
+
+$lease = [ordered]@{
+    schema = 1
+    runId = $runId
+    controllerRunId = 'controller-001'
+    generationId = 1
+    controller = [ordered]@{
+        pid = 8001
+        startedAtUtc = $controllerStartedAtUtc
+    }
+    janvim = [ordered]@{
+        pid = $leaseJanVimPid
+        startedAtUtc = $janvimStartedAtUtc
+        hwnd = ('0x{0:X16}' -f $leaseWindow.ToInt64())
+        executableRelativePath = 'janvim-core.exe'
+        executableSha256 =
+            '224b3457d89fbc6cf946359683632f29f9262bae08b6f0d2e3043a3a7a6d83b3'
+    }
+}
+$lease | ConvertTo-Json -Depth 8 |
+    Set-Content -LiteralPath (Join-Path $root 'run-lease.json') -Encoding utf8NoBOM
+
+function global:Get-Process {
+    param([int]$Id, [object]$ErrorAction)
+    $startedAtUtc = if ($Id -eq 8001) {
+        $controllerStartedAtUtc
+    }
+    elseif ($Id -eq $leaseJanVimPid) {
+        $janvimStartedAtUtc
+    }
+    else {
+        throw "unexpected-process-id:$Id"
+    }
+    $candidate = [pscustomobject]@{
+        Handle = [IntPtr]1
+        StartTime = [DateTimeOffset]::Parse($startedAtUtc).UtcDateTime
+        Path = $janvimExecutable
+        MainWindowHandle = $helperWindow
+    }
+    $candidate | Add-Member -MemberType ScriptMethod -Name Dispose -Value { }
+    return $candidate
+}
+
+function global:Stop-Process {
+    param([int]$Id)
+    [void]$script:StoppedPids.Add($Id)
+}
+
+$faultCode = [Text.Encoding]::UTF8.GetString(
+    [Convert]::FromBase64String($env:JANVIM_R3_FAULT_BLOCK_BASE64)
+)
+$faultJanVim = [scriptblock]::Create($faultCode)
+if ($env:JANVIM_R3_FAULT_MODE -ceq 'type-collision') {
+    Add-Type -TypeDefinition @'
+using System;
+
+public static class JanVimExhibitionFaultWindowV1
+{
+    public static bool IsWindow(IntPtr window)
+    {
+        return true;
+    }
+
+    public static uint GetWindowThreadProcessId(IntPtr window, out uint processId)
+    {
+        processId = (uint)System.Diagnostics.Process.GetCurrentProcess().Id;
+        return 1;
+    }
+}
+'@
+}
+if ($env:JANVIM_R3_FAULT_MODE -ceq 'destroyed-hwnd') {
+    if (-not [JanVimFaultContractWindowHostV1]::DestroyWindow($leaseWindow)) {
+        throw 'fault-contract-window-destroy-failed'
+    }
+}
+
+try {
+    try {
+        & $faultJanVim
+        [ordered]@{
+            ok=$true
+            error=$null
+            expectedJanVimPid=$leaseJanVimPid
+            stoppedPids=@($script:StoppedPids)
+        } |
+            ConvertTo-Json -Compress
+    }
+    catch {
+        [ordered]@{
+            ok=$false
+            error=$_.Exception.Message
+            expectedJanVimPid=$leaseJanVimPid
+            stoppedPids=@($script:StoppedPids)
+        } |
+            ConvertTo-Json -Compress
+    }
+}
+finally {
+    [void][JanVimFaultContractWindowHostV1]::DestroyWindow($leaseWindow)
+    [void][JanVimFaultContractWindowHostV1]::DestroyWindow($helperWindow)
+}
+`;
+
+  try {
+    const result = spawnSync(
+      "pwsh",
+      ["-NoProfile", "-NonInteractive", "-Command", wrapper],
+      {
+        cwd: repositoryRoot,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          JANVIM_R3_FAULT_BLOCK_BASE64: encodedJanVim,
+          JANVIM_R3_FAULT_MODE: mode,
+          JANVIM_R3_REPOSITORY_ROOT: repositoryRoot,
+          JANVIM_R3_ROOT: root,
+        },
+        maxBuffer: 1024 * 1024,
+        timeout: 10_000,
+        windowsHide: true,
+      },
+    );
+    if (result.error !== undefined) throw result.error;
+    if (result.status !== 0) {
+      throw new Error(`JanVim fault contract failed: ${result.stderr}`);
+    }
+    const output = result.stdout.trim();
+    if (output.length === 0) {
+      throw new Error("JanVim fault contract returned no result");
+    }
+    return JSON.parse(output) as JanVimFaultContractResult;
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+describe("Task 9 recovery operations", () => {
+  it("pins the byte-hashed rehearsal runbook to LF in every checkout", () => {
+    const result = spawnSync(
+      "git",
+      [
+        "check-attr",
+        "text",
+        "eol",
+        "--",
+        "docs/operations/rehearsal-runbook.md",
+      ],
+      {
+        cwd: repositoryRoot,
+        encoding: "utf8",
+        windowsHide: true,
+      },
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout.trim().split(/\r?\n/u)).toEqual([
+      "docs/operations/rehearsal-runbook.md: text: set",
+      "docs/operations/rehearsal-runbook.md: eol: lf",
+    ]);
+  });
+
+  it("requires bounded, observable operator documents", () => {
+    const runbook = readFileSync(runbookPath, "utf8");
+    const incidentTemplate = readFileSync(incidentTemplatePath, "utf8");
+
+    const requiredSections = [
+      "Preflight",
+      "Display Capture and Confirmation",
+      "Physical Network Disconnect",
+      "ValidateOnly",
+      "Soak3",
+      "Show",
+      "Start",
+      "Restart Loop",
+      "Stop Show",
+      "Secondary Fault",
+      "JanVim Fault",
+      "Controller Fault",
+      "Exact Shutdown",
+      "Evidence Review",
+      "G2 Fallback",
+      "Physical-Projector G4 Deferral",
+    ] as const;
+    const runbookSections = markdownSections(runbook);
+    expect([...runbookSections.keys()]).toEqual(requiredSections);
+    for (const section of requiredSections) {
+      const body = runbookSections.get(section)!;
+      const clauses = [...body.matchAll(
+        /(Precondition|Exact command\/action|Visible result|Machine evidence|Bounded failure branch) ->/gu,
+      )];
+      expect(
+        clauses.map((clause) => clause[1]),
+        `${section} must contain the five ordered operational clauses`,
+      ).toEqual([
+        "Precondition",
+        "Exact command/action",
+        "Visible result",
+        "Machine evidence",
+        "Bounded failure branch",
+      ]);
+      clauses.forEach((clause, index) => {
+        const start = clause.index! + clause[0].length;
+        const end = clauses[index + 1]?.index ?? body.length;
+        expect(
+          body.slice(start, end).trim(),
+          `${section} clause ${clause[1]} must not be empty`,
+        ).not.toBe("");
+      });
+    }
+
+    const sectionContracts = {
+      "Display Capture and Confirmation": [
+        "`start-g2-rehearsal.ps1 Capture`",
+        "`start-g2-rehearsal.ps1 Confirm`",
+        "fresh external map",
+        "checked-in display map remains unconfirmed",
+      ],
+      "Physical Network Disconnect": [
+        "manually disconnect Wi-Fi and Ethernet",
+        "launcher only observes network state and never changes networking",
+      ],
+      "Stop Show": [
+        "Stop Show button",
+        "Alt+F4 is only the frozen G2 manual acceptance flow",
+      ],
+      "Secondary Fault": [
+        "exact current secondary renderer PID",
+        "fixed controller log",
+        "approved deliberate renderer fault against that exact identity",
+      ],
+      "JanVim Fault": [
+        "exact JanVim PID, HWND, start identity, and executable hash",
+        "token-free lease",
+        "approved deliberate fault only against that exact JanVim identity",
+      ],
+      "G2 Fallback": [
+        "preserved frozen G2 short loop",
+        "do not add P1 effects, media, or new content",
+      ],
+      "Physical-Projector G4 Deferral": [
+        "physicalProjectorsTested: false",
+        "do not convert two-monitor evidence into G4",
+        "two physical projectors",
+      ],
+    } as const;
+    for (const [section, contracts] of Object.entries(sectionContracts)) {
+      const body = runbookSections.get(section)!;
+      const normalizedBody = body.replace(/\s+/gu, " ");
+      for (const contract of contracts) {
+        expect(normalizedBody).toContain(contract.replace(/\s+/gu, " "));
+      }
+    }
+
+    const incidentSections = markdownSections(incidentTemplate);
+    expect([...incidentSections.keys()]).toEqual([
+      "Strict Checklist",
+      "Bounded Event Table",
+    ]);
+    const checklist = incidentSections.get("Strict Checklist")!;
+    const checklistItems = [...checklist.matchAll(/^- \[ \] (.+)$/gmu)].map(
+      (match) => match[1]!,
+    );
+    expect(checklistItems.slice(0, 2)).toEqual([
+      "Maximum events: 32",
+      "Maximum bytes per note: 4096",
+    ]);
+    for (const requiredField of [
+      "Run ID:",
+      "Controller run ID:",
+      "Generation ID:",
+      "Monotonic timestamp:",
+      "Wall timestamp:",
+      "Mode/state:",
+      "Exact process identities:",
+      "Fault/retry/domain:",
+      "Offline snapshot:",
+      "Artifact/content/display hashes:",
+      "Operator action:",
+      "Recovery result:",
+      "Media hashes:",
+      "Independent photo/video backup path:",
+      "SHA-256:",
+      "Follow-up owner:",
+    ]) {
+      expect(
+        checklistItems.some((item) => item.startsWith(requiredField)),
+        `missing checklist field ${requiredField}`,
+      ).toBe(true);
+    }
+
+    const tableSection = incidentSections.get("Bounded Event Table")!;
+    const tableLines = tableSection
+      .split(/\r?\n/u)
+      .map((line) => line.trim())
+      .filter((line) => line.startsWith("|") && line.endsWith("|"));
+    const separatorLines = tableLines.filter((line) =>
+      markdownCells(line).every((cell) => /^:?-{3,}:?$/u.test(cell)),
+    );
+    expect(separatorLines).toHaveLength(1);
+    expect(tableLines).toHaveLength(34);
+    const tableHeaders = markdownCells(tableLines[0]!);
+    expect(tableHeaders).toEqual([
+      "# (1-32)",
+      "Monotonic timestamp",
+      "Wall timestamp",
+      "Run/controller/generation IDs",
+      "Mode/state",
+      "Exact process identities",
+      "Fault/retry/domain",
+      "Offline snapshot",
+      "Artifact/content/display hashes",
+      "Operator action",
+      "Recovery result",
+      "Media hashes and independent photo/video backup path + SHA-256",
+      "Notes (<=4096 bytes)",
+      "Follow-up owner",
+    ]);
+    const eventRows = tableLines.slice(2);
+    expect(eventRows).toHaveLength(32);
+    eventRows.forEach((row, index) => {
+      const cells = markdownCells(row);
+      expect(cells, `event row ${index + 1} column count`).toHaveLength(
+        tableHeaders.length,
+      );
+      expect(cells[0]).toBe(String(index + 1));
+    });
+
+    const structuralFields = [...checklistItems, ...tableHeaders].map((field) =>
+      field.toLowerCase(),
+    );
+    for (const forbiddenField of [
+      "bridge token",
+      "arbitrary command",
+      "keyboard injection",
+      "title matching",
+      "user config",
+      "source-repository mutation",
+    ]) {
+      expect(
+        structuralFields.some((field) => field.includes(forbiddenField)),
+        `${forbiddenField} must not be a checklist or table field`,
+      ).toBe(false);
+    }
+
+    for (const statement of [
+      "Secrets are not recorded.",
+      "Poem text is not recorded.",
+      "User config paths are not recorded.",
+      "Arbitrary shell commands are not recorded.",
+      "Bridge token is not recorded.",
+      "Arbitrary command is not recorded.",
+      "Keyboard injection is not recorded.",
+      "Title matching is not recorded.",
+      "User config path is not recorded.",
+      "Source-repository mutation is not recorded.",
+    ]) {
+      expect(incidentTemplate).toContain(statement);
+    }
+  });
+
+  it("publishes complete public launcher command blocks with isolated run roots", () => {
+    const runbook = readFileSync(runbookPath, "utf8");
+    const sections = markdownSections(runbook);
+    const setupBlocks = powershellBlocks(sections.get("Preflight")!);
+    expect([...setupBlocks.keys()]).toEqual(["setup"]);
+    const setup = setupBlocks.get("setup")!;
+    expect(setup).toContain("$repo = (Get-Location).Path");
+    expect(setup).toContain(
+      "$runId = \"g3-monitor-$([DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss'))\"",
+    );
+    expect(setup).toContain(
+      "$root = \"D:\\VirtualData\\JanVim-Exhibition-Rehearsals\\$runId\"",
+    );
+    expect(setup).toContain("$map = \"$root\\display-map.json\"");
+    expect(setup).toContain("$runId -cnotmatch '^[A-Za-z0-9._-]{1,64}$'");
+    expect(setup).toContain("Test-Path -LiteralPath $root");
+    expect(setup).toContain("Test-Path -LiteralPath $map");
+
+    const displayBlocks = powershellBlocks(
+      sections.get("Display Capture and Confirmation")!,
+    );
+    expect([...displayBlocks.keys()]).toEqual(["capture", "confirm"]);
+    expect(normalizedPowershell(displayBlocks.get("capture")!)).toContain(
+      'pwsh -NoProfile -File "$repo\\scripts\\start-g2-rehearsal.ps1" -Mode Capture -RehearsalRoot $root -DisplayMapPath $map',
+    );
+    const confirm = normalizedPowershell(displayBlocks.get("confirm")!);
+    expect(confirm).toContain("$primaryDisplayId = Read-Host");
+    expect(confirm).toContain("$secondaryDisplayId = Read-Host");
+    expect(confirm).toContain(
+      'pwsh -NoProfile -File "$repo\\scripts\\start-g2-rehearsal.ps1" -Mode Confirm -RehearsalRoot $root -DisplayMapPath $map -PrimaryDisplayId $primaryDisplayId -SecondaryDisplayId $secondaryDisplayId',
+    );
+
+    const launchContracts = [
+      ["ValidateOnly", "ValidateOnly"],
+      ["Soak3", "Soak3"],
+      ["Show", "Show"],
+    ] as const;
+    for (const [section, mode] of launchContracts) {
+      const launch = normalizedPowershell(
+        powershellBlocks(sections.get(section)!).get("launch")!,
+      );
+      expect(launch).toContain(
+        `pwsh -NoProfile -File "$repo\\scripts\\start-show.ps1" -Mode ${mode} -RehearsalRoot $root -DisplayMapPath $map -RunId $runId -NetworkPolicy OfflineRequired`,
+      );
+    }
+
+    const validateBlocks = powershellBlocks(sections.get("ValidateOnly")!);
+    expect([...validateBlocks.keys()]).toEqual(["launch", "diagnostic-connected"]);
+    expect(normalizedPowershell(validateBlocks.get("diagnostic-connected")!)).toContain(
+      'pwsh -NoProfile -File "$repo\\scripts\\start-show.ps1" -Mode ValidateOnly -RehearsalRoot $root -DisplayMapPath $map -RunId $runId -NetworkPolicy DiagnosticConnected',
+    );
+    const connectedBlocks = [...sections.entries()].flatMap(([section, body]) =>
+      [...powershellBlocks(body).entries()]
+        .filter(([, block]) => block.includes("DiagnosticConnected"))
+        .map(([label]) => `${section}:${label}`),
+    );
+    expect(connectedBlocks).toEqual(["ValidateOnly:diagnostic-connected"]);
+  });
+
+  it("preserves lease dates as strings and validates both process timestamps", () => {
+    const runbook = readFileSync(runbookPath, "utf8");
+    const blocks = allPowershellBlocks(runbook);
+    const summaries = parsePowershellAst(blocks);
+    for (const key of [
+      "Secondary Fault:fault-secondary",
+      "JanVim Fault:fault-janvim",
+      "Controller Fault:fault-controller",
+    ]) {
+      const block = blocks.get(key)!;
+      const summary = summaries.get(key)!;
+      expect(summary.parseErrors, key).toEqual([]);
+      const leaseAssignment = block.indexOf("$lease = $leaseText |");
+      const leaseGuard = block.indexOf("if ($lease -isnot", leaseAssignment);
+      const leaseParsers = commandsNamed(summary, "ConvertFrom-Json").filter(
+        (command) =>
+          command.startOffset > leaseAssignment && command.startOffset < leaseGuard,
+      );
+      expect(leaseParsers, key).toHaveLength(1);
+      expect(leaseParsers[0]!.elements, key).toEqual([
+        "ConvertFrom-Json",
+        "-Depth",
+        "8",
+        "-DateKind",
+        "String",
+        "-NoEnumerate",
+      ]);
+
+      const timestampTargets = commandsNamed(
+        summary,
+        "Convert-StrictUtcInstant",
+      ).flatMap((command) => {
+        const valueIndex = command.elements.indexOf("-Value");
+        return valueIndex < 0 ? [] : [command.elements[valueIndex + 1]];
+      });
+      expect(timestampTargets, key).toContain("$lease.controller.startedAtUtc");
+      expect(timestampTargets, key).toContain("$lease.janvim.startedAtUtc");
+    }
+  });
+
+  it("streams controller JSONL with character and physical-record bounds before parsing", () => {
+    const sections = markdownSections(readFileSync(runbookPath, "utf8"));
+    const secondary = powershellBlocks(sections.get("Secondary Fault")!).get(
+      "fault-secondary",
+    )!;
+    expect(secondary).not.toMatch(/\s-split\s/iu);
+    expect(secondary).not.toMatch(/\.ReadLine\s*\(/iu);
+    expect(secondary).toContain("$maximumControllerLogBytes = 8 * 1024 * 1024");
+    expect(secondary).toContain("$maximumControllerLogLineCharacters = 16384");
+    expect(secondary).toContain("$maximumControllerLogRecords = 8192");
+
+    const readerStart = secondary.indexOf(
+      "function Read-BoundedControllerLogRecords",
+    );
+    const readerEnd = secondary.indexOf(
+      "function Read-StrictCurrentLease",
+      readerStart,
+    );
+    expect(readerStart).toBeGreaterThan(-1);
+    expect(readerEnd).toBeGreaterThan(readerStart);
+    const reader = secondary.slice(readerStart, readerEnd);
+    expect(reader).toContain("$reader.Read()");
+    expectTextOrder(reader, [
+      "$State.PhysicalRecordCount += 1",
+      "$State.PhysicalRecordCount -gt $MaximumRecords",
+      "$lineBuilder.Length -ge $MaximumLineCharacters",
+      "[void]$lineBuilder.Append($character)",
+    ]);
+    expect(reader.indexOf("Complete-StrictControllerLogRecord")).toBeGreaterThan(
+      reader.indexOf("$State.PhysicalRecordCount -gt $MaximumRecords"),
+    );
+
+    const completeStart = secondary.indexOf(
+      "function Complete-StrictControllerLogRecord",
+    );
+    expect(completeStart).toBeGreaterThan(-1);
+    const complete = secondary.slice(completeStart, readerStart);
+    expectTextOrder(complete, [
+      "Assert-NoDuplicateJsonProperties -Text $Line",
+      "$record = $Line | ConvertFrom-Json",
+    ]);
+    expect(
+      secondary.indexOf("Stop-Process -Id $rendererPid"),
+    ).toBeGreaterThan(readerEnd);
+  });
+
+  it("requires exact current renderer start identity while tolerating valid historical legacy", () => {
+    const current = {
+      type: "secondary-opened",
+      runId: "show-001",
+      controllerRunId: "controller-001",
+      generationId: 1,
+      rendererPid: 8002,
+      rendererStartedAtUtc: "2026-08-30T00:00:00.250Z",
+    };
+    const currentLegacy = {
+      type: "secondary-opened",
+      runId: "show-001",
+      controllerRunId: "controller-001",
+      generationId: 1,
+      rendererPid: 8002,
+    };
+    const historicalLegacy = {
+      type: "secondary-opened",
+      runId: "show-000",
+      controllerRunId: "controller-000",
+      generationId: 7,
+      rendererPid: 7002,
+    };
+
+    expect(runSecondaryFaultContract([historicalLegacy, current])).toEqual({
+      ok: true,
+      error: null,
+      stoppedPids: [8002],
+    });
+
+    const failures = [
+      {
+        name: "matching legacy",
+        records: [currentLegacy],
+        actualStartedAtUtc: "2026-08-30T00:00:00.250Z",
+        error: "current-secondary-start-identity-missing",
+      },
+      {
+        name: "start mismatch",
+        records: [current],
+        actualStartedAtUtc: "2026-08-30T00:00:00.251Z",
+        error: "current-secondary-start-identity-mismatch",
+      },
+      {
+        name: "malformed current record",
+        records: [{ ...current, unexpected: true }],
+        actualStartedAtUtc: "2026-08-30T00:00:00.250Z",
+        error: "json-property-count-invalid",
+      },
+      {
+        name: "duplicate current record",
+        records: [current, current],
+        actualStartedAtUtc: "2026-08-30T00:00:00.250Z",
+        error: "current-secondary-identity-not-unique",
+      },
+    ];
+    for (const failure of failures) {
+      expect(
+        runSecondaryFaultContract(
+          failure.records,
+          failure.actualStartedAtUtc,
+        ),
+        failure.name,
+      ).toEqual({
+        ok: false,
+        error: failure.error,
+        stoppedPids: [],
+      });
+    }
+  }, 10_000);
+
+  it("faults the leased JanVim window owner even when a helper is reported as MainWindowHandle", () => {
+    const result = runJanVimFaultContractWithDistinctHelperWindow();
+
+    expect(result.ok, result.error ?? undefined).toBe(true);
+    expect(result.expectedJanVimPid).toBeGreaterThan(0);
+    expect(result.error).toBeNull();
+    expect(result.stoppedPids).toEqual([result.expectedJanVimPid]);
+  }, 10_000);
+
+  it("fails closed when the leased JanVim HWND no longer exists", () => {
+    const result = runJanVimFaultContractWithDistinctHelperWindow(
+      "destroyed-hwnd",
+    );
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: "janvim-hwnd-identity-mismatch",
+      stoppedPids: [],
+    });
+  }, 10_000);
+
+  it("fails closed when a live leased HWND belongs to a different PID", () => {
+    const result = runJanVimFaultContractWithDistinctHelperWindow(
+      "wrong-owner",
+    );
+
+    expect(result.expectedJanVimPid).toBe(1);
+    expect(result).toMatchObject({
+      ok: false,
+      error: "janvim-hwnd-identity-mismatch",
+      stoppedPids: [],
+    });
+  }, 10_000);
+
+  it("fails closed when the reviewed interop type is already loaded", () => {
+    const result = runJanVimFaultContractWithDistinctHelperWindow(
+      "type-collision",
+    );
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: "janvim-window-interop-type-conflict",
+      stoppedPids: [],
+    });
+  }, 10_000);
+
+  it("mirrors safe lease, event, token, and complete frozen artifact-lock schemas", () => {
+    const sections = markdownSections(readFileSync(runbookPath, "utf8"));
+    const faults = [
+      powershellBlocks(sections.get("Secondary Fault")!).get("fault-secondary")!,
+      powershellBlocks(sections.get("JanVim Fault")!).get("fault-janvim")!,
+      powershellBlocks(sections.get("Controller Fault")!).get("fault-controller")!,
+    ];
+    for (const fault of faults) {
+      expect(fault).not.toMatch(/\$leaseText\s+-cmatch/iu);
+      expect(fault).toContain(
+        "$lease.runId -cmatch '[0-9A-Fa-f]{48}'",
+      );
+      expect(fault).toContain(
+        "$lease.controllerRunId -cmatch '[0-9A-Fa-f]{48}'",
+      );
+      expect(fault).toContain(
+        "$lease.generationId -gt 9007199254740991",
+      );
+    }
+
+    const secondary = faults[0]!;
+    expect(secondary).toContain(
+      "$record.runId -cmatch '[0-9A-Fa-f]{48}'",
+    );
+    expect(secondary).toContain(
+      "$record.controllerRunId -cmatch '[0-9A-Fa-f]{48}'",
+    );
+    expect(secondary).toContain(
+      "$record.generationId -gt 9007199254740991",
+    );
+
+    const janvim = faults[1]!;
+    for (const field of [
+      "archive",
+      "checksum",
+      "runtimeLua",
+      "artifactConfig",
+      "provenanceKind",
+      "provenanceReference",
+      "provenanceRecord",
+      "evidenceRecord",
+    ]) {
+      expect(janvim, field).toContain(
+        "Test-NonEmptyString -Value $artifactLock." + field,
+      );
+    }
+    for (const field of ["archiveBytes", "coreBytes"]) {
+      expect(janvim, field).toContain(
+        "Test-PositiveSafeInteger -Value $artifactLock." + field,
+      );
+    }
+    for (const field of [
+      "archiveSha256",
+      "checksumSha256",
+      "coreSha256",
+      "runtimeLuaSha256",
+      "artifactConfigSha256",
+      "configSha256",
+      "provenanceSha256",
+      "evidenceSha256",
+      "pluginLabConfigSha256",
+    ]) {
+      expect(janvim, field).toContain(
+        "Test-LowerSha256 -Value $artifactLock." + field,
+      );
+    }
+    for (const literal of [
+      "$artifactLock.sourceRepository -cne 'D:/github/JanVim'",
+      "$artifactLock.tag -cne 'v0.10.1-gmk.4'",
+      "$artifactLock.commit -cne 'e95633101d93f8448b0f906e918b5d836ab95273'",
+      "$artifactLock.core -cne 'janvim-core.exe'",
+      "$artifactLock.coreBytes -ne 18866688",
+      "$artifactLock.coreSha256 -cne '224b3457d89fbc6cf946359683632f29f9262bae08b6f0d2e3043a3a7a6d83b3'",
+      "$artifactLock.config -cne 'show/janvim-show.toml'",
+      "$artifactLock.layoutEngine -cne 'orthogonal'",
+      "$artifactLock.role -cne 'primary-projector'",
+      "$artifactLock.pluginLabConfig -cne 'runtime/user-root/plugin-lab/config/init.lua'",
+    ]) {
+      expect(janvim).toContain(literal);
+    }
+  });
+
+  it("rejects an unlabeled PowerShell fence containing hidden launch and stop commands", () => {
+    const runbook = [
+      "## Safe",
+      "```powershell",
+      'pwsh -NoProfile -File ".\\scripts\\start-show.ps1"',
+      "gps -Id 1 | kill",
+      "$process.Kill()",
+      "```",
+    ].join("\n");
+
+    expect(() => allPowershellBlocks(runbook)).toThrow(/PowerShell/iu);
+  });
+
+  it("rejects a PowerShell fence before the first level-two section", () => {
+    const runbook = [
+      "```powershell",
+      "# block: outside",
+      "Write-Warning 'outside'",
+      "```",
+      "## Safe",
+      "```powershell",
+      "# block: inside",
+      "Write-Warning 'inside'",
+      "```",
+    ].join("\n");
+
+    expect(() => allPowershellBlocks(runbook)).toThrow(/PowerShell/iu);
+  });
+
+  it.each([
+    ["malformed", ["# block: Bad_Label", "Write-Warning 'bad'"]],
+    ["non-first", ["Write-Warning 'before'", "# block: late"]],
+    [
+      "multiple",
+      ["# block: first", "# block: second", "Write-Warning 'bad'"],
+    ],
+  ])("rejects a %s PowerShell block label", (_caseName, body) => {
+    const runbook = ["## Safe", "```powershell", ...body, "```"].join("\n");
+
+    expect(() => allPowershellBlocks(runbook)).toThrow(/PowerShell/iu);
+  });
+
+  it("rejects duplicate PowerShell labels within a repeated section identity", () => {
+    const runbook = [
+      "## Repeated",
+      "```powershell",
+      "# block: duplicate",
+      "Write-Warning 'first'",
+      "```",
+      "## Repeated",
+      "```powershell",
+      "# block: duplicate",
+      "Write-Warning 'second'",
+      "```",
+    ].join("\n");
+
+    expect(() => allPowershellBlocks(runbook)).toThrow(/PowerShell/iu);
+  });
+
+  it.each([
+    [
+      "unclosed",
+      [
+        "## Safe",
+        "```powershell",
+        "# block: unclosed",
+        "Write-Warning 'open'",
+      ],
+    ],
+    [
+      "header-count mismatch",
+      [
+        "## Safe",
+        "```powershell",
+        "# block: first",
+        "Write-Warning 'first'",
+        "```powershell",
+        "# block: second",
+        "Write-Warning 'second'",
+        "```",
+      ],
+    ],
+  ])("rejects a PowerShell fence with %s", (_caseName, lines) => {
+    expect(() => allPowershellBlocks(lines.join("\n"))).toThrow(/PowerShell/iu);
+  });
+
+  it("rejects exact PID process control in an existing non-fault block", () => {
+    const blocks = allPowershellBlocks(readFileSync(runbookPath, "utf8"));
+    const key = "Preflight:setup";
+    blocks.set(
+      key,
+      [
+        blocks.get(key)!,
+        "Get-Process -Id $controllerPid -ErrorAction Stop",
+        "Stop-Process -Id $controllerPid",
+      ].join("\n"),
+    );
+
+    expect(() =>
+      expectProcessControlTopology(parsePowershellAst(blocks)),
+    ).toThrow();
+  });
+
+  it("rejects an extra exact PID process pair inside a fault block", () => {
+    const blocks = allPowershellBlocks(readFileSync(runbookPath, "utf8"));
+    const key = "Secondary Fault:fault-secondary";
+    blocks.set(
+      key,
+      [
+        blocks.get(key)!,
+        "Get-Process -Id $rendererPid -ErrorAction Stop",
+        "Stop-Process -Id $rendererPid",
+      ].join("\n"),
+    );
+
+    expect(() =>
+      expectProcessControlTopology(parsePowershellAst(blocks)),
+    ).toThrow();
+  });
+
+  it("rejects an extra Add-Type parameter in the JanVim fault interop contract", () => {
+    const block = allPowershellBlocks(readFileSync(runbookPath, "utf8")).get(
+      "JanVim Fault:fault-janvim",
+    )!;
+    const mutatedBlock = block.replace(
+      "Add-Type -TypeDefinition @'",
+      "Add-Type -IgnoreWarnings -TypeDefinition @'",
+    );
+    expect(mutatedBlock).not.toBe(block);
+    expectJanVimFaultInteropMutationRejected(mutatedBlock);
+  });
+
+  it("rejects opaque managed code in the JanVim fault interop contract", () => {
+    const block = allPowershellBlocks(readFileSync(runbookPath, "utf8")).get(
+      "JanVim Fault:fault-janvim",
+    )!;
+    const source = janvimFaultInteropSource(block);
+    const mutatedSource = source.replace(
+      "public static class JanVimExhibitionFaultWindowV1\n{",
+      [
+        "public static class JanVimExhibitionFaultWindowV1",
+        "{",
+        "    static JanVimExhibitionFaultWindowV1()",
+        "    {",
+        "        Environment.FailFast(\"unexpected managed code\");",
+        "    }",
+      ].join("\n"),
+    );
+    expect(mutatedSource).not.toBe(source);
+    expectJanVimFaultInteropMutationRejected(
+      block.replace(source, mutatedSource),
+    );
+  });
+
+  it("rejects an extra PInvoke in the JanVim fault interop contract", () => {
+    const block = allPowershellBlocks(readFileSync(runbookPath, "utf8")).get(
+      "JanVim Fault:fault-janvim",
+    )!;
+    const source = janvimFaultInteropSource(block);
+    const mutatedSource = source.replace(
+      "public static class JanVimExhibitionFaultWindowV1\n{",
+      [
+        "public static class JanVimExhibitionFaultWindowV1",
+        "{",
+        "    [DllImport(\"kernel32.dll\")]",
+        "    public static extern void ExitProcess(uint exitCode);",
+        "",
+      ].join("\n"),
+    );
+    expect(mutatedSource).not.toBe(source);
+    expectJanVimFaultInteropMutationRejected(
+      block.replace(source, mutatedSource),
+    );
+  });
+
+  it("allowlists parsed commands and enforces exact launcher and PID-stop topology", () => {
+    const malicious = parsePowershellAst(
+      new Map([
+        [
+          "malicious",
+          [
+            "gps -Id 1 | kill",
+            "spps -Id 1",
+            "$process.Kill()",
+            "$process.CloseMainWindow()",
+          ].join("\n"),
+        ],
+      ]),
+    ).get("malicious")!;
+    expect(malicious.parseErrors).toEqual([]);
+    expect(unsafePowerShellAstReasons(malicious)).toEqual([
+      "command:gps",
+      "command:kill",
+      "command:spps",
+      "member:Kill",
+      "member:CloseMainWindow",
+    ]);
+
+    const blocks = allPowershellBlocks(readFileSync(runbookPath, "utf8"));
+    expect([...blocks.keys()]).toEqual([
+      "Preflight:setup",
+      "Display Capture and Confirmation:capture",
+      "Display Capture and Confirmation:confirm",
+      "ValidateOnly:launch",
+      "ValidateOnly:diagnostic-connected",
+      "Soak3:launch",
+      "Show:launch",
+      "Secondary Fault:fault-secondary",
+      "JanVim Fault:fault-janvim",
+      "Controller Fault:fault-controller",
+    ]);
+    const summaries = parsePowershellAst(blocks);
+    for (const [key, summary] of summaries) {
+      expect(summary.parseErrors, key).toEqual([]);
+      expect(unsafePowerShellAstReasons(summary), key).toEqual([]);
+    }
+    expectJanVimFaultInteropTopology(blocks, summaries);
+
+    const launchers = new Map<string, string[]>([
+      [
+        "Display Capture and Confirmation:capture",
+        [
+          "pwsh",
+          "-NoProfile",
+          "-File",
+          '"$repo\\scripts\\start-g2-rehearsal.ps1"',
+          "-Mode",
+          "Capture",
+          "-RehearsalRoot",
+          "$root",
+          "-DisplayMapPath",
+          "$map",
+        ],
+      ],
+      [
+        "Display Capture and Confirmation:confirm",
+        [
+          "pwsh",
+          "-NoProfile",
+          "-File",
+          '"$repo\\scripts\\start-g2-rehearsal.ps1"',
+          "-Mode",
+          "Confirm",
+          "-RehearsalRoot",
+          "$root",
+          "-DisplayMapPath",
+          "$map",
+          "-PrimaryDisplayId",
+          "$primaryDisplayId",
+          "-SecondaryDisplayId",
+          "$secondaryDisplayId",
+        ],
+      ],
+      ...[
+        ["ValidateOnly:launch", "ValidateOnly", "OfflineRequired"],
+        [
+          "ValidateOnly:diagnostic-connected",
+          "ValidateOnly",
+          "DiagnosticConnected",
+        ],
+        ["Soak3:launch", "Soak3", "OfflineRequired"],
+        ["Show:launch", "Show", "OfflineRequired"],
+      ].map(([key, mode, policy]) => [
+        key,
+        [
+          "pwsh",
+          "-NoProfile",
+          "-File",
+          '"$repo\\scripts\\start-show.ps1"',
+          "-Mode",
+          mode,
+          "-RehearsalRoot",
+          "$root",
+          "-DisplayMapPath",
+          "$map",
+          "-RunId",
+          "$runId",
+          "-NetworkPolicy",
+          policy,
+        ],
+      ] as [string, string[]]),
+    ]);
+    for (const [key, expectedElements] of launchers) {
+      const commands = commandsNamed(summaries.get(key)!, "pwsh");
+      expect(commands, key).toHaveLength(1);
+      expect(commands[0]!.elements, key).toEqual(expectedElements);
+    }
+    expect(
+      [...summaries.values()].flatMap((summary) =>
+        commandsNamed(summary, "pwsh"),
+      ),
+    ).toHaveLength(6);
+
+    expectProcessControlTopology(summaries);
+
+    const secondary = summaries.get("Secondary Fault:fault-secondary")!;
+    const boundedReaders = commandsNamed(
+      secondary,
+      "Read-BoundedControllerLogRecords",
+    );
+    expect(boundedReaders).toHaveLength(1);
+    expect(boundedReaders[0]!.elements).toEqual([
+      "Read-BoundedControllerLogRecords",
+      "-Path",
+      "$controllerLogPath",
+      "-MaximumBytes",
+      "$maximumControllerLogBytes",
+      "-MaximumLineCharacters",
+      "$maximumControllerLogLineCharacters",
+      "-MaximumRecords",
+      "$maximumControllerLogRecords",
+      "-State",
+      "$logState",
+      "-RunId",
+      "$runId",
+      "-ControllerRunId",
+      "$lease.controllerRunId",
+      "-GenerationId",
+      "$lease.generationId",
+    ]);
+
+    expectTextOrder(blocks.get("Secondary Fault:fault-secondary")!, [
+      "$lease.generationId -gt 9007199254740991",
+      "Convert-StrictUtcInstant -Value $lease.janvim.startedAtUtc",
+      "Get-Process -Id $controllerPid -ErrorAction Stop",
+      "$actualControllerStartMs",
+      "Read-BoundedControllerLogRecords -Path $controllerLogPath",
+      "$logState.MatchingCount -ne 1",
+      "Get-Process -Id $rendererPid -ErrorAction Stop",
+      "$rendererProcess.Handle",
+      "$expectedRendererStart",
+      "$actualRendererStart",
+      "current-secondary-start-identity-mismatch",
+      "Stop-Process -Id $rendererPid",
+    ]);
+    expectTextOrder(blocks.get("JanVim Fault:fault-janvim")!, [
+      "$windowInteropTypeName = 'JanVimExhibitionFaultWindowV1'",
+      "$null -ne ($windowInteropTypeName -as [type])",
+      "Add-Type -TypeDefinition",
+      "$null -eq ($windowInteropTypeName -as [type])",
+      "$lease.generationId -gt 9007199254740991",
+      "Test-LowerSha256 -Value $artifactLock.pluginLabConfigSha256",
+      "$janvimExecutableItem.Length -ne $artifactLock.coreBytes",
+      "$janvimExecutableSha256 -cne $artifactLock.coreSha256",
+      "Get-Process -Id $janvimPid -ErrorAction Stop",
+      "$actualJanVimStartTicks",
+      "$actualJanVimPath",
+      "$expectedHwnd",
+      "[JanVimExhibitionFaultWindowV1]::IsWindow($leaseWindow)",
+      "[JanVimExhibitionFaultWindowV1]::GetWindowThreadProcessId(",
+      "$leaseWindowOwnerPid -ne [uint32]$janvimPid",
+      "Stop-Process -Id $janvimPid",
+    ]);
+    expectTextOrder(blocks.get("Controller Fault:fault-controller")!, [
+      "$lease.generationId -gt 9007199254740991",
+      "Convert-StrictUtcInstant -Value $lease.janvim.startedAtUtc",
+      "Get-Process -Id $controllerPid -ErrorAction Stop",
+      "$actualControllerStartMs",
+      "Stop-Process -Id $controllerPid",
+    ]);
+  });
+
+  it("documents bounded exact-identity secondary, JanVim, and controller faults", () => {
+    const sections = markdownSections(readFileSync(runbookPath, "utf8"));
+    const secondary = powershellBlocks(sections.get("Secondary Fault")!).get(
+      "fault-secondary",
+    )!;
+    const janvim = powershellBlocks(sections.get("JanVim Fault")!).get(
+      "fault-janvim",
+    )!;
+    const controller = powershellBlocks(sections.get("Controller Fault")!).get(
+      "fault-controller",
+    )!;
+
+    expect(secondary).toContain("$root\\run-lease.json");
+    for (const fixedLog of [
+      "show-run.log.controller",
+      "show-run.log.controller.1",
+      "show-run.log.controller.2",
+      "show-run.log.controller.3",
+    ]) {
+      expect(secondary).toContain(fixedLog);
+    }
+    for (const contract of [
+      "secondary-opened",
+      "runId",
+      "controllerRunId",
+      "generationId",
+      "rendererPid",
+      "rendererStartedAtUtc",
+      "Assert-ExactPropertySet",
+      "Assert-NoDuplicateJsonProperties",
+      "Get-Process -Id $rendererPid",
+      "StartTime",
+      "FileShare]::Read",
+      "$maximumControllerLogBytes = 8 * 1024 * 1024",
+      "$maximumControllerLogRecords = 8192",
+    ]) {
+      expect(secondary).toContain(contract);
+    }
+    expect(processCommandLines(secondary, "Stop-Process")).toEqual([
+      "Stop-Process -Id $rendererPid",
+    ]);
+
+    for (const contract of [
+      "$root\\run-lease.json",
+      "$maximumLeaseBytes = 4096",
+      "Assert-ExactPropertySet",
+      "Assert-NoDuplicateJsonProperties",
+      "executableRelativePath",
+      "executableSha256",
+      "janvim-core.exe",
+      "$repo\\runtime\\janvim",
+      "Get-Process -Id $janvimPid",
+      "StartTime",
+      "janvim-window-interop-type-conflict",
+      "Add-Type -TypeDefinition",
+      "janvim-window-interop-type-load-failed",
+      "IsWindow",
+      "GetWindowThreadProcessId",
+      "Get-FileHash -LiteralPath $janvimExecutable",
+      "coreBytes",
+      "coreSha256",
+      "FileShare]::Read",
+    ]) {
+      expect(janvim).toContain(contract);
+    }
+    expect(janvim).not.toContain("MainWindowHandle");
+    expect(processCommandLines(janvim, "Stop-Process")).toEqual([
+      "Stop-Process -Id $janvimPid",
+    ]);
+
+    for (const contract of [
+      "$root\\run-lease.json",
+      "$maximumLeaseBytes = 4096",
+      "Assert-ExactPropertySet",
+      "Assert-NoDuplicateJsonProperties",
+      "$lease.runId -cne $runId",
+      "$lease.controllerRunId",
+      "$lease.generationId",
+      "Get-Process -Id $controllerPid",
+      "StartTime",
+      "FileShare]::Read",
+    ]) {
+      expect(controller).toContain(contract);
+    }
+    expect(processCommandLines(controller, "Stop-Process")).toEqual([
+      "Stop-Process -Id $controllerPid",
+    ]);
+
+    for (const block of [secondary, janvim, controller]) {
+      expect(block).toMatch(/\$maximum[A-Za-z]+Bytes = [1-9][0-9]*/u);
+      for (const line of processCommandLines(block, "Get-Process")) {
+        expect(line).toMatch(/^Get-Process -Id \$[A-Za-z][A-Za-z0-9]* -ErrorAction Stop$/u);
+      }
+      expect(block).not.toMatch(
+        /Invoke-Expression|Invoke-Command|Start-Process|Get-CimInstance|Get-WmiObject|MainWindowTitle|&\s*\$|\.command\b|\.shell\b|\.script\b/iu,
+      );
+    }
+  });
+
+  it("keeps operator blocks on public entry points and rejects broad control", () => {
+    const runbook = readFileSync(runbookPath, "utf8");
+    expect(runbook).not.toMatch(
+      /--show-mode|--network-policy|--controller-run-id|electron-main\.js|node_modules[\\/]\.bin[\\/]electron/iu,
+    );
+    expect(runbook).not.toMatch(
+      /taskkill\s+\/IM|SendKeys|AutoHotkey|Get-Process\s+-Name|Stop-Process\s+-Name|MainWindowTitle|FindWindow|EnumWindows|mouse_event|keybd_event/iu,
+    );
+    expect(runbook).not.toMatch(
+      /D:\\github\\JanVim(?:[\\/]|\b)|\.nvimlog|janvim-root-export-quarantine|janvim-task5-cached|janvim-task5-physical-cached|content[\\/]fixture[\\/]poem\.txt|content[\\/]poem\.txt/iu,
+    );
+  });
+
+  it("composes an idle authenticated bridge disconnect into immediate invalidation", async () => {
+    const host = createComposedHost();
+    const coordinator = host.adapters.createCoordinator(composedCommand("Show"));
+    await expect(coordinator.boot()).resolves.toEqual({ ready: true });
+    expect(host.bridgeDisconnectListenerCount()).toBe(1);
+
+    host.emitAgentDisconnect();
+    expect(coordinator.diagnostics()).toMatchObject({
+      state: "black-recovering",
+      generationId: 2,
+      currentLoopId: null,
+    });
+
+    await coordinator.requestEmergencyStop("sigint");
+    expect(host.bridgeDisconnectListenerCount()).toBe(0);
+  });
+
+  it("rejects forbidden post-clear WebRequests with the accepted-run assertion", async () => {
+    const host = createComposedHost();
+    const coordinator = host.adapters.createCoordinator(composedCommand("Show"));
+    await expect(coordinator.boot()).resolves.toEqual({ ready: true });
+
+    expectNoExternalNetworkAttempts(host);
+    probeCancelledForbiddenNetworkAttempts(host);
+    expect(host.networkAttempts).toEqual(["http", "https", "dns", "ws", "wss"]);
+    host.clearNetworkAttempts();
+    host.beginRuntimeNetworkObservation();
+
+    probeCancelledForbiddenNetworkAttempts(host);
+    expect(host.networkAttempts).toEqual(["http", "https", "dns", "ws", "wss"]);
+    expect(() => expectNoExternalNetworkAttempts(host)).toThrowError();
+
+    host.clearNetworkAttempts();
+    await coordinator.requestEmergencyStop("sigint");
+  });
+
+  it("composes the strict dispatcher, fake-clock Soak3, telemetry, resources, and evidence threshold", async () => {
+    const acceptedHost = createComposedHost({
+      resetPrimaryDelaysMs: [83, 83, 83],
+      resetSecondaryPresentationDelaysMs: [83, 83, 83],
+    });
+    const acceptedCoordinator = await startComposedRun(acceptedHost, "Soak3");
+    for (let loopNumber = 1; loopNumber <= 3; loopNumber += 1) {
+      await advanceComposedLoop(acceptedHost);
+    }
+
+    const acceptedCompletion = await acceptedCoordinator.completion;
+    expect(
+      acceptedCompletion,
+      JSON.stringify({
+        diagnostics: acceptedCoordinator.diagnostics(),
+        trace: acceptedHost.trace,
+        logs: controllerLogEvents(acceptedHost.logStorage),
+      }),
+    ).toEqual({
+      ok: true,
+      reason: "soak-complete",
+    });
+    expect(acceptedHost.evidenceValues).toHaveLength(1);
+    expect(acceptedHost.evidenceAttempts).toHaveLength(1);
+    expect(acceptedHost.terminalValues).toEqual([
+      expect.objectContaining({
+        outcome: "intentional-success",
+        reason: "soak-complete",
+      }),
+    ]);
+    const acceptedEvidence = acceptedHost.evidenceValues[0]!;
+    expect(parseShowRunEvidence(acceptedHost.evidenceAttempts[0])).toEqual(
+      acceptedEvidence,
+    );
+    expect(acceptedEvidence).toMatchObject({
+      mode: "Soak3",
+      physicalProjectorsTested: false,
+      offlineVerified: true,
+      aggregate: {
+        completedLoops: 3,
+        totalSkips: 3,
+        cumulativeVisibleDriftMs: 249,
+        acceptanceOutcome: "pass",
+      },
+      shutdown: {
+        agentShutdown: "acknowledged",
+        hwndClose: "posted",
+        janvimExit: "natural",
+        bridgeClose: "closed",
+        leaseRemoved: true,
+      },
+    });
+    expect(acceptedEvidence.loops.map((loop) => loop.resetBufferSha256)).toEqual([
+      fixturePoemSha256,
+      fixturePoemSha256,
+      fixturePoemSha256,
+    ]);
+    const acceptedRunCues = acceptedHost.sent.flatMap(({ payload }) =>
+      payload !== null &&
+      typeof payload === "object" &&
+      "type" in payload &&
+      payload.type === "run-cue"
+        ? [payload as RunCueEvent]
+        : [],
+    );
+    const fixtureCueIds = (
+      JSON.parse(fixtureManifest.toString("utf8")) as {
+        cues: Array<{ id: string }>;
+      }
+    ).cues.map((cue) => cue.id);
+    expect(
+      acceptedRunCues.map((event) => ({
+        generationId: event.generationId,
+        loopId: event.loopId,
+        cueId: event.cue.id,
+      })),
+    ).toEqual(
+      Array.from({ length: 3 }, (_, loopIndex) =>
+        fixtureCueIds.map((cueId) => ({
+          generationId: 1,
+          loopId: `recovery-composed-g1-l${loopIndex + 1}`,
+          cueId,
+        })),
+      ).flat(),
+    );
+    expect(
+      acceptedHost.rendererEvents
+        .filter((event) => event.type === "presentation-ack")
+        .map((event) => ({
+          generationId: event.generationId,
+          loopId: event.loopId,
+          cueId: event.cueId,
+        })),
+    ).toEqual(
+      acceptedRunCues
+        .filter((event) => event.requiresPresentationAck)
+        .map((event) => ({
+          generationId: event.generationId,
+          loopId: event.loopId,
+          cueId: event.cue.id,
+        })),
+    );
+    expect(
+      acceptedEvidence.loops.every(
+        (loop) => loop.resources.controller.rssBytes.count > 0,
+      ),
+    ).toBe(true);
+    expect(
+      acceptedEvidence.offlineSnapshots.every((snapshot) => snapshot.offline),
+    ).toBe(true);
+
+    const p1Skips = controllerLogEvents(acceptedHost.logStorage).filter(
+      (event) => event.type === "p1-skip",
+    );
+    const fixtureCueKinds = new Set(
+      (
+        JSON.parse(fixtureManifest.toString("utf8")) as {
+          cues: Array<{ kind: string }>;
+        }
+      ).cues.map((cue) => cue.kind),
+    );
+    expect(
+      ["formula", "image", "matrix"].filter((kind) => fixtureCueKinds.has(kind)),
+    ).toEqual([]);
+    expect(p1Skips).toEqual([
+      { type: "p1-skip", feature: "formula", reason: "fixture-asset-absent" },
+      { type: "p1-skip", feature: "image", reason: "fixture-asset-absent" },
+      { type: "p1-skip", feature: "matrix", reason: "fixture-asset-absent" },
+    ]);
+    expect(acceptedEvidence.loops.map((loop) => loop.skipCount)).toEqual([3, 0, 0]);
+    const acceptedWriteBacks = acceptedHost.agentCommands.filter(
+      (command) =>
+        command.action.type === "insert" || command.action.type === "reset",
+    );
+    expect(acceptedWriteBacks).toHaveLength(6);
+    expect(
+      new Set(acceptedWriteBacks.map((command) => `${command.loopId}:${command.cueId}`))
+        .size,
+    ).toBe(6);
+    expect(
+      acceptedHost.runtimeNetworkBoundaryEvents.filter(
+        (event) => event.kind === "exec-file" && event.value.includes("Get-NetRoute"),
+      ),
+    ).toHaveLength(4);
+    expectNoExternalNetworkAttempts(acceptedHost);
+
+    const rejectedHost = createComposedHost({
+      resetPrimaryDelaysMs: [84, 83, 83],
+      resetSecondaryPresentationDelaysMs: [84, 83, 83],
+    });
+    const rejectedCoordinator = await startComposedRun(rejectedHost, "Soak3");
+    for (let loopNumber = 1; loopNumber <= 3; loopNumber += 1) {
+      await advanceComposedLoop(rejectedHost);
+    }
+    await expect(rejectedCoordinator.completion).resolves.toEqual({
+      ok: false,
+      reason: "acceptance-failed",
+    });
+    expect(rejectedHost.evidenceValues).toHaveLength(1);
+    expect(parseShowRunEvidence(rejectedHost.evidenceAttempts[0])).toEqual(
+      rejectedHost.evidenceValues[0],
+    );
+    expect(rejectedHost.evidenceValues[0]!.aggregate).toMatchObject({
+      completedLoops: 3,
+      cumulativeVisibleDriftMs: 250,
+      acceptanceOutcome: "fail",
+    });
+    expect(rejectedHost.terminalValues).toEqual([
+      expect.objectContaining({
+        outcome: "intentional-failure",
+        reason: "acceptance-failed",
+      }),
+    ]);
+    expect(
+      rejectedHost.runtimeNetworkBoundaryEvents.filter(
+        (event) => event.kind === "exec-file" && event.value.includes("Get-NetRoute"),
+      ),
+    ).toHaveLength(4);
+    expectNoExternalNetworkAttempts(rejectedHost);
+  });
+
+  it("fails the real Show terminal path when first-loop acceptance violations age out of retained tails", async () => {
+    const host = createComposedHost({
+      ageOutFirstLoopAcceptanceViolations: true,
+    });
+    const coordinator = await startComposedRun(host, "Show");
+
+    for (let loopNumber = 1; loopNumber <= 8; loopNumber += 1) {
+      await advanceComposedLoop(host, loopNumber === 8);
+    }
+
+    await expect(coordinator.completion).resolves.toEqual({
+      ok: false,
+      reason: "acceptance-failed",
+    });
+    expect(host.evidenceAttempts).toHaveLength(1);
+    expect(host.evidenceValues).toHaveLength(1);
+    const evidence = host.evidenceValues[0]!;
+    expect(parseShowRunEvidence(host.evidenceAttempts[0])).toEqual(evidence);
+    expect(evidence).toMatchObject({
+      schema: 2,
+      mode: "Show",
+      offlineVerified: false,
+      aggregate: {
+        completedLoops: 8,
+        offlineSampleCount: 9,
+        onlineSampleCount: 1,
+        resourceIncompleteLoopCount: 1,
+        runtimeCountGrowthLoopCount: 1,
+        acceptanceOutcome: "fail",
+      },
+      shutdown: {
+        requestedBy: "operator-stop",
+      },
+    });
+    expect(evidence.loops.map((loop) => loop.loopId)).toEqual([
+      "recovery-composed-g1-l6",
+      "recovery-composed-g1-l7",
+      "recovery-composed-g1-l8",
+    ]);
+    expect(
+      evidence.loops.every(
+        (loop) =>
+          !loop.resources.sampleIncomplete &&
+          (["listeners", "timers", "connections", "pendingCommands"] as const)
+            .every((field) => loop.countsAtEnd[field] <= loop.countsAtStart[field]),
+      ),
+    ).toBe(true);
+    expect(evidence.offlineSnapshots).toHaveLength(8);
+    expect(evidence.offlineSnapshots.every((snapshot) => snapshot.offline)).toBe(
+      true,
+    );
+    expect(host.terminalValues).toEqual([
+      {
+        schema: 1,
+        runId: "recovery-composed",
+        controllerRunId: "recovery-composed-controller",
+        controllerPid: 8_001,
+        outcome: "intentional-failure",
+        reason: "acceptance-failed",
+      },
+    ]);
+    expect(
+      host.runtimeNetworkBoundaryEvents.filter(
+        (event) => event.kind === "exec-file" && event.value.includes("Get-NetRoute"),
+      ),
+    ).toHaveLength(9);
+    expectNoExternalNetworkAttempts(host);
+  });
+
+  it("safe-cruises a secondary loss and replaces only the secondary with a fresh loop", async () => {
+    const host = createHost({ mode: "Show" });
+    await bootAndStart(host);
+    const oldSession = host.sessions[0]!;
+    const oldLoopId = host.coordinator.diagnostics().currentLoopId!;
+    oldSession.loopSurface?.send({
+      schema: 1,
+      type: "run-cue",
+      generationId: 1,
+      loopId: oldLoopId,
+      requiresPresentationAck: false,
+      cue: { id: "old-cue", atMs: 1, target: "secondary", kind: "prompt", payload: { text: "old" } },
+    });
+
+    host.surfaces[0]!.destroy();
+    expect(host.coordinator.diagnostics().state).toBe("safe-cruise");
+    await settle();
+    expect(host.coordinator.diagnostics().state).toBe("black-recovering");
+    await host.clock.fireTimeout(1_000);
+    await settle();
+
+    expect(host.coordinator.diagnostics()).toMatchObject({
+      state: "running",
+      generationId: 2,
+      currentLoopId: "g2-loop-1",
+      recoveries: [expect.objectContaining({ domain: "secondary", delayMs: 1_000 })],
+    });
+    expect(host.sessions).toEqual([oldSession]);
+    expect(oldSession.resetCalls).toBe(1);
+    expect(host.surfaces[1]!.sent.some((event) => event.type === "run-cue" && event.cue.id === "old-cue")).toBe(false);
+    await host.coordinator.requestEmergencyStop("sigint");
+  });
+
+  it("fully replaces causal faults and enforces independent rolling restart budgets", async () => {
+    for (const fault of [
+      "agent-disconnected",
+      "critical-ack-failed",
+      "janvim-exited",
+      "secondary-with-editor-pending",
+    ] as const) {
+      const host = createHost({ mode: "Show" });
+      await bootAndStart(host);
+      const oldSession = host.sessions[0]!;
+      if (fault === "secondary-with-editor-pending") {
+        oldSession.editorCommandPending = true;
+        host.surfaces[0]!.destroy();
+      } else {
+        oldSession.emitFault(fault);
+      }
+      await settle();
+      expect(host.coordinator.diagnostics().state).toBe("black-recovering");
+      await host.clock.fireTimeout(1_000);
+      await settle();
+      expect(host.coordinator.diagnostics()).toMatchObject({
+        state: "running",
+        generationId: 2,
+        currentLoopId: "g2-loop-1",
+      });
+      expect(host.sessions).toHaveLength(2);
+      await host.coordinator.requestEmergencyStop("sigint");
+    }
+
+    const budgetHost = createHost({ mode: "Show" });
+    await bootAndStart(budgetHost);
+    budgetHost.sessions.at(-1)!.emitFault("janvim-exited");
+    await settle();
+    await budgetHost.clock.fireTimeout(1_000);
+    await settle();
+    expect(budgetHost.coordinator.diagnostics().state).toBe("running");
+
+    budgetHost.surfaces.at(-1)!.destroy();
+    await settle();
+    expect(budgetHost.coordinator.diagnostics().state).toBe("black-recovering");
+    await budgetHost.clock.fireTimeout(1_000);
+    await settle();
+    expect(budgetHost.coordinator.diagnostics().state).toBe("running");
+
+    for (const delayMs of [2_000, 4_000] as const) {
+      budgetHost.sessions.at(-1)!.emitFault("janvim-exited");
+      await settle();
+      await budgetHost.clock.fireTimeout(delayMs);
+      await settle();
+      expect(budgetHost.coordinator.diagnostics().state).toBe("running");
+    }
+    expect(
+      budgetHost.coordinator.diagnostics().recoveries.map((recovery) => ({
+        domain: recovery.domain,
+        attempt: recovery.attempt,
+        delayMs: recovery.delayMs,
+      })),
+    ).toEqual([
+      { domain: "janvim", attempt: 1, delayMs: 1_000 },
+      { domain: "secondary", attempt: 1, delayMs: 1_000 },
+      { domain: "janvim", attempt: 2, delayMs: 2_000 },
+      { domain: "janvim", attempt: 3, delayMs: 4_000 },
+    ]);
+    budgetHost.sessions.at(-1)!.emitFault("janvim-exited");
+    await settle();
+    expect(budgetHost.coordinator.diagnostics()).toMatchObject({
+      state: "safe-ready",
+      reason: "janvim-restart-limit",
+    });
+    await budgetHost.coordinator.requestEmergencyStop("sigint");
+
+    const rollingHost = createHost({ mode: "Show" });
+    await bootAndStart(rollingHost);
+    for (const delayMs of [1_000, 2_000, 4_000] as const) {
+      rollingHost.sessions.at(-1)!.emitFault("janvim-exited");
+      await settle();
+      await rollingHost.clock.fireTimeout(delayMs);
+      await settle();
+      expect(rollingHost.coordinator.diagnostics().state).toBe("running");
+      rollingHost.clock.advanceBy(1);
+    }
+    rollingHost.clock.advanceBy(600_000);
+    rollingHost.sessions.at(-1)!.emitFault("janvim-exited");
+    await settle();
+    expect(rollingHost.coordinator.diagnostics().state).toBe("black-recovering");
+    await rollingHost.clock.fireTimeout(1_000);
+    await settle();
+    expect(rollingHost.coordinator.diagnostics()).toMatchObject({
+      state: "running",
+      recoveries: [
+        expect.objectContaining({ domain: "janvim", attempt: 1, delayMs: 1_000 }),
+        expect.objectContaining({ domain: "janvim", attempt: 2, delayMs: 2_000 }),
+        expect.objectContaining({ domain: "janvim", attempt: 3, delayMs: 4_000 }),
+        expect.objectContaining({ domain: "janvim", attempt: 1, delayMs: 1_000 }),
+      ],
+    });
+    await rollingHost.coordinator.requestEmergencyStop("sigint");
+  });
+
+  it("has no crash checkpoint, bounds stale promises, network attempts, or retained state across 100 Show loops", async () => {
+    const crashedController = createHost({ mode: "Show" });
+    await expect(crashedController.coordinator.boot()).resolves.toEqual({ ready: true });
+    expect(crashedController.coordinator.diagnostics()).toMatchObject({ state: "ready", currentLoopId: null });
+    expect(JSON.stringify(crashedController.coordinator.diagnostics())).not.toMatch(/checkpoint/i);
+
+    const recovery = deferred();
+    const staleHost = createHost({ mode: "Show", recoveryGate: recovery.promise });
+    await bootAndStart(staleHost);
+    staleHost.sessions[0]!.emitFault("janvim-exited");
+    await settle();
+    await staleHost.clock.fireTimeout(1_000);
+    await settle();
+    expect(staleHost.clock.active(10_000)).toBe(1);
+    await staleHost.coordinator.requestEmergencyStop("window-close");
+    const settled = staleHost.coordinator.diagnostics();
+    recovery.resolve();
+    await settle();
+    expect(staleHost.coordinator.diagnostics()).toEqual(settled);
+
+    const host = createComposedHost();
+    const coordinator = await startComposedRun(host, "Show");
+    const runningCounts = coordinator.diagnostics().counts;
+    const boundaryCounts = new Map<number, typeof runningCounts>();
+    for (let loopNumber = 1; loopNumber <= 100; loopNumber += 1) {
+      await advanceComposedLoop(host, loopNumber === 100);
+      if (loopNumber < 100) {
+        const diagnosticsAtBoundary = coordinator.diagnostics();
+        expect(diagnosticsAtBoundary).toMatchObject({
+          state: "running",
+          completedLoops: loopNumber,
+        });
+        boundaryCounts.set(loopNumber, diagnosticsAtBoundary.counts);
+        expect(diagnosticsAtBoundary.counts).toEqual(runningCounts);
+      }
+      const writeBacksAtBoundary = host.agentCommands.filter(
+        (command) =>
+          command.action.type === "insert" || command.action.type === "reset",
+      );
+      expect(writeBacksAtBoundary).toHaveLength(loopNumber * 2);
+      expect(
+        writeBacksAtBoundary.filter((command) => command.action.type === "insert"),
+      ).toHaveLength(loopNumber);
+      expect(
+        writeBacksAtBoundary.filter((command) => command.action.type === "reset"),
+      ).toHaveLength(loopNumber);
+      expect(
+        new Set(
+          writeBacksAtBoundary.map(
+            (command) => `${command.loopId}:${command.cueId}`,
+          ),
+        ).size,
+      ).toBe(writeBacksAtBoundary.length);
+      assertRuntimeLogBounds(host.logStorage);
+      expectNoExternalNetworkAttempts(host);
+    }
+    const completion = await coordinator.completion;
+    expect(
+      completion,
+      JSON.stringify({ diagnostics: coordinator.diagnostics(), trace: host.trace }),
+    ).toEqual({
+      ok: true,
+      reason: "operator-stop",
+    });
+    expect(boundaryCounts.size).toBe(99);
+    const diagnostics = coordinator.diagnostics();
+    expect(diagnostics).toMatchObject({
+      state: "stopped",
+      aggregate: { completedLoops: 100 },
+      counts: { listeners: 0, timers: 0, connections: 0, pendingCommands: 0 },
+    });
+    expect(diagnostics.loops).toHaveLength(3);
+    expect(host.evidenceValues).toHaveLength(1);
+    expect(host.terminalValues).toHaveLength(1);
+    const evidence = host.evidenceValues[0]!;
+    expect(evidence.aggregate.completedLoops).toBe(100);
+    expect(evidence.loops).toHaveLength(3);
+    for (const loop of evidence.loops) {
+      expect(loop.countsAtStart).toEqual(runningCounts);
+      expect(loop.countsAtEnd).toEqual(runningCounts);
+      const loopNumber = Number(/-l(\d+)$/u.exec(loop.loopId)?.[1]);
+      expect(Number.isSafeInteger(loopNumber)).toBe(true);
+      boundaryCounts.set(loopNumber, loop.countsAtEnd);
+    }
+    expect([...boundaryCounts.keys()].sort((left, right) => left - right)).toEqual(
+      Array.from({ length: 100 }, (_, index) => index + 1),
+    );
+    expect([...boundaryCounts.values()]).toHaveLength(100);
+    for (const counts of boundaryCounts.values()) {
+      expect(counts).toEqual(runningCounts);
+    }
+    expect(rawMetricArrayPaths(evidence)).toEqual([]);
+    expect(evidence.offlineSnapshots.every((snapshot) => snapshot.offline)).toBe(
+      true,
+    );
+    expect(
+      host.runtimeNetworkBoundaryEvents.filter(
+        (event) => event.kind === "exec-file" && event.value.includes("Get-NetRoute"),
+      ),
+    ).toHaveLength(101);
+    expectNoExternalNetworkAttempts(host);
+    assertRuntimeLogBounds(host.logStorage);
+    assertDefaultLogBudgetBounds(new MemoryLogStorage());
+  });
+
+  it("coalesces Stop, SIGINT, and window-close while continuing one bounded cleanup after phase timeouts", async () => {
+    const gate = deferred();
+    const host = createHost({ mode: "Show", shutdownGate: gate.promise });
+    await bootAndStart(host);
+    const sigint = host.coordinator.requestEmergencyStop("sigint");
+    const windowClose = host.coordinator.requestEmergencyStop("window-close");
+    expect(windowClose).toBe(sigint);
+    expect(host.coordinator.handleRendererEvent({ schema: 1, type: "operator-action", action: "stop-show" })).toBe(false);
+    await settle();
+    expect(host.sessions[0]!.shutdownCalls).toEqual(["agent-shutdown"]);
+    gate.resolve();
+    await expect(Promise.all([sigint, windowClose])).resolves.toEqual([undefined, undefined]);
+    expect(host.evidence).toHaveLength(1);
+    expect(host.terminalWrites).toBe(1);
+
+    for (const phase of [
+      "agent-shutdown",
+      "close-window",
+      "wait-janvim",
+      "terminate-exact",
+      "wait-forced",
+      "close-bridge",
+    ]) {
+      const timedOut = createHost({ mode: "Show", shutdownFailures: new Set([phase]) });
+      await bootAndStart(timedOut);
+      await timedOut.coordinator.requestEmergencyStop("electron-quit");
+      expect(timedOut.coordinator.diagnostics().state, phase).toBe("stopped");
+      expect(timedOut.sessions[0]!.shutdownCalls, phase).toContain("close-bridge");
+      expect(timedOut.evidence, phase).toHaveLength(1);
+      expect(timedOut.terminalWrites, phase).toBe(1);
+    }
+  });
+});

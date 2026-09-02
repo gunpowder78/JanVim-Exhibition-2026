@@ -1,0 +1,40 @@
+[cursor]
+vfx_type = "swordsman"
+spring_frequency = 45.0
+spark_count = 12
+elastic_coefficient = 0.65
+spark_impulse_threshold = 18000.0
+
+[fonts]
+fallback_paths = ["../runtime/janvim/assets/fonts/private/FiraCodeNerdFontMono-Regular.ttf"]
+
+[layout]
+# Explicit orthogonal selection avoids the observed Plugin Lab dynamic-candidate fallback.
+engine = "orthogonal"
+column_width = 26.0
+column_gap = 26.0
+glyph_advance = 24.0
+
+[typography]
+english_layout = "sideways"
+latin_punctuation_layout = "upright"
+cjk_punctuation_layout = "upright"
+symbol_layout = "upright"
+
+[neovim]
+# The prepared runtime supplies this show-only Plugin Lab root.
+startup_profile = "plugin-lab"
+colorscheme = "catppuccin-mocha"
+
+[window]
+# The controller owns exact PID-based placement and verifies the final rectangle.
+start_maximized = false
+
+[backend]
+endpoint = "auto"
+connect_timeout_ms = 3000
+handshake_timeout_ms = 3000
+request_timeout_ms = 1000
+plugin_load_timeout_ms = 5000
+shutdown_timeout_ms = 3000
+retry_interval_ms = 100

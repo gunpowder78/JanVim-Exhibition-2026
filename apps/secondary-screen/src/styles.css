@@ -1,0 +1,321 @@
+:root {
+  color-scheme: dark;
+  font-family: "Noto Sans SC", "Microsoft YaHei UI", sans-serif;
+  background: #071014;
+  color: #e8ece8;
+  font-synthesis: none;
+  text-rendering: geometricPrecision;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  margin: 0;
+  background: #071014;
+  cursor: none;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+.secondary-screen {
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
+  background: #071014;
+  color: #e8ece8;
+}
+
+.show-surface {
+  position: relative;
+  display: grid;
+  grid-template-rows: clamp(50px, 6vh, 68px) minmax(0, 1fr) minmax(112px, 18vh);
+  width: 100%;
+  height: 100%;
+}
+
+.show-header,
+.show-workspace,
+.key-overlay {
+  min-width: 0;
+}
+
+.show-header,
+.show-panel,
+.key-overlay {
+  transition: opacity 360ms ease-out, transform 360ms ease-out;
+}
+
+.show-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 2.4vw;
+  border-bottom: 1px solid #6e9da1;
+  color: #6e9da1;
+  font-family: "Cascadia Mono", "Microsoft YaHei UI", monospace;
+  font-size: clamp(14px, 1vw, 20px);
+  letter-spacing: 0.12em;
+}
+
+.show-header p,
+.show-panel__label {
+  margin: 0;
+}
+
+.show-workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 42fr) minmax(0, 58fr);
+  min-height: 0;
+}
+
+.show-panel {
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  padding: clamp(24px, 2.4vw, 46px);
+}
+
+.show-panel--prompt {
+  border-right: 1px solid #6e9da1;
+}
+
+.show-panel__label {
+  margin-bottom: clamp(18px, 2vh, 28px);
+  color: #6e9da1;
+  font-family: "Cascadia Mono", "Microsoft YaHei UI", monospace;
+  font-size: clamp(15px, 1.05vw, 21px);
+  letter-spacing: 0.1em;
+}
+
+.prompt-composer,
+.response-stream {
+  font-family: "Noto Serif SC", "SimSun", serif;
+  font-size: clamp(28px, 2vw, 40px);
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+}
+
+.prompt-composer__title {
+  margin: 0 0 0.7em;
+  font-size: clamp(31px, 2.4vw, 48px);
+  font-weight: 600;
+}
+
+.prompt-composer__poem,
+.prompt-composer__final,
+.prompt-composer__group,
+.prompt-composer__group ul {
+  margin: 0 0 0.7em;
+}
+
+.prompt-composer__poem {
+  padding-left: 0.7em;
+  border-left: 3px solid #6e9da1;
+}
+
+.prompt-composer__group {
+  color: #6e9da1;
+  font-family: "Cascadia Mono", "Microsoft YaHei UI", monospace;
+  font-size: clamp(18px, 1.25vw, 25px);
+}
+
+.prompt-composer__group h3 {
+  margin: 0 0 0.35em;
+  font-size: 0.75em;
+  letter-spacing: 0.12em;
+}
+
+.prompt-composer__group ul {
+  padding-left: 1.2em;
+}
+
+.response-stream__chunk {
+  animation: reveal-chunk 480ms ease-out both;
+}
+
+.acceptance-state {
+  min-height: 1.5em;
+  margin: 1em 0 0;
+  color: #6e9da1;
+  font-family: "Cascadia Mono", "Microsoft YaHei UI", monospace;
+  font-size: clamp(18px, 1.25vw, 25px);
+  letter-spacing: 0.06em;
+}
+
+.acceptance-state[data-accepted="true"] {
+  color: #b7472a;
+}
+
+.key-overlay {
+  max-height: 18vh;
+  overflow: hidden;
+  padding: clamp(12px, 1.2vh, 20px) 2.4vw;
+  border-top: 1px solid #6e9da1;
+}
+
+.key-overlay .show-panel__label {
+  margin-bottom: 0.55em;
+}
+
+.key-overlay__list {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: clamp(8px, 0.8vw, 16px);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.key-overlay__item {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 0.25em 0.65em;
+  min-width: 0;
+  padding: 0.45em 0.6em;
+  border: 1px solid #6e9da1;
+  color: #6e9da1;
+  font-family: "Cascadia Mono", "Microsoft YaHei UI", monospace;
+  font-size: clamp(14px, 0.92vw, 18px);
+  animation: reveal-key 360ms ease-out both;
+}
+
+.key-overlay__keys {
+  grid-row: span 2;
+  align-self: center;
+  border: 0;
+  background: #071014;
+  color: #e8ece8;
+  font-size: clamp(23px, 1.5vw, 31px);
+}
+
+.key-overlay__semantic {
+  color: #e8ece8;
+}
+
+.key-overlay__cue-id {
+  overflow: hidden;
+  color: #6e9da1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.p1-layer {
+  position: absolute;
+  inset: clamp(70px, 8vh, 90px) 2.4vw 20vh;
+  z-index: 2;
+  pointer-events: none;
+}
+
+.ready-page {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  display: grid;
+  place-content: center;
+  gap: 1.1rem;
+  background: #071014;
+  cursor: default;
+  text-align: center;
+}
+
+.ready-page h1 {
+  margin: 0;
+  color: #e8ece8;
+  font-family: "Cascadia Mono", "Microsoft YaHei UI", monospace;
+  font-size: clamp(36px, 4vw, 76px);
+  font-weight: 500;
+  letter-spacing: 0.08em;
+}
+
+.ready-page p {
+  margin: 0;
+  color: #6e9da1;
+  font-family: "Cascadia Mono", "Microsoft YaHei UI", monospace;
+  font-size: clamp(18px, 1.4vw, 28px);
+  letter-spacing: 0.12em;
+}
+
+.operator-controls {
+  position: absolute;
+  right: 2.4vw;
+  bottom: 2.4vh;
+  z-index: 4;
+  display: flex;
+  gap: 0.8rem;
+  cursor: default;
+}
+
+.operator-controls button {
+  min-width: min(30rem, 72vw);
+  padding: 0.85em 1.4em;
+  border: 1px solid #6e9da1;
+  background: #102126;
+  color: #e8ece8;
+  cursor: pointer;
+  font-family: "Cascadia Mono", "Microsoft YaHei UI", monospace;
+  font-size: clamp(18px, 1.4vw, 28px);
+  letter-spacing: 0.08em;
+}
+
+.operator-controls button:disabled {
+  opacity: 0.38;
+  cursor: not-allowed;
+}
+
+.operator-controls button:focus-visible {
+  outline: 3px solid #b7472a;
+  outline-offset: 5px;
+}
+
+.secondary-screen[data-scene="black"] .show-header,
+.secondary-screen[data-scene="black"] .show-panel,
+.secondary-screen[data-scene="black"] .key-overlay {
+  opacity: 0;
+  transform: translateY(0.3em);
+}
+
+.secondary-screen[data-motion="reduced"] * {
+  animation-duration: 1ms !important;
+  transition-duration: 1ms !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .secondary-screen * {
+    animation-duration: 1ms !important;
+    transition-duration: 1ms !important;
+  }
+}
+
+@keyframes reveal-chunk {
+  from {
+    opacity: 0;
+    transform: translateY(0.35em);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes reveal-key {
+  from {
+    opacity: 0;
+    transform: translateX(0.5em);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
