@@ -1,5 +1,6 @@
 local runtime_root = assert(vim.env.JANVIM_EXHIBITION_NVIM_ROOT, "test runtime root is required")
 vim.opt.runtimepath:prepend(runtime_root)
+vim.opt.runtimepath:prepend(vim.fn.fnamemodify(runtime_root, ":h") .. "/runtime/janvim/runtime")
 
 local actions = require("janvim_exhibition.actions")
 
@@ -91,6 +92,8 @@ run("prepare creates a nameless nofile buffer and never touches a source poem", 
   equal(vim.api.nvim_get_option_value("buftype", { buf = buffer_number }), "nofile")
   equal(vim.api.nvim_get_option_value("swapfile", { buf = buffer_number }), false)
   equal(vim.api.nvim_get_option_value("undofile", { buf = buffer_number }), false)
+  equal(vim.api.nvim_get_option_value("filetype", { buf = buffer_number }), "markdown")
+  equal(vim.api.nvim_get_option_value("syntax", { buf = buffer_number }), "markdown")
   equal(vim.api.nvim_buf_get_name(buffer_number), "")
   equal(buffer_text(buffer_number), POEM)
 
@@ -98,6 +101,49 @@ run("prepare creates a nameless nofile buffer and never touches a source poem", 
   equal(unchanged:read("*a"), "SOURCE-SENTINEL")
   unchanged:close()
   vim.fn.delete(source_path)
+  agent:dispose()
+end)
+
+run("compact punctuation is display-only and survives reset", function()
+  local compact_text = "甲，乙。丙；丁：戊？己！庚、辛"
+  local mappings = {
+    { source = "，", replacement = "﹐" },
+    { source = "。", replacement = "﹒" },
+    { source = "；", replacement = "﹔" },
+    { source = "：", replacement = "﹕" },
+    { source = "？", replacement = "﹖" },
+    { source = "！", replacement = "﹗" },
+    { source = "、", replacement = "﹑" },
+  }
+  local agent = new_agent()
+
+  local function replace_and_assert(cue_id)
+    local replace_ack = dispatch(agent, command(cue_id, {
+      type = "replace",
+      rangeId = "opening",
+      text = compact_text,
+    }))
+    equal(replace_ack.outcome, "applied")
+
+    local buffer_number = assert(agent:buffer_number())
+    vim.api.nvim_set_current_buf(buffer_number)
+    equal(buffer_text(buffer_number), compact_text .. "\n黄河入海流")
+    equal(vim.wo.conceallevel, 2)
+    equal(vim.wo.concealcursor, "nvic")
+
+    local line = vim.api.nvim_buf_get_lines(buffer_number, 0, 1, true)[1]
+    for _, mapping in ipairs(mappings) do
+      local byte_column = assert(line:find(mapping.source, 1, true))
+      local concealed = vim.fn.synconcealed(1, byte_column)
+      equal(concealed[1], 1)
+      equal(concealed[2], mapping.replacement)
+    end
+  end
+
+  prepare(agent)
+  replace_and_assert("cue-compact-before-reset")
+  dispatch(agent, command("cue-compact-reset", { type = "reset" }))
+  replace_and_assert("cue-compact-after-reset")
   agent:dispose()
 end)
 
@@ -269,6 +315,8 @@ run("reset deletes the old buffer and recreates the validated snapshot", functio
   expect(new_buffer ~= old_buffer, "reset reused the old buffer")
   expect(not vim.api.nvim_buf_is_valid(old_buffer), "reset left the old buffer alive")
   equal(buffer_text(new_buffer), POEM)
+  equal(vim.api.nvim_get_option_value("filetype", { buf = new_buffer }), "markdown")
+  equal(vim.api.nvim_get_option_value("syntax", { buf = new_buffer }), "markdown")
   equal(reset_ack.bufferSha256, POEM_HASH)
   agent:dispose()
 end)
@@ -414,6 +462,18 @@ local function new_connection_fixture(options)
     deferred = deferred,
   }
 end
+
+run("init keeps the bounded JanVim exhibition state on the dark theme", function()
+  vim.g.janvim_margin_left = nil
+  vim.g.janvim_margin_right = nil
+  vim.g.janvim_enable_art_mode = nil
+
+  local fixture = new_connection_fixture()
+  equal(vim.g.janvim_margin_left, 0.08)
+  equal(vim.g.janvim_margin_right, 0.12)
+  equal(vim.g.janvim_enable_art_mode, false)
+  fixture.connection:close()
+end)
 
 run("shutdown flushes its ack before one orphan backend exit", function()
   local exit_count = 0

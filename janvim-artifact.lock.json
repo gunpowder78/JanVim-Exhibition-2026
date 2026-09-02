@@ -16,7 +16,7 @@
   "artifactConfig": "assets/config.toml",
   "artifactConfigSha256": "56fa983ccb270384c98e7cb3e80cff90d000b52af2c4809556250a4292feb533",
   "config": "show/janvim-show.toml",
-  "configSha256": "506b4fc09424d974695020465e3bf7b0b2b58ee3d566d0c6b15fb8cb5c2f1615",
+  "configSha256": "4c012266c8e9119030d113b812a6e4cf14877edb92fa39a3a560ce2b707f7f9a",
   "layoutEngine": "orthogonal",
   "role": "primary-projector",
   "provenanceKind": "isolated-tag-rebuild",

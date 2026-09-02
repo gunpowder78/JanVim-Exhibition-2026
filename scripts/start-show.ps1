@@ -33,10 +33,10 @@ $expectedNodeVersion = 'v22.23.0'
 $expectedSourceRepository = 'D:/github/JanVim'
 $expectedTag = 'v0.10.1-gmk.4'
 $expectedCommit = 'e95633101d93f8448b0f906e918b5d836ab95273'
-$expectedShowConfigSha256 = '506b4fc09424d974695020465e3bf7b0b2b58ee3d566d0c6b15fb8cb5c2f1615'
+$expectedShowConfigSha256 = '4c012266c8e9119030d113b812a6e4cf14877edb92fa39a3a560ce2b707f7f9a'
 $expectedPluginLabSha256 = '5a2b336fbc6974c98826cdacd0474dd33a31e05e13ebade37dbb7018aa727cb2'
 $expectedContentLockBytes = 2332L
-$expectedContentLockSha256 = '536878e087aa32f28139826984b26db8c263953c0c6a62bfe2903712fed4ed8c'
+$expectedContentLockSha256 = '7fe46e094fa6f8a99d5823357e85ecbb4500f6bada12d697330e3979c8ed73d6'
 $expectedPoemSha256 = 'b699de273f5bbaedb08241495f52ce863d3e8e1851275ce3b6251484d75190a8'
 $allowedContentProfiles = @('p0-baseline', 'songfeng-source', 'river-channel', 'tower-codebook')
 $maximumContentLockBytes = 32768
@@ -61,7 +61,7 @@ $restartDelaysMilliseconds = @(1000, 2000, 4000)
 # JANVIM_REVIEWED_ELECTRON_RELEASE_IDENTITY_BEGIN
 $reviewedElectronMainRelativePath = 'apps/controller/dist/main/electron-main.js'
 $reviewedElectronMainBytes = 451940L
-$reviewedElectronMainSha256 = 'aad1d8ab03a7bd7bff4d02530da24f832ed7a822cd4739f0c7f7f66a167c4727'
+$reviewedElectronMainSha256 = 'a9574220042c2243a2427c98a9f206bb64d16400f3b7c18f5ef8e730ec513ca9'
 $reviewedElectronMainRuntimeImports = @(
     'electron'
     'node:child_process'
@@ -987,7 +987,7 @@ function Read-SelectedContentProfile {
         -Reason 'content-lock-invalid'
     if (
         -not (Test-ExactJsonInteger -Value (Get-RequiredPropertyValue -InputObject $lock -Name 'schema' -Reason 'content-lock-invalid') -Expected 1) -or
-        (Get-RequiredPropertyValue -InputObject $lock -Name 'revision' -Reason 'content-lock-invalid') -cne '20260902-p0.1-r5'
+        (Get-RequiredPropertyValue -InputObject $lock -Name 'revision' -Reason 'content-lock-invalid') -cne '20260902-p0.1-r7'
     ) {
         throw 'content-lock-invalid'
     }

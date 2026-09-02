@@ -11,15 +11,15 @@ fallback_paths = ["../runtime/janvim/assets/fonts/private/FiraCodeNerdFontMono-R
 [layout]
 # Explicit orthogonal selection avoids the observed Plugin Lab dynamic-candidate fallback.
 engine = "orthogonal"
-column_width = 20.0
-column_gap = 4.0
+column_width = 26.0
+column_gap = 26.0
 glyph_advance = 24.0
 
 [typography]
 english_layout = "sideways"
-latin_punctuation_layout = "sideways"
-cjk_punctuation_layout = "sideways"
-symbol_layout = "sideways"
+latin_punctuation_layout = "upright"
+cjk_punctuation_layout = "upright"
+symbol_layout = "upright"
 
 [neovim]
 # The prepared runtime supplies this show-only Plugin Lab root.

@@ -111,16 +111,40 @@ describe("P0.1 frozen content profiles", () => {
     expect(readFileSync(absolute(profile.manifest.path))).toEqual(readFileSync(active));
   });
 
+  it.each(longProfileIds)("formats the %s paper as standard multi-sentence Chinese paragraphs", (id) => {
+    const profile = lockedProfile(readLock(), id);
+    const paper = readFileSync(absolute(profile.paper.path), "utf8");
+    const lines = paper.trimEnd().split("\n");
+    const proseParagraphs = lines.filter(
+      (line) => line.length > 0 && !line.startsWith("#") && !line.startsWith("> "),
+    );
+
+    expect(paper).toMatch(/[，。]/u);
+    expect(paper).not.toMatch(/[﹐﹑﹒﹔﹕﹖﹗]/u);
+    expect(proseParagraphs.length).toBeGreaterThanOrEqual(9);
+    expect(proseParagraphs.length).toBeLessThanOrEqual(18);
+    for (const paragraph of proseParagraphs) {
+      expect(paragraph.startsWith("　　"), `${id} prose paragraph must use a two-em indent`).toBe(true);
+      const sentenceCount = paragraph.match(/[。！？]/gu)?.length ?? 0;
+      expect(sentenceCount, `${id} prose paragraph must contain 2-5 sentences`).toBeGreaterThanOrEqual(2);
+      expect(sentenceCount, `${id} prose paragraph must contain 2-5 sentences`).toBeLessThanOrEqual(5);
+    }
+  });
+
   it.each(longProfileIds)("bounds the %s paper and deterministic choreography", (id) => {
     const profile = lockedProfile(readLock(), id);
     const paper = readFileSync(absolute(profile.paper.path), "utf8");
     const lines = paper.trimEnd().split("\n");
     const chineseCharacters = paper.match(/[\u3400-\u9fff]/gu)?.length ?? 0;
-    expect(lines.length).toBeGreaterThanOrEqual(48);
-    expect(lines.length).toBeLessThanOrEqual(64);
+    expect(lines.length).toBeGreaterThanOrEqual(18);
+    expect(lines.length).toBeLessThanOrEqual(30);
     expect(chineseCharacters).toBeGreaterThanOrEqual(1_400);
     expect(chineseCharacters).toBeLessThanOrEqual(2_000);
     expect(paper).toMatch(/entropy|source coding|H\(X\)|mutual information|I\(X;Y\)|channel capacity|noisy channel|codebook|KL divergence|rate-distortion/iu);
+    expect(lines.filter((line) => line.startsWith("# "))).toHaveLength(1);
+    expect(lines.filter((line) => line.startsWith("## ")).length).toBeGreaterThanOrEqual(3);
+    expect(lines.filter((line) => line.startsWith("> ")).length).toBeGreaterThanOrEqual(3);
+    expect(paper.match(/`[^`\r\n]+`/gu)?.length ?? 0).toBeGreaterThanOrEqual(6);
 
     const manifest = parseShowManifest(
       JSON.parse(readFileSync(absolute(profile.manifest.path), "utf8")),

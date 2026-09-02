@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "revision": "20260902-p0.1-r5",
+  "revision": "20260902-p0.1-r7",
   "poem": {
     "path": "content/fixture/poem.txt",
     "bytes": 64,
@@ -25,46 +25,46 @@
     {
       "id": "songfeng-source",
       "title": "松风信源",
-      "revision": "20260902-songfeng-source-r5",
+      "revision": "20260902-songfeng-source-r7",
       "paper": {
         "path": "content/p0.1/profiles/songfeng-source/paper.md",
-        "bytes": 4953,
-        "sha256": "4b00dd50adc18ab76dc03c9826e0bb2cb4babdb86a5de2efd4ccafa483e4c211"
+        "bytes": 5055,
+        "sha256": "1828c64817fb811483b0bb515dcb2595bd04aea4a79aef25431ac467a8932864"
       },
       "manifest": {
         "path": "content/p0.1/profiles/songfeng-source/show.manifest.json",
-        "bytes": 21691,
-        "sha256": "bc159d8658fdcd6a5b8af69ba9b36b5db221c799df8fef48e9b7f9bcb0ee615d"
+        "bytes": 21763,
+        "sha256": "2890e74e289f629896e5c536c7299718447ca6649c9858ca887995f408fa321f"
       }
     },
     {
       "id": "river-channel",
       "title": "河流信道",
-      "revision": "20260902-river-channel-r5",
+      "revision": "20260902-river-channel-r7",
       "paper": {
         "path": "content/p0.1/profiles/river-channel/paper.md",
-        "bytes": 5171,
-        "sha256": "afc1dccc5e6317ea89bbf08b23215fa03a6926898a7f7a95fba441c010fd2142"
+        "bytes": 5271,
+        "sha256": "b1bfd4af39bc4ccc127de4553045fc86f5b37e810fb58ef87dcb2c5030d0bbf1"
       },
       "manifest": {
         "path": "content/p0.1/profiles/river-channel/show.manifest.json",
-        "bytes": 21819,
-        "sha256": "3cde37494e5a5d058a6a4b556ae91ebedcf4b2d5fac255eb21da8cd91b77eb95"
+        "bytes": 21889,
+        "sha256": "edb2dff6f64331e01cff78c7f88a1e7d3709e3e51e12c5937053cdf82c9b4bd2"
       }
     },
     {
       "id": "tower-codebook",
       "title": "层楼码本",
-      "revision": "20260902-tower-codebook-r5",
+      "revision": "20260902-tower-codebook-r7",
       "paper": {
         "path": "content/p0.1/profiles/tower-codebook/paper.md",
-        "bytes": 5273,
-        "sha256": "3ee76e80a7a83d610c1647de7353271e64d2cb410681dcd33db53d7af655d293"
+        "bytes": 5405,
+        "sha256": "9aca5284ef6f7a27a29001f99cc6adfa94eb3e837f747f1b27ac3514b439321e"
       },
       "manifest": {
         "path": "content/p0.1/profiles/tower-codebook/show.manifest.json",
-        "bytes": 21963,
-        "sha256": "c131dc8ab84291e90c32445d30ed2e104bedb4d03a92a8312dc119bcc0d0c22c"
+        "bytes": 22066,
+        "sha256": "3fe4dc6e5cd54e202cd0cf4725ac41fb987f99d032960fb157c3d597a6f7874a"
       }
     }
   ]

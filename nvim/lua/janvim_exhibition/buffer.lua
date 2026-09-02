@@ -1,5 +1,6 @@
 local Buffer = {}
 Buffer.__index = Buffer
+local typography = require("janvim_exhibition.typography")
 
 local function split_lines(text)
   return vim.split(text, "\n", { plain = true })
@@ -91,8 +92,11 @@ function Buffer:prepare(poem, expected_hash)
     vim.api.nvim_set_option_value("undolevels", -1, { buf = new_buffer })
     vim.api.nvim_set_option_value("modifiable", true, { buf = new_buffer })
     vim.api.nvim_buf_set_lines(new_buffer, 0, -1, true, lines)
+    vim.api.nvim_set_option_value("filetype", "markdown", { buf = new_buffer })
+    vim.api.nvim_set_option_value("syntax", "markdown", { buf = new_buffer })
     vim.api.nvim_set_option_value("modified", false, { buf = new_buffer })
     vim.api.nvim_set_current_buf(new_buffer)
+    typography.apply()
   end)
   if not ok then
     if vim.api.nvim_buf_is_valid(new_buffer) then

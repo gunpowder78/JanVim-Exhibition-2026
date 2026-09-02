@@ -1,5 +1,6 @@
 local protocol = require("janvim_exhibition.protocol")
 local actions = require("janvim_exhibition.actions")
+local visuals = require("janvim_exhibition.visuals")
 
 local M = {}
 local Connection = {}
@@ -27,6 +28,8 @@ function M.setup(options)
   local token = options.token or vim.env.JANVIM_EXHIBITION_TOKEN
   assert(valid_port(port), "JANVIM_EXHIBITION_PORT must be an integer from 1 to 65535")
   assert(valid_token(token), "JANVIM_EXHIBITION_TOKEN format is invalid")
+  local visual_state, visual_error = visuals.apply()
+  assert(visual_state, visual_error)
 
   local uv = options.uv or vim.uv or vim.loop
   assert(uv and type(uv.new_tcp) == "function" and type(uv.new_timer) == "function", "Neovim uv TCP support is required")

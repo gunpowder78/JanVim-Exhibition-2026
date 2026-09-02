@@ -395,7 +395,7 @@ describe("strict show-run evidence schema", () => {
   it("binds evidence to the exact frozen Task 9 artifact identity", () => {
     expect(TASK9_ARTIFACT_IDENTITY).toEqual({
       lockSha256:
-        "4f20b82db6807975799b68a5aea85679e67c75d99dbffe4a71bc5b35fc57b90d",
+        "303966c4c07eb8fd69458e90c5769198f9eef9e1a639c76d8bc58c5587d363b4",
       coreBytes: 18_866_688,
       coreSha256:
         "224b3457d89fbc6cf946359683632f29f9262bae08b6f0d2e3043a3a7a6d83b3",
