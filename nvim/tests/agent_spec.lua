@@ -133,16 +133,16 @@ run("prepare and reset keep compact absolute column numbers", function()
   end
 end)
 
-run("native vermilion punctuation is display-only and survives reset", function()
+run("vermilion English punctuation with a solid full stop is display-only and survives reset", function()
   local punctuation_text = "甲，乙。丙；丁：戊？己！庚、辛"
   local mappings = {
-    { source = "，", group = "JanVimCompactComma" },
-    { source = "。", group = "JanVimCompactFullStop" },
-    { source = "；", group = "JanVimCompactSemicolon" },
-    { source = "：", group = "JanVimCompactColon" },
-    { source = "？", group = "JanVimCompactQuestion" },
-    { source = "！", group = "JanVimCompactExclamation" },
-    { source = "、", group = "JanVimCompactEnumeration" },
+    { source = "，", replacement = ",", group = "JanVimCompactComma" },
+    { source = "。", replacement = "•", group = "JanVimCompactFullStop" },
+    { source = "；", replacement = ";", group = "JanVimCompactSemicolon" },
+    { source = "：", replacement = ":", group = "JanVimCompactColon" },
+    { source = "？", replacement = "?", group = "JanVimCompactQuestion" },
+    { source = "！", replacement = "!", group = "JanVimCompactExclamation" },
+    { source = "、", replacement = ",", group = "JanVimCompactEnumeration" },
   }
   local expected_buffer_text = punctuation_text .. "\n黄河入海流"
   local expected_buffer_hash = vim.fn.sha256(expected_buffer_text)
@@ -163,14 +163,16 @@ run("native vermilion punctuation is display-only and survives reset", function(
     local buffer_number = assert(agent:buffer_number())
     vim.api.nvim_set_current_buf(buffer_number)
     equal(buffer_text(buffer_number), expected_buffer_text)
-    equal(vim.wo.conceallevel, 0)
-    equal(vim.wo.concealcursor, "")
+    equal(vim.wo.conceallevel, 2)
+    equal(vim.wo.concealcursor, "nvic")
 
     local line = vim.api.nvim_buf_get_lines(buffer_number, 0, 1, true)[1]
     for _, mapping in ipairs(mappings) do
+      equal(vim.fn.strdisplaywidth(mapping.replacement), 1)
       local byte_column = assert(line:find(mapping.source, 1, true))
       local concealed = vim.fn.synconcealed(1, byte_column)
-      equal(concealed[1], 0)
+      equal(concealed[1], 1)
+      equal(concealed[2], mapping.replacement)
       local syntax_id = vim.fn.synID(1, byte_column, 1)
       equal(vim.fn.synIDattr(syntax_id, "name"), mapping.group)
     end
@@ -178,17 +180,15 @@ run("native vermilion punctuation is display-only and survives reset", function(
     equal(global_conceal.fg, 0x112233)
     local highlight_namespace = vim.api.nvim_get_hl_ns({ winid = window_number })
     expect(highlight_namespace > 0, "punctuation highlight namespace is not window-scoped")
-    for _, mapping in ipairs(mappings) do
-      local punctuation_highlight = vim.api.nvim_get_hl(
-        highlight_namespace,
-        { name = mapping.group, link = true }
-      )
-      equal(punctuation_highlight.fg, 0xB74133)
-      equal(punctuation_highlight.link, nil)
-      equal(punctuation_highlight.bg, nil)
-      equal(punctuation_highlight.bold, nil)
-      equal(punctuation_highlight.italic, nil)
-    end
+    local punctuation_highlight = vim.api.nvim_get_hl(
+      highlight_namespace,
+      { name = "Conceal", link = true }
+    )
+    equal(punctuation_highlight.fg, 0xB74133)
+    equal(punctuation_highlight.link, nil)
+    equal(punctuation_highlight.bg, nil)
+    equal(punctuation_highlight.bold, nil)
+    equal(punctuation_highlight.italic, nil)
   end
 
   local ok, error_message = xpcall(function()

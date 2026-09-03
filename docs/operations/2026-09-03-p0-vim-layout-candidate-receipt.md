@@ -93,5 +93,82 @@ The operator confirmed:
 3. long-form numbering, semantic colors, column spacing, and swordsman animation are normal;
 4. reset accurately restores the four-line source poem.
 
-Cursor-core transparency is deliberately deferred. Human window 2, covering the offline run and
-forced-restart recovery, remains paused and is not claimed by this receipt.
+## Deferred cursor-core opacity memo
+
+The operator reviewed the standalone interactive opacity preview and selected `95%` on its
+**cursor-core opacity** slider. Because the renderer uses a six-bit opacity field, that preference
+would quantize to `60 / 63` (`95.2%`) if a future isolated JanVim candidate implements it.
+
+This value is a reviewed visual preference only. Cursor-core opacity is not changed in the current
+JanVim artifact, TOML configuration, exhibition controller, or accepted fallback. The operator
+judged its benefit to the current exhibition to be small and explicitly deferred the work to a
+possible later candidate. No transparency implementation or artifact rebuild is required for the
+current P0 acceptance path.
+
+## Human window 2: offline JanVim recovery acceptance
+
+The operator completed the final dual-monitor simulation window with Wi-Fi, Ethernet, and
+external VPN/TUN routing disconnected:
+
+- ValidateOnly run ID: `layout-window2-20260903-044259-validate`;
+- Show run ID: `layout-window2-20260903-044259-fault`;
+- evidence root:
+  `D:\VirtualData\JanVim-Exhibition-Rehearsals\layout-window2-20260903-044259-fault`;
+- display-map SHA-256:
+  `eed8c655ece41a08413073a28a7fd629562549dc71ad6b341f1d843851cc4738`;
+- content revision: `20260902-songfeng-source-r7`;
+- content manifest SHA-256:
+  `2890e74e289f629896e5c536c7299718447ca6649c9858ca887995f408fa321f`;
+- offline samples: `9`; online samples: `0`; `offlineVerified: true`;
+- one exact JanVim-domain recovery: generation `2`, attempt `1`, bounded delay `1000 ms`,
+  outcome `recovered`, reason `session-recovered`;
+- completed loops: `7`, with the retained three recovery-generation loops each recording the
+  exact original-poem reset SHA-256
+  `b699de273f5bbaedb08241495f52ce863d3e8e1851275ce3b6251484d75190a8`;
+- aggregate outcome: `pass`; total retries: `0`; total recoveries: `1`;
+- terminal: `intentional-success`, reason `operator-stop`;
+- no controller incident and `loggingIncomplete: false`;
+- shutdown: agent acknowledged, window close posted, JanVim exited naturally, bridge closed, and
+  lease removed.
+
+The operator confirmed that the JanVim primary rebuilt automatically after the deliberate fault,
+the secondary remained safe, the source poem was restored, at least two fresh loops completed,
+and Stop Show ended the rehearsal normally. All requested human observations passed.
+
+After evidence inspection, the selector restored the byte-exact `p0-baseline` manifest with
+SHA-256 `9a39ee522e556860053468854b0858bc1fafd8b7a1ca08ddff57d0371b717b35`.
+This closes the scheduled dual-monitor P0 acceptance for this candidate. Physical-projector G4
+remains a separate hardware-layer rehearsal and is not claimed here.
+
+## Display-only solid punctuation checkpoint
+
+The exhibition display layer maps the frozen Chinese punctuation to one-cell display glyphs
+without changing the source buffer:
+
+- `，；：？！、` use their ASCII display forms;
+- `。` uses the solid bullet `•`;
+- every replacement uses the window-local vermilion `Conceal` highlight `#B74133`;
+- the source bytes, command acknowledgements, and reset SHA-256 remain unchanged.
+
+The change followed a red-green TDD cycle. The Lua test first failed because the active window had
+`conceallevel=0`; it then passed with the exact one-cell replacements before and after reset. The
+candidate subsequently passed typecheck, lint, all `47` Vitest files and `810` tests, the production
+build, Lua tests, frozen-runtime verification, and `git diff --check`. The Electron main bundle
+remained byte-identical at `451996` bytes with SHA-256
+`b351464b7c9ff73c2524135d6b104837386047dbfa2831b0ccd9832d4c28ed94`.
+
+Connected visual rehearsal evidence:
+
+- run ID: `punct-bullet-visual-20260903-155146-show`;
+- evidence root:
+  `D:\VirtualData\JanVim-Exhibition-Rehearsals\punct-bullet-visual-20260903-155146-show`;
+- completed loops: `3`;
+- terminal: `intentional-success`, reason `operator-stop`;
+- logging incomplete: `false`;
+- all retained loops record the exact source-poem reset SHA-256
+  `b699de273f5bbaedb08241495f52ce863d3e8e1851275ce3b6251484d75190a8`.
+
+The operator accepted this state as runnable and confirmed that the solid punctuation direction is
+correct. The operator also requested a later isolated JanVim candidate in which the punctuation
+rendering box is `0.50` relative to the ideograph box `1.0`. This checkpoint remains the rollback
+state while that renderer candidate is evaluated; the frozen JanVim artifact itself is unchanged.
