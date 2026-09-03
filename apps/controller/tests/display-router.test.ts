@@ -1,10 +1,17 @@
+import { readFileSync } from "node:fs";
+
 import { describe, expect, it } from "vitest";
 
+import {
+  parseDisplayLayout,
+  type ShowRuntimeDisplay,
+} from "../src/display-routing-contract.ts";
 import {
   createSecondaryWindowPlan,
   hashDisplayGeometry,
   installSecondaryNavigationGuard,
   openSecondaryReadyWindow,
+  resolveDisplayRoute,
   routeDisplays,
   type DisplayMapConfig,
   type DisplayFingerprint,
@@ -76,6 +83,30 @@ describe("display router", () => {
     if (routed.state !== "mapped") throw new Error(routed.reason);
     expect(routed.primary.displayId).toBe("engineering-projector");
     expect(routed.secondary.displayId).toBe("nut-projector");
+  });
+
+  it("normalizes the accepted schema-1 route without changing its legacy behavior", () => {
+    const layout = parseDisplayLayout(
+      readFileSync(new URL("../../../show/display-layout.json", import.meta.url)),
+    );
+    const primary: ShowRuntimeDisplay = {
+      ...runtimeDisplay(primaryGeometry),
+      workingArea: { ...primaryGeometry.bounds },
+      rotation: 0,
+    };
+    const secondary: ShowRuntimeDisplay = {
+      ...runtimeDisplay(secondaryGeometry),
+      workingArea: { ...secondaryGeometry.bounds },
+      rotation: 0,
+    };
+
+    expect(resolveDisplayRoute([secondary, primary], layout, displayMap())).toMatchObject({
+      state: "mapped",
+      mode: "legacy-dual",
+      roles: { "SCREEN-1": primary, "SCREEN-2": secondary },
+      skippedRoles: ["SCREEN-3"],
+      unassignedDisplays: [],
+    });
   });
 
   it("stays ready for unconfirmed, tampered, or geometrically changed mappings", () => {

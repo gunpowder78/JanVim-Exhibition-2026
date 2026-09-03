@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "roles": [
+    { "softId": "SCREEN-1", "surface": "janvim" },
+    { "softId": "SCREEN-2", "surface": "narrative" },
+    { "softId": "SCREEN-3", "surface": "jianshan-placeholder" }
+  ],
+  "modes": [
+    {
+      "mode": "production-3",
+      "activeRoles": ["SCREEN-1", "SCREEN-2", "SCREEN-3"],
+      "skippedRoles": []
+    },
+    {
+      "mode": "single-display-preview",
+      "activeRoles": ["SCREEN-1"],
+      "skippedRoles": ["SCREEN-2", "SCREEN-3"]
+    }
+  ]
+}
