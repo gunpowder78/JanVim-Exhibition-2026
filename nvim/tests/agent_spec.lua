@@ -570,14 +570,14 @@ local function new_connection_fixture(options)
   }
 end
 
-run("init keeps the bounded JanVim exhibition state on the dark theme", function()
+run("init uses the full JanVim viewport on the dark theme", function()
   vim.g.janvim_margin_left = nil
   vim.g.janvim_margin_right = nil
   vim.g.janvim_enable_art_mode = nil
 
   local fixture = new_connection_fixture()
-  equal(vim.g.janvim_margin_left, 0.08)
-  equal(vim.g.janvim_margin_right, 0.12)
+  equal(vim.g.janvim_margin_left, 0.0)
+  equal(vim.g.janvim_margin_right, 0.0)
   equal(vim.g.janvim_enable_art_mode, false)
   fixture.connection:close()
 end)

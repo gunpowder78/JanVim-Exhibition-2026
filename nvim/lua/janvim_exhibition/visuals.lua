@@ -1,8 +1,8 @@
 local Visuals = {}
 
 local SETTINGS = {
-  margin_left = 0.08,
-  margin_right = 0.12,
+  margin_left = 0.0,
+  margin_right = 0.0,
   enable_art_mode = false,
 }
 
