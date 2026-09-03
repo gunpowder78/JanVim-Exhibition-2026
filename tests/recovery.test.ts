@@ -1,6 +1,13 @@
 import { spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  copyFileSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, win32 } from "node:path";
 import { PassThrough } from "node:stream";
@@ -1665,7 +1672,8 @@ type JanVimFaultContractMode =
   | "valid"
   | "destroyed-hwnd"
   | "wrong-owner"
-  | "type-collision";
+  | "type-collision"
+  | "tampered-artifact-lock";
 
 function runSecondaryFaultContract(
   records: readonly Record<string, unknown>[],
@@ -1774,6 +1782,25 @@ function runJanVimFaultContractWithDistinctHelperWindow(
   ).get("fault-janvim")!;
   const encodedJanVim = Buffer.from(janvim, "utf8").toString("base64");
   const root = mkdtempSync(join(tmpdir(), "janvim-r3-janvim-fault-"));
+  const faultRepositoryRoot =
+    mode === "tampered-artifact-lock" ? join(root, "repository") : repositoryRoot;
+  if (mode === "tampered-artifact-lock") {
+    const runtimeRoot = join(faultRepositoryRoot, "runtime", "janvim");
+    mkdirSync(runtimeRoot, { recursive: true });
+    copyFileSync(
+      join(repositoryRoot, "runtime", "janvim", "janvim-core.exe"),
+      join(runtimeRoot, "janvim-core.exe"),
+    );
+    const artifactLock = JSON.parse(
+      readFileSync(join(repositoryRoot, "janvim-artifact.lock.json"), "utf8"),
+    ) as Record<string, unknown>;
+    artifactLock.archiveBytes = Number(artifactLock.archiveBytes) + 1;
+    writeFileSync(
+      join(faultRepositoryRoot, "janvim-artifact.lock.json"),
+      JSON.stringify(artifactLock, null, 2) + "\n",
+      "utf8",
+    );
+  }
 
   const wrapper = `
 $repo = $env:JANVIM_R3_REPOSITORY_ROOT
@@ -1962,7 +1989,7 @@ finally {
           ...process.env,
           JANVIM_R3_FAULT_BLOCK_BASE64: encodedJanVim,
           JANVIM_R3_FAULT_MODE: mode,
-          JANVIM_R3_REPOSITORY_ROOT: repositoryRoot,
+          JANVIM_R3_REPOSITORY_ROOT: faultRepositoryRoot,
           JANVIM_R3_ROOT: root,
         },
         maxBuffer: 1024 * 1024,
@@ -2467,6 +2494,18 @@ describe("Task 9 recovery operations", () => {
     expect(result).toMatchObject({
       ok: false,
       error: "janvim-window-interop-type-conflict",
+      stoppedPids: [],
+    });
+  }, 10_000);
+
+  it("fails closed before process control when non-core artifact-lock bytes change", () => {
+    const result = runJanVimFaultContractWithDistinctHelperWindow(
+      "tampered-artifact-lock",
+    );
+
+    expect(result).toMatchObject({
+      ok: false,
+      error: "artifact-lock-file-identity-invalid",
       stoppedPids: [],
     });
   }, 10_000);

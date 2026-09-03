@@ -752,7 +752,9 @@ if ($null -eq ($windowInteropTypeName -as [type])) {
 function Read-BoundedUtf8Text {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
-        [Parameter(Mandatory = $true)][long]$MaximumBytes
+        [Parameter(Mandatory = $true)][long]$MaximumBytes,
+        [string]$ExpectedSha256 = '',
+        [string]$IdentityFailureReason = 'bounded-file-identity-invalid'
     )
     $stream = [IO.File]::Open(
         $Path,
@@ -763,6 +765,16 @@ function Read-BoundedUtf8Text {
     try {
         if ($stream.Length -lt 1 -or $stream.Length -gt $MaximumBytes) {
             throw "bounded-file-size-invalid:$Path"
+        }
+        if ($ExpectedSha256.Length -gt 0) {
+            if ($ExpectedSha256 -cnotmatch '^[0-9a-f]{64}$') {
+                throw $IdentityFailureReason
+            }
+            $actualSha256 =
+                (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actualSha256 -cne $ExpectedSha256) {
+                throw $IdentityFailureReason
+            }
         }
         $encoding = [Text.UTF8Encoding]::new($false, $true)
         $reader = [IO.StreamReader]::new($stream, $encoding, $true, 4096, $true)
@@ -942,7 +954,11 @@ $expectedJanVimStart = Convert-StrictUtcInstant -Value $lease.janvim.startedAtUt
 
 $artifactLockPath = "$repo\janvim-artifact.lock.json"
 $artifactLockText =
-    Read-BoundedUtf8Text -Path $artifactLockPath -MaximumBytes $maximumArtifactLockBytes
+    Read-BoundedUtf8Text `
+        -Path $artifactLockPath `
+        -MaximumBytes $maximumArtifactLockBytes `
+        -ExpectedSha256 '9cb5f25c91d8fd7186465de0f90e6ddde8b4a54fadee431d907992a797e54a7c' `
+        -IdentityFailureReason 'artifact-lock-file-identity-invalid'
 Assert-NoDuplicateJsonProperties -Text $artifactLockText
 try {
     $artifactLock = $artifactLockText | ConvertFrom-Json -Depth 8 -DateKind String -NoEnumerate

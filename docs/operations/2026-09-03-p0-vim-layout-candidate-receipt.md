@@ -206,12 +206,20 @@ size, core hash, and lock hash. Six focused identity/runtime/recovery test files
 tests after the migration.
 
 The final exhibition verification passed `npm ci`, typecheck, lint, all `47` Vitest files and
-`810` tests, the production build, all Lua tests, frozen-runtime verification, and
+`811` tests, the production build, all Lua tests, frozen-runtime verification, and
 `git diff --check`. The first full Vitest invocation encountered one external Windows `EPERM`
 while replacing a lease file in the shared system temporary directory. The unchanged test passed
-in isolation and the complete `810`-test suite then passed without code or timeout changes under a
+in isolation and the complete test suite then passed without code or timeout changes under a
 fresh external test-temporary root. The compiled Electron main bundle is `451996` bytes with
 SHA-256 `bc60718dd52323259c397057265245042b4ea1823609cff3958568ceafd36c55`.
+
+Post-implementation review identified that the operator's JanVim fault block validated every lock
+field but did not pin the raw lock file hash. A deterministic test first demonstrated that changing
+only non-core `archiveBytes` could still reach `Stop-Process`. The fault block now hashes the
+bounded lock bytes while its read-only, no-write-sharing handle remains open and fails with
+`artifact-lock-file-identity-invalid` before process control unless the hash is exactly
+`9cb5f25c91d8fd7186465de0f90e6ddde8b4a54fadee431d907992a797e54a7c`. The new test verifies an
+empty stopped-PID list, and all `36` recovery contract tests pass.
 
 Connected half-cell visual rehearsal evidence:
 
