@@ -165,7 +165,7 @@ describe("compiled Electron main bundle", () => {
       relativePath: "apps/controller/dist/main/electron-main.js",
       bytes: 451996,
       sha256:
-        "b351464b7c9ff73c2524135d6b104837386047dbfa2831b0ccd9832d4c28ed94",
+        "bc60718dd52323259c397057265245042b4ea1823609cff3958568ceafd36c55",
       runtimeImports: [
         "electron",
         "node:child_process",
@@ -200,7 +200,7 @@ describe("compiled Electron main bundle", () => {
     }).toEqual({
       bytes: 451996,
       sha256:
-        "b351464b7c9ff73c2524135d6b104837386047dbfa2831b0ccd9832d4c28ed94",
+        "bc60718dd52323259c397057265245042b4ea1823609cff3958568ceafd36c55",
     });
   });
 

@@ -31,8 +31,8 @@ $protectedRoots = @(
 )
 $expectedNodeVersion = 'v22.23.0'
 $expectedSourceRepository = 'D:/github/JanVim'
-$expectedTag = 'v0.10.1-gmk.4.punctuation.1'
-$expectedCommit = '3dddb882e7f54f77b7847a3e65f1acd815b3ea4f'
+$expectedTag = 'v0.10.1-gmk.4.punctuation.2'
+$expectedCommit = 'abbd5a5b942b202e7fe4324bcd3ddab47c672cb9'
 $expectedShowConfigSha256 = '4c012266c8e9119030d113b812a6e4cf14877edb92fa39a3a560ce2b707f7f9a'
 $expectedPluginLabSha256 = 'b47803728c52086ed384db00d8c9dd262b345b7ea9ebe1f8f900ce7313979965'
 $expectedContentLockBytes = 2332L
@@ -61,7 +61,7 @@ $restartDelaysMilliseconds = @(1000, 2000, 4000)
 # JANVIM_REVIEWED_ELECTRON_RELEASE_IDENTITY_BEGIN
 $reviewedElectronMainRelativePath = 'apps/controller/dist/main/electron-main.js'
 $reviewedElectronMainBytes = 451996L
-$reviewedElectronMainSha256 = 'b351464b7c9ff73c2524135d6b104837386047dbfa2831b0ccd9832d4c28ed94'
+$reviewedElectronMainSha256 = 'bc60718dd52323259c397057265245042b4ea1823609cff3958568ceafd36c55'
 $reviewedElectronMainRuntimeImports = @(
     'electron'
     'node:child_process'

@@ -988,9 +988,9 @@ if (
     $artifactLock.sourceRepository -isnot [string] -or
     $artifactLock.sourceRepository -cne 'D:/github/JanVim' -or
     $artifactLock.tag -isnot [string] -or
-    $artifactLock.tag -cne 'v0.10.1-gmk.4.punctuation.1' -or
+    $artifactLock.tag -cne 'v0.10.1-gmk.4.punctuation.2' -or
     $artifactLock.commit -isnot [string] -or
-    $artifactLock.commit -cne '3dddb882e7f54f77b7847a3e65f1acd815b3ea4f' -or
+    $artifactLock.commit -cne 'abbd5a5b942b202e7fe4324bcd3ddab47c672cb9' -or
     -not (Test-NonEmptyString -Value $artifactLock.archive) -or
     -not (Test-PositiveSafeInteger -Value $artifactLock.archiveBytes) -or
     -not (Test-LowerSha256 -Value $artifactLock.archiveSha256) -or
@@ -1000,7 +1000,7 @@ if (
     -not (Test-PositiveSafeInteger -Value $artifactLock.coreBytes) -or
     $artifactLock.coreBytes -ne 18869248 -or
     -not (Test-LowerSha256 -Value $artifactLock.coreSha256) -or
-    $artifactLock.coreSha256 -cne 'e492c96516439b38bfa204cc3bc5586ba2b303b7250ee9db3564aa65ffbee118' -or
+    $artifactLock.coreSha256 -cne '3fc76259677185c619db2a76e302b9588df0bdd3e58600ed30a5ea08b4194f54' -or
     -not (Test-NonEmptyString -Value $artifactLock.runtimeLua) -or
     -not (Test-LowerSha256 -Value $artifactLock.runtimeLuaSha256) -or
     -not (Test-NonEmptyString -Value $artifactLock.artifactConfig) -or

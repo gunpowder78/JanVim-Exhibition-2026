@@ -16,8 +16,8 @@ import { tmpdir } from "node:os";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-const EXPECTED_TAG = "v0.10.1-gmk.4.punctuation.1";
-const EXPECTED_COMMIT = "3dddb882e7f54f77b7847a3e65f1acd815b3ea4f";
+const EXPECTED_TAG = "v0.10.1-gmk.4.punctuation.2";
+const EXPECTED_COMMIT = "abbd5a5b942b202e7fe4324bcd3ddab47c672cb9";
 const ARCHIVE_NAME = "JanVim-win-x64.zip";
 const PROVENANCE_NAME = "JanVim-win-x64.provenance.json";
 const BUILD_LOG_NAME = "JanVim-win-x64.build.log";

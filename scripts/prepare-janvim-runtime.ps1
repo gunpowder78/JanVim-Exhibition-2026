@@ -22,8 +22,8 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
-$ExpectedTag = 'v0.10.1-gmk.4.punctuation.1'
-$ExpectedCommit = '3dddb882e7f54f77b7847a3e65f1acd815b3ea4f'
+$ExpectedTag = 'v0.10.1-gmk.4.punctuation.2'
+$ExpectedCommit = 'abbd5a5b942b202e7fe4324bcd3ddab47c672cb9'
 $ExpectedSourceRepository = 'D:/github/JanVim'
 $ExpectedProvenanceRepository = 'https://github.com/gunpowder78/JanVim.git'
 $ExpectedArchive = 'JanVim-win-x64.zip'

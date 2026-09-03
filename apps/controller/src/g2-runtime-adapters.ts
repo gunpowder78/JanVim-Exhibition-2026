@@ -1006,8 +1006,8 @@ const artifactLockSchema = z
   .object({
     schema: z.literal(1),
     sourceRepository: z.literal("D:/github/JanVim"),
-    tag: z.literal("v0.10.1-gmk.4.punctuation.1"),
-    commit: z.literal("3dddb882e7f54f77b7847a3e65f1acd815b3ea4f"),
+    tag: z.literal("v0.10.1-gmk.4.punctuation.2"),
+    commit: z.literal("abbd5a5b942b202e7fe4324bcd3ddab47c672cb9"),
     archive: z.string().min(1),
     archiveBytes: z.number().int().positive(),
     archiveSha256: hashSchema,
@@ -1016,7 +1016,7 @@ const artifactLockSchema = z
     core: z.literal("janvim-core.exe"),
     coreBytes: z.literal(18_869_248),
     coreSha256: z.literal(
-      "e492c96516439b38bfa204cc3bc5586ba2b303b7250ee9db3564aa65ffbee118",
+      "3fc76259677185c619db2a76e302b9588df0bdd3e58600ed30a5ea08b4194f54",
     ),
     runtimeLua: z.string().min(1),
     runtimeLuaSha256: hashSchema,

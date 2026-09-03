@@ -2048,7 +2048,7 @@ describe("real Task 9 show runtime adapters", () => {
     ]);
     expect(janVimCore.byteLength).toBe(18_869_248);
     expect(createHash("sha256").update(janVimCore).digest("hex")).toBe(
-      "e492c96516439b38bfa204cc3bc5586ba2b303b7250ee9db3564aa65ffbee118",
+      "3fc76259677185c619db2a76e302b9588df0bdd3e58600ed30a5ea08b4194f54",
     );
     expect(harness.processListeners).toHaveLength(0);
     expect(harness.appListeners).toHaveLength(0);
@@ -2058,7 +2058,7 @@ describe("real Task 9 show runtime adapters", () => {
     const changedLock = Buffer.from(
       artifactLock
         .toString("utf8")
-        .replace('"archiveBytes": 31347910', '"archiveBytes": 31347909'),
+        .replace('"archiveBytes": 31347917', '"archiveBytes": 31347916'),
       "utf8",
     );
     const harness = createValidationHarness({ artifactLockBytes: changedLock });
@@ -2204,7 +2204,7 @@ describe("real Task 9 show runtime adapters", () => {
           hwnd: "0x0000000000001F43",
           executableRelativePath: "janvim-core.exe",
           executableSha256:
-            "e492c96516439b38bfa204cc3bc5586ba2b303b7250ee9db3564aa65ffbee118",
+            "3fc76259677185c619db2a76e302b9588df0bdd3e58600ed30a5ea08b4194f54",
         },
       },
     });
@@ -3485,7 +3485,7 @@ describe("real Task 9 show runtime adapters", () => {
     const changedLock = Buffer.from(
       artifactLock
         .toString("utf8")
-        .replace('"archiveBytes": 31347910', '"archiveBytes": 31347909'),
+        .replace('"archiveBytes": 31347917', '"archiveBytes": 31347916'),
       "utf8",
     );
     const harness = createStartupHarness({ artifactLockBytes: changedLock });

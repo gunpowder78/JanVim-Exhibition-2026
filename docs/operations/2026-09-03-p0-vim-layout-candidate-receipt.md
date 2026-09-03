@@ -172,3 +172,68 @@ The operator accepted this state as runnable and confirmed that the solid punctu
 correct. The operator also requested a later isolated JanVim candidate in which the punctuation
 rendering box is `0.50` relative to the ideograph box `1.0`. This checkpoint remains the rollback
 state while that renderer candidate is evaluated; the frozen JanVim artifact itself is unchanged.
+
+## Native half-cell punctuation candidate follow-up
+
+The requested `1.0` ideograph / `0.50` punctuation ink-box ratio was implemented in an isolated
+JanVim product worktree. The renderer's orthogonal-punctuation ink scale changed from `0.25` to
+`0.50`; cell advance, line layout, source text, conceal mappings, semantic colors, and all
+non-punctuation glyph rendering remain unchanged. This keeps the product change to one rendering
+constant plus its specifications and deterministic geometry assertions.
+
+JanVim product identity:
+
+- tag: `v0.10.1-gmk.4.punctuation.2`;
+- commit: `abbd5a5b942b202e7fe4324bcd3ddab47c672cb9`;
+- packaged archive bytes: `31347917`;
+- packaged archive SHA-256:
+  `b033524f615c7c5389a85fc45039e8a910ce1171d2eed36658d3ba26d8e75ff6`;
+- core bytes: `18869248`;
+- core SHA-256: `3fc76259677185c619db2a76e302b9588df0bdd3e58600ed30a5ea08b4194f54`;
+- build root:
+  `D:\VirtualData\JanVim-Exhibition-Builds\gmk4-punctuation-halfcell-20260903-abbd5a5`.
+
+The packaged executable completed a real-window identity smoke and reported the exact candidate
+commit. On final product source, `cargo fmt --all -- --check`, serial
+`cargo test --workspace --all-targets`, `cargo clippy --workspace --all-targets --all-features --
+-D warnings`, `cargo xtask guard-deps`, and `git diff --check` all passed.
+
+The exhibition runtime was then prepared from that immutable package. Its new
+`janvim-artifact.lock.json` is `1629` bytes with SHA-256
+`9cb5f25c91d8fd7186465de0f90e6ddde8b4a54fadee431d907992a797e54a7c`. Active launcher,
+validation, evidence, recovery, and runbook identities now require the exact new tag, commit, core
+size, core hash, and lock hash. Six focused identity/runtime/recovery test files passed all `187`
+tests after the migration.
+
+The final exhibition verification passed `npm ci`, typecheck, lint, all `47` Vitest files and
+`810` tests, the production build, all Lua tests, frozen-runtime verification, and
+`git diff --check`. The first full Vitest invocation encountered one external Windows `EPERM`
+while replacing a lease file in the shared system temporary directory. The unchanged test passed
+in isolation and the complete `810`-test suite then passed without code or timeout changes under a
+fresh external test-temporary root. The compiled Electron main bundle is `451996` bytes with
+SHA-256 `bc60718dd52323259c397057265245042b4ea1823609cff3958568ceafd36c55`.
+
+Connected half-cell visual rehearsal evidence:
+
+- ValidateOnly run ID: `punct-halfcell-visual-20260903-181855-validate`, exit `0`;
+- Show run ID: `punct-halfcell-visual-20260903-181855-show`;
+- evidence root:
+  `D:\VirtualData\JanVim-Exhibition-Rehearsals\punct-halfcell-visual-20260903-181855-show`;
+- network policy: connected diagnostic, so the machine acceptance outcome is intentionally
+  `diagnostic` rather than an offline pass;
+- artifact tag/commit/core SHA-256 exactly match the candidate identity above;
+- completed loops: `3`;
+- terminal: `intentional-success`, reason `operator-stop`;
+- no controller incident, `loggingIncomplete: false`, and the run lease was removed;
+- all three loop records contain the exact source-poem reset SHA-256
+  `b699de273f5bbaedb08241495f52ce863d3e8e1851275ce3b6251484d75190a8`.
+
+The operator confirmed that the `1.0 / 0.50` ideograph-to-punctuation rendering ratio is visually
+perfect and that the existing colors, spacing, continuous writing, cursor animation, and reset
+behavior remain correct. The selector then restored the byte-exact `p0-baseline` manifest.
+
+This accepts the renderer's visual result. Commit `2222d5a` and tag
+`exhibition-fallback-p0-solid-punctuation-2026-09-03` remain the byte-addressable rollback state,
+and the earlier accepted P0 fallback tag also remains unchanged. An offline forced-restart run of
+this exact `.punctuation.2` artifact remains a separate operational acceptance step; this connected
+visual rehearsal does not claim it.

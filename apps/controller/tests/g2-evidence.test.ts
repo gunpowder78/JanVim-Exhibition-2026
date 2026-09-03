@@ -48,8 +48,8 @@ function validEvidenceRecord(
       },
     },
     artifact: {
-      tag: "v0.10.1-gmk.4.punctuation.1",
-      commit: "3dddb882e7f54f77b7847a3e65f1acd815b3ea4f",
+      tag: "v0.10.1-gmk.4.punctuation.2",
+      commit: "abbd5a5b942b202e7fe4324bcd3ddab47c672cb9",
       archiveBytes: 100_000_000,
       archiveSha256: "b".repeat(64),
       coreBytes: 18_869_248,
