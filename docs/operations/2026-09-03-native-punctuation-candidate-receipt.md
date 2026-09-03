@@ -82,15 +82,36 @@ roles were reconfirmed against current geometry. Final connected `ValidateOnly` 
 for run `punct-native-final-20260903-042521` with display-map SHA-256
 `eed8c655ece41a08413073a28a7fd629562549dc71ad6b341f1d843851cc4738`.
 
+## Human window 1: connected visual acceptance
+
+The first connected launch, `punct-window1-20260903-101242-show`, intentionally used the active
+`p0-baseline` rollback member because the long-form selector had not been run. It stopped cleanly
+but is not counted as candidate content acceptance. The operator omission was corrected by the
+locked selector; no runtime or content bytes were changed.
+
+The accepted connected rehearsal used:
+
+- run ID: `punct-window1-long-20260903-102627-show`;
+- profile: `songfeng-source` revision `20260902-songfeng-source-r7`;
+- manifest SHA-256: `2890e74e289f629896e5c536c7299718447ca6649c9858ca887995f408fa321f`;
+- candidate core SHA-256: `e492c96516439b38bfa204cc3bc5586ba2b303b7250ee9db3564aa65ffbee118`;
+- completed loops: `9`;
+- terminal result: exit `0`, `intentional-success`, reason `operator-stop`;
+- evidence result: `diagnostic`, because collaboration remained connected;
+- logging incomplete: `false`; shutdown acknowledged, bridge closed, and lease removed.
+
+The owner directly confirmed that native Chinese and English punctuation had the intended compact
+footprint and vermilion color, continuous long-form write-back was correct, and one observed reset
+restored the expected poem. Machine evidence records the original-poem reset SHA-256
+`b699de273f5bbaedb08241495f52ce863d3e8e1851275ce3b6251484d75190a8` for every completed loop.
+After the rehearsal, the selector restored the byte-exact `p0-baseline` manifest with SHA-256
+`9a39ee522e556860053468854b0858bc1fafd8b7a1ca08ddff57d0371b717b35`, leaving the candidate
+worktree clean before this receipt update.
+
 ## Manual acceptance still required
 
 The candidate does not replace the fallback until the scheduled dual-monitor rehearsal confirms:
 
-- native Chinese and English punctuation has the intended compact footprint and vermilion color;
-- the existing five-class semantic palette, dark background, column gap, and swordsman motion are
-  unchanged;
-- continuous write-back has no crash or JanVim reconstruction;
-- reset restores the exact four-line poem;
-- the final offline and forced-restart rehearsal receipts pass.
+- the final offline and forced-restart rehearsal receipts pass in human window 2.
 
 This receipt claims monitor simulation only, not physical-projector acceptance.
