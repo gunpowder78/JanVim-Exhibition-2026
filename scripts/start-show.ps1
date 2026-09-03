@@ -36,7 +36,7 @@ $expectedCommit = 'abbd5a5b942b202e7fe4324bcd3ddab47c672cb9'
 $expectedShowConfigSha256 = '4c012266c8e9119030d113b812a6e4cf14877edb92fa39a3a560ce2b707f7f9a'
 $expectedPluginLabSha256 = 'b47803728c52086ed384db00d8c9dd262b345b7ea9ebe1f8f900ce7313979965'
 $expectedContentLockBytes = 2332L
-$expectedContentLockSha256 = '7fe46e094fa6f8a99d5823357e85ecbb4500f6bada12d697330e3979c8ed73d6'
+$expectedContentLockSha256 = '5d27312d2dfd3ccebc28771314df1846e50fcd724effabfe8dc83c0577ffd08d'
 $expectedPoemSha256 = 'b699de273f5bbaedb08241495f52ce863d3e8e1851275ce3b6251484d75190a8'
 $allowedContentProfiles = @('p0-baseline', 'songfeng-source', 'river-channel', 'tower-codebook')
 $maximumContentLockBytes = 32768
@@ -987,7 +987,7 @@ function Read-SelectedContentProfile {
         -Reason 'content-lock-invalid'
     if (
         -not (Test-ExactJsonInteger -Value (Get-RequiredPropertyValue -InputObject $lock -Name 'schema' -Reason 'content-lock-invalid') -Expected 1) -or
-        (Get-RequiredPropertyValue -InputObject $lock -Name 'revision' -Reason 'content-lock-invalid') -cne '20260902-p0.1-r7'
+        (Get-RequiredPropertyValue -InputObject $lock -Name 'revision' -Reason 'content-lock-invalid') -cne '20260902-p0.1-r8'
     ) {
         throw 'content-lock-invalid'
     }

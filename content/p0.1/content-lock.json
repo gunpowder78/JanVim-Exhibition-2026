@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "revision": "20260902-p0.1-r7",
+  "revision": "20260902-p0.1-r8",
   "poem": {
     "path": "content/fixture/poem.txt",
     "bytes": 64,
@@ -25,7 +25,7 @@
     {
       "id": "songfeng-source",
       "title": "松风信源",
-      "revision": "20260902-songfeng-source-r7",
+      "revision": "20260902-songfeng-source-r8",
       "paper": {
         "path": "content/p0.1/profiles/songfeng-source/paper.md",
         "bytes": 5055,
@@ -33,8 +33,8 @@
       },
       "manifest": {
         "path": "content/p0.1/profiles/songfeng-source/show.manifest.json",
-        "bytes": 21763,
-        "sha256": "2890e74e289f629896e5c536c7299718447ca6649c9858ca887995f408fa321f"
+        "bytes": 23026,
+        "sha256": "c7bc0e0299e5a5dadb62c1a4446e53e950341c98e8312eda259cd2bf09f0dd99"
       }
     },
     {

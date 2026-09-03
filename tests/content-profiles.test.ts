@@ -211,6 +211,70 @@ describe("P0.1 frozen content profiles", () => {
     } satisfies Partial<ShowManifest["cues"][number]>);
   });
 
+  it("gives songfeng-source a frozen half-speed rhythmic write-back", () => {
+    const profile = lockedProfile(readLock(), "songfeng-source");
+    const manifest = parseShowManifest(
+      JSON.parse(readFileSync(absolute(profile.manifest.path), "utf8")),
+    );
+    const inserts = manifest.cues.flatMap((cue) =>
+      cue.kind === "editor-action" && cue.payload.action.type === "insert"
+        ? [{ atMs: cue.atMs, action: cue.payload.action }]
+        : [],
+    );
+
+    expect(inserts).toHaveLength(18);
+    const rates = inserts.map(({ action }) => action.charsPerSecond);
+    expect(new Set(rates)).toEqual(new Set([60, 64, 68, 72]));
+    expect(rates.every((rate) => rate >= 60 && rate <= 72)).toBe(true);
+    expect(rates.slice(1).every((rate, index) => rate !== rates[index])).toBe(true);
+
+    let totalCharacters = 0;
+    let totalDurationMs = 0;
+    for (const { action } of inserts) {
+      const characterCount = Array.from(action.text).length;
+      const intervalMs = Math.max(1, Math.floor(1_000 / action.charsPerSecond));
+      const durationMs = intervalMs * characterCount;
+      totalCharacters += characterCount;
+      totalDurationMs += durationMs;
+      expect(durationMs).toBeGreaterThanOrEqual(1_350);
+      expect(durationMs).toBeLessThanOrEqual(1_450);
+    }
+
+    const effectiveCharactersPerSecond = totalCharacters / (totalDurationMs / 1_000);
+    expect(effectiveCharactersPerSecond).toBeGreaterThanOrEqual(70);
+    expect(effectiveCharactersPerSecond).toBeLessThanOrEqual(73);
+
+    const startGaps = inserts.slice(1).map(({ atMs }, index) => atMs - inserts[index]!.atMs);
+    expect(Math.min(...startGaps)).toBeGreaterThanOrEqual(3_600);
+    expect(Math.max(...startGaps)).toBeLessThanOrEqual(4_600);
+    expect(new Set(startGaps).size).toBeGreaterThanOrEqual(5);
+  });
+
+  it("leaves ACK-safe breathing room after every songfeng-source insert", () => {
+    const profile = lockedProfile(readLock(), "songfeng-source");
+    const manifest = parseShowManifest(
+      JSON.parse(readFileSync(absolute(profile.manifest.path), "utf8")),
+    );
+    const mainActions = manifest.cues.filter(
+      (cue) => cue.kind === "editor-action" && cue.target !== "secondary",
+    );
+
+    for (const [index, cue] of mainActions.entries()) {
+      if (cue.payload.action.type !== "insert") continue;
+      const next = mainActions[index + 1];
+      expect(next, `${cue.id} must have a following bounded main action`).toBeDefined();
+      const intervalMs = Math.max(
+        1,
+        Math.floor(1_000 / cue.payload.action.charsPerSecond),
+      );
+      const durationMs = intervalMs * Array.from(cue.payload.action.text).length;
+      expect(
+        next!.atMs - cue.atMs - durationMs,
+        `${cue.id} must settle before ${next!.id}`,
+      ).toBeGreaterThanOrEqual(500);
+    }
+  });
+
   it("forces LF checkout bytes for every reviewed hash input", () => {
     const paths = [
       "janvim-artifact.lock.json",

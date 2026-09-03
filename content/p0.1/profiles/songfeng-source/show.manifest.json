@@ -3,7 +3,7 @@
   "loopId": "p0.1-songfeng-source-165s",
   "loopDurationMs": 90000,
   "poemSha256": "b699de273f5bbaedb08241495f52ce863d3e8e1851275ce3b6251484d75190a8",
-  "contentRevision": "20260902-songfeng-source-r7",
+  "contentRevision": "20260902-songfeng-source-r8",
   "preparedBy": "JanVim Exhibition Team",
   "cues": [
     {
@@ -81,8 +81,8 @@
       "payload": {
         "action": {
           "type": "insert",
-          "text": "\n\n# 松风信源：山林中一份关于熵与编码的开山札记\n　　我们先把松针间的风看作离散信源，每一次颤动都是尚未命名的符号。符号抵达耳边以前没有句法，只有发生概率在暮色中缓慢改变自己的重量。若以随机变量 X 记下每阵风，`H(X)` 便不是噪声，而是群",
-          "charsPerSecond": 120
+          "text": "\n\n# 松风信源：山林中一份关于熵与编码的开山札记\n　　我们先把松针间的风看作离散信源，每一次颤动都是尚未命名的符号。符号抵达耳边以前没有句法，只有发生概率在暮色中缓慢改变自己的重量。若以随机变量 X 记",
+          "charsPerSecond": 68
         },
         "displayKeys": [
           "i",
@@ -130,14 +130,14 @@
     },
     {
       "id": "songfeng-source-insert-02",
-      "atMs": 17000,
+      "atMs": 15800,
       "target": "main",
       "kind": "editor-action",
       "payload": {
         "action": {
           "type": "insert",
-          "text": "山尚未说尽的话。\n　　`entropy` 衡量未知的宽度，也衡量聆听者在下一瞬仍能保持多少惊异。概率很高的松涛像熟路，适合用较短的码字穿过峡谷，少走不必要的台阶。罕见的断枝声需要较长的描述，因为它携带了更多偏离日常秩序的消息。\n## 这正是 `s",
-          "charsPerSecond": 145
+          "text": "下每阵风，`H(X)` 便不是噪声，而是群山尚未说尽的话。\n　　`entropy` 衡量未知的宽度，也衡量聆听者在下一瞬仍能保持多少惊异。概率很高的松涛像熟路，适合用较短的码字穿过峡谷，少走不必要的台阶。罕见的断枝声需要",
+          "charsPerSecond": 72
         },
         "displayKeys": [
           "i",
@@ -149,7 +149,7 @@
     },
     {
       "id": "songfeng-source-move-out-02",
-      "atMs": 19200,
+      "atMs": 18000,
       "target": "main",
       "kind": "editor-action",
       "payload": {
@@ -167,7 +167,7 @@
     },
     {
       "id": "songfeng-source-move-back-02",
-      "atMs": 20200,
+      "atMs": 19000,
       "target": "main",
       "kind": "editor-action",
       "payload": {
@@ -185,14 +185,14 @@
     },
     {
       "id": "songfeng-source-insert-03",
-      "atMs": 22000,
+      "atMs": 19900,
       "target": "main",
       "kind": "editor-action",
       "payload": {
         "action": {
           "type": "insert",
-          "text": "ource coding` 的朴素伦理：不压低差异，只压缩重复的脚步。\n　　一棵树并不发送完整森林，它只发送足以让另一座山重新想象森林的线索。编码者在树影中寻找前缀，使任何一串叶响都不会被误认成另一串的开头。`Huffman tree` 因而像倒",
-          "charsPerSecond": 125
+          "text": "较长的描述，因为它携带了更多偏离日常秩序的消息。\n## 这正是 `source coding` 的朴素伦理：不压低差异，只压缩重复的脚步。\n　　一棵树并不发送完整森林，它只发送足以让另一座山",
+          "charsPerSecond": 64
         },
         "displayKeys": [
           "i",
@@ -204,7 +204,7 @@
     },
     {
       "id": "songfeng-source-move-out-03",
-      "atMs": 24200,
+      "atMs": 22100,
       "target": "main",
       "kind": "editor-action",
       "payload": {
@@ -222,7 +222,7 @@
     },
     {
       "id": "songfeng-source-move-back-03",
-      "atMs": 25200,
+      "atMs": 23100,
       "target": "main",
       "kind": "editor-action",
       "payload": {
@@ -240,14 +240,14 @@
     },
     {
       "id": "songfeng-source-insert-04",
-      "atMs": 27000,
+      "atMs": 24100,
       "target": "main",
       "kind": "editor-action",
       "payload": {
         "action": {
           "type": "insert",
-          "text": "悬的根系，频繁的风落在浅处，稀有的风潜入深处。平均码长逼近熵时，语言学会节省，却不能把不可预测性从世界里删去。\n　　我们把白日、山、河与层楼分成符号，不是为了拆散诗，而是观察传递。每个符号都带着上下文的余温，独立同分布只是第一张便于展开的地图。真",
-          "charsPerSecond": 190
+          "text": "重新想象森林的线索。编码者在树影中寻找前缀，使任何一串叶响都不会被误认成另一串的开头。`Huffman tree` 因而像倒悬的根系，频繁的风落在浅处，稀有的风潜入深处。平均码长逼近熵时，语言学会节省，却",
+          "charsPerSecond": 68
         },
         "displayKeys": [
           "i",
@@ -259,7 +259,7 @@
     },
     {
       "id": "songfeng-source-move-out-04",
-      "atMs": 29200,
+      "atMs": 26300,
       "target": "main",
       "kind": "editor-action",
       "payload": {
@@ -277,7 +277,7 @@
     },
     {
       "id": "songfeng-source-move-back-04",
-      "atMs": 30200,
+      "atMs": 27300,
       "target": "main",
       "kind": "editor-action",
       "payload": {
@@ -295,14 +295,14 @@
     },
     {
       "id": "songfeng-source-insert-05",
-      "atMs": 32000,
+      "atMs": 27800,
       "target": "main",
       "kind": "editor-action",
       "payload": {
         "action": {
           "type": "insert",
-          "text": "实松风具有记忆，前一阵风会改变后一阵风穿越枝条时的条件概率。\n> 于是 `conditional entropy` 在林下出现，像被前景遮住却仍然存在的远峰。\n　　知道一片叶已向东，便减少对下一片叶方向的疑惑，但不会消灭全部未知。这种减少不是占有",
-          "charsPerSecond": 135
+          "text": "不能把不可预测性从世界里删去。\n　　我们把白日、山、河与层楼分成符号，不是为了拆散诗，而是观察传递。每个符号都带着上下文的余温，独立同分布只是第一张便于展开的地图。真实松风具有记忆，前一阵风会改变后一阵风穿越枝条时的条件",
+          "charsPerSecond": 72
         },
         "displayKeys": [
           "i",
@@ -314,7 +314,7 @@
     },
     {
       "id": "songfeng-source-move-out-05",
-      "atMs": 34200,
+      "atMs": 30000,
       "target": "main",
       "kind": "editor-action",
       "payload": {
@@ -332,7 +332,7 @@
     },
     {
       "id": "songfeng-source-move-back-05",
-      "atMs": 35200,
+      "atMs": 31000,
       "target": "main",
       "kind": "editor-action",
       "payload": {
@@ -350,14 +350,14 @@
     },
     {
       "id": "songfeng-source-insert-06",
-      "atMs": 37000,
+      "atMs": 32200,
       "target": "main",
       "kind": "editor-action",
       "payload": {
         "action": {
           "type": "insert",
-          "text": "，而是信息：由观察带来的不确定性差额被写进石壁。当码本太短，许多不同风势被迫共用同一条路径，山谷便产生语义拥塞。\n　　当码本太长，传输虽从容，却让有限展演时间被无意义的空白逐渐吞没。最好的长度不是绝对的短，而是让平均代价与信源结构形成清醒的比例。",
-          "charsPerSecond": 120
+          "text": "概率。\n> 于是 `conditional entropy` 在林下出现，像被前景遮住却仍然存在的远峰。\n　　知道一片叶已向东，便减少对下一片叶方向的疑惑，但不会消灭全部未知。这",
+          "charsPerSecond": 60
         },
         "displayKeys": [
           "i",
@@ -369,7 +369,7 @@
     },
     {
       "id": "songfeng-source-move-out-06",
-      "atMs": 39200,
+      "atMs": 34400,
       "target": "main",
       "kind": "editor-action",
       "payload": {
@@ -387,7 +387,7 @@
     },
     {
       "id": "songfeng-source-move-back-06",
-      "atMs": 40200,
+      "atMs": 35400,
       "target": "main",
       "kind": "editor-action",
       "payload": {
@@ -405,14 +405,14 @@
     },
     {
       "id": "songfeng-source-insert-07",
-      "atMs": 42000,
+      "atMs": 36100,
       "target": "main",
       "kind": "editor-action",
       "payload": {
         "action": {
           "type": "insert",
-          "text": "\n## `Kraft inequality` 像山门尺度，约束所有码字能够在同一棵前缀树中安居。\n　　它不替我们选择句子，只说明哪些长度组合不会在解码时彼此踩踏影子。若概率分布偏移，昨日高效的码本会在今日变得笨重，像逆风携带长剑。因此编码也要承认",
-          "charsPerSecond": 145
+          "text": "种减少不是占有，而是信息：由观察带来的不确定性差额被写进石壁。当码本太短，许多不同风势被迫共用同一条路径，山谷便产生语义拥塞。\n　　当码本太长，传输虽从容，却让有限展演时间被无意义的空白逐渐吞没。最好的长",
+          "charsPerSecond": 68
         },
         "displayKeys": [
           "i",
@@ -424,7 +424,7 @@
     },
     {
       "id": "songfeng-source-move-out-07",
-      "atMs": 44200,
+      "atMs": 38300,
       "target": "main",
       "kind": "editor-action",
       "payload": {
@@ -442,7 +442,7 @@
     },
     {
       "id": "songfeng-source-move-back-07",
-      "atMs": 45200,
+      "atMs": 39300,
       "target": "main",
       "kind": "editor-action",
       "payload": {
@@ -460,14 +460,14 @@
     },
     {
       "id": "songfeng-source-insert-08",
-      "atMs": 47000,
+      "atMs": 40500,
       "target": "main",
       "kind": "editor-action",
       "payload": {
         "action": {
           "type": "insert",
-          "text": "季节：模型必须被冻结，演出却可在日与日之间轮换。冻结并非停止生成，而是把生成移到台下，使台上的每次循环都可复现。\n> 在断网的剧场里，码字仍按同一时钟落下，观众看到的是确定中的疾驰。\n　　光标从行首跃到行尾，仿佛侠客辨认树梢信号，在概率较薄处突然",
-          "charsPerSecond": 125
+          "text": "度不是绝对的短，而是让平均代价与信源结构形成清醒的比例。\n## `Kraft inequality` 像山门尺度，约束所有码字能够在同一棵前缀树中安居。\n　　它不替我们选择句子，只说明哪些长度组合不会在解码时彼此踩踏影子",
+          "charsPerSecond": 72
         },
         "displayKeys": [
           "i",
@@ -479,7 +479,7 @@
     },
     {
       "id": "songfeng-source-move-out-08",
-      "atMs": 49200,
+      "atMs": 42700,
       "target": "main",
       "kind": "editor-action",
       "payload": {
@@ -497,7 +497,7 @@
     },
     {
       "id": "songfeng-source-move-back-08",
-      "atMs": 50200,
+      "atMs": 43700,
       "target": "main",
       "kind": "editor-action",
       "payload": {
@@ -515,14 +515,14 @@
     },
     {
       "id": "songfeng-source-insert-09",
-      "atMs": 52000,
+      "atMs": 44300,
       "target": "main",
       "kind": "editor-action",
       "payload": {
         "action": {
           "type": "insert",
-          "text": "折返。横向滚动不是装饰，它让过长的论断变成地形，屏幕边界成为暂时的山口。纵向跳转把段落压成层峦，眼睛无法同时占有全图，只能追随局部踪迹。\n　　我们故意让移动节奏不均匀，因为均匀节拍会伪装成机器而不是风的判断。但这种不均匀早已写入 cue，所谓随机",
-          "charsPerSecond": 190
+          "text": "。若概率分布偏移，昨日高效的码本会在今日变得笨重，像逆风携带长剑。因此编码也要承认季节：模型必须被冻结，演出却可在日与日之间轮换。冻结并非停止生成，而是把生成移到台下，使台上的每次循环都可复",
+          "charsPerSecond": 64
         },
         "displayKeys": [
           "i",
@@ -534,7 +534,7 @@
     },
     {
       "id": "songfeng-source-move-out-09",
-      "atMs": 54200,
+      "atMs": 46500,
       "target": "main",
       "kind": "editor-action",
       "payload": {
@@ -552,7 +552,7 @@
     },
     {
       "id": "songfeng-source-move-back-09",
-      "atMs": 55200,
+      "atMs": 47500,
       "target": "main",
       "kind": "editor-action",
       "payload": {
@@ -570,14 +570,14 @@
     },
     {
       "id": "songfeng-source-insert-10",
-      "atMs": 57000,
+      "atMs": 48600,
       "target": "main",
       "kind": "editor-action",
       "payload": {
         "action": {
           "type": "insert",
-          "text": "感只是被审阅过的时间构图。\n## 没有 `live AI` 在后台继续猜测，也没有网络把陌生文本带入冻结的展场。\n> 所有句子先被阅读、计数与哈希，再成为可以反复演出的静态信源样本。`SHA-256` 在这里不是美学主题，而是守门人，确认今夜的字",
-          "charsPerSecond": 135
+          "text": "现。\n> 在断网的剧场里，码字仍按同一时钟落下，观众看到的是确定中的疾驰。\n　　光标从行首跃到行尾，仿佛侠客辨认树梢信号，在概率较薄处突然折返。横向滚动不是装饰，它让过长的论断变成地形，屏幕边界成为暂时的",
+          "charsPerSecond": 68
         },
         "displayKeys": [
           "i",
@@ -589,7 +589,7 @@
     },
     {
       "id": "songfeng-source-move-out-10",
-      "atMs": 59200,
+      "atMs": 50800,
       "target": "main",
       "kind": "editor-action",
       "payload": {
@@ -607,7 +607,7 @@
     },
     {
       "id": "songfeng-source-move-back-10",
-      "atMs": 60200,
+      "atMs": 51800,
       "target": "main",
       "kind": "editor-action",
       "payload": {
@@ -625,14 +625,14 @@
     },
     {
       "id": "songfeng-source-insert-11",
-      "atMs": 62000,
+      "atMs": 52600,
       "target": "main",
       "kind": "editor-action",
       "payload": {
         "action": {
           "type": "insert",
-          "text": "与昨日完全相同。\n　　字节上限则像剑鞘，限制每次出手的长度，避免一次豪迈破坏整个循环。每段 `insert` 都保留足够空隙，让 JanVim 完成写入，让光标效果留下轨迹。`move` 动作穿插其间，以 `w`、`b`、`$` 与 `G` 改变",
-          "charsPerSecond": 120
+          "text": "山口。纵向跳转把段落压成层峦，眼睛无法同时占有全图，只能追随局部踪迹。\n　　我们故意让移动节奏不均匀，因为均匀节拍会伪装成机器而不是风的判断。但这种不均匀早已写入 cue，所谓随机感只是被审阅过的时间构图。\n## 没有 ",
+          "charsPerSecond": 72
         },
         "displayKeys": [
           "i",
@@ -644,14 +644,14 @@
     },
     {
       "id": "songfeng-source-insert-12",
-      "atMs": 67000,
+      "atMs": 57100,
       "target": "main",
       "kind": "editor-action",
       "payload": {
         "action": {
           "type": "insert",
-          "text": "观察尺度，而非注入任意命令。编辑器只接收已经允许的语义动作，控制器仍是唯一拥有时钟的人。\n　　副屏从同一 cue 看见提示与流动，不把自身冒充成 JanVim 的浮动窗口。两块屏幕因此像编码器与解码器：一边改写，一边显影，共享同一时基。若其中一边",
-          "charsPerSecond": 145
+          "text": "`live AI` 在后台继续猜测，也没有网络把陌生文本带入冻结的展场。\n> 所有句子先被阅读、计数与哈希，再成为可以反复演出的静态信源样本。`SHA-256` 在这里不是美学主题，而是守门人，确认今夜的",
+          "charsPerSecond": 68
         },
         "displayKeys": [
           "i",
@@ -663,14 +663,14 @@
     },
     {
       "id": "songfeng-source-insert-13",
-      "atMs": 72000,
+      "atMs": 60900,
       "target": "main",
       "kind": "editor-action",
       "payload": {
         "action": {
           "type": "insert",
-          "text": "失去响应，恢复程序重建代际，而不是让旧文本偷偷追上新循环。\n## 最终 `reset` 把缓冲区恢复成原诗，正如译码结束后仍能辨认最初的消息。\n　　复原不是擦除经历；它证明所有生成文字都属于有边界的临时状态。下一轮从同一首诗出发，却可选择另一份冻",
-          "charsPerSecond": 125
+          "text": "字与昨日完全相同。\n　　字节上限则像剑鞘，限制每次出手的长度，避免一次豪迈破坏整个循环。每段 `insert` 都保留足够空隙，让 JanVim 完成写入，让光标效果留下轨迹。`move` 动",
+          "charsPerSecond": 64
         },
         "displayKeys": [
           "i",
@@ -682,14 +682,14 @@
     },
     {
       "id": "songfeng-source-insert-14",
-      "atMs": 77000,
+      "atMs": 65200,
       "target": "main",
       "kind": "editor-action",
       "payload": {
         "action": {
           "type": "insert",
-          "text": "结论文，形成每日可重复的轮播。在松风主题中，我们让熵成为山林的呼吸，让码长成为行走所需的步数。信息越罕见，路径越深；路径越深，光标越像穿越不可见枝杈的微光。\n> 但 `H(X)` 从不赞美混乱，它只精确陈述在观察之前我们不知道多少。\n　　因此这",
-          "charsPerSecond": 190
+          "text": "作穿插其间，以 `w`、`b`、`$` 与 `G` 改变观察尺度，而非注入任意命令。编辑器只接收已经允许的语义动作，控制器仍是唯一拥有时钟的人。\n　　副屏从同一 cue 看见提示与流动，不把自身冒充成 JanVim 的浮动",
+          "charsPerSecond": 72
         },
         "displayKeys": [
           "i",
@@ -701,20 +701,77 @@
     },
     {
       "id": "songfeng-source-insert-15",
-      "atMs": 82000,
+      "atMs": 69200,
       "target": "main",
       "kind": "editor-action",
       "payload": {
         "action": {
           "type": "insert",
-          "text": "篇论文不宣布征服自然，只练习如何在有限带宽里保持自然的差异。当最后一列文字越过屏幕，山仍未被说完，码本只是暂时可靠的渡口。当原诗重新出现，信源回到四句，所有长篇推演退回可验证的静默。松风继续经过树冠，下一次编码仍从同一个哈希、同一个时钟开始。\n",
-          "charsPerSecond": 135
+          "text": "窗口。两块屏幕因此像编码器与解码器：一边改写，一边显影，共享同一时基。若其中一边失去响应，恢复程序重建代际，而不是让旧文本偷偷追上新循环。\n## 最终 `reset` 把缓冲区恢复成原诗，正如译码结束后仍能",
+          "charsPerSecond": 68
         },
         "displayKeys": [
           "i",
           "segment 15"
         ],
         "semanticLabel": "write frozen paper segment 15",
+        "critical": true
+      }
+    },
+    {
+      "id": "songfeng-source-insert-16",
+      "atMs": 73700,
+      "target": "main",
+      "kind": "editor-action",
+      "payload": {
+        "action": {
+          "type": "insert",
+          "text": "辨认最初的消息。\n　　复原不是擦除经历；它证明所有生成文字都属于有边界的临时状态。下一轮从同一首诗出发，却可选择另一份冻结论文，形成每日可重复的轮播。在松风主题中，我们让熵成为山林",
+          "charsPerSecond": 60
+        },
+        "displayKeys": [
+          "i",
+          "segment 16"
+        ],
+        "semanticLabel": "write frozen paper segment 16",
+        "critical": true
+      }
+    },
+    {
+      "id": "songfeng-source-insert-17",
+      "atMs": 77600,
+      "target": "main",
+      "kind": "editor-action",
+      "payload": {
+        "action": {
+          "type": "insert",
+          "text": "的呼吸，让码长成为行走所需的步数。信息越罕见，路径越深；路径越深，光标越像穿越不可见枝杈的微光。\n> 但 `H(X)` 从不赞美混乱，它只精确陈述在观察之前我们不知道多少。\n　　因此这篇论文不宣布征服自然，只练习如何在有限",
+          "charsPerSecond": 72
+        },
+        "displayKeys": [
+          "i",
+          "segment 17"
+        ],
+        "semanticLabel": "write frozen paper segment 17",
+        "critical": true
+      }
+    },
+    {
+      "id": "songfeng-source-insert-18",
+      "atMs": 82100,
+      "target": "main",
+      "kind": "editor-action",
+      "payload": {
+        "action": {
+          "type": "insert",
+          "text": "带宽里保持自然的差异。当最后一列文字越过屏幕，山仍未被说完，码本只是暂时可靠的渡口。当原诗重新出现，信源回到四句，所有长篇推演退回可验证的静默。松风继续经过树冠，下一次编码仍从同一个哈希、同一个时钟开始。\n",
+          "charsPerSecond": 68
+        },
+        "displayKeys": [
+          "i",
+          "segment 18"
+        ],
+        "semanticLabel": "write frozen paper segment 18",
         "critical": true
       }
     },
