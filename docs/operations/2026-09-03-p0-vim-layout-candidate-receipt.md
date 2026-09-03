@@ -242,6 +242,55 @@ behavior remain correct. The selector then restored the byte-exact `p0-baseline`
 
 This accepts the renderer's visual result. Commit `2222d5a` and tag
 `exhibition-fallback-p0-solid-punctuation-2026-09-03` remain the byte-addressable rollback state,
-and the earlier accepted P0 fallback tag also remains unchanged. An offline forced-restart run of
-this exact `.punctuation.2` artifact remains a separate operational acceptance step; this connected
-visual rehearsal does not claim it.
+and the earlier accepted P0 fallback tag also remains unchanged.
+
+### Exact-artifact offline forced-restart closure
+
+Before the final run, Windows assigned fresh display IDs while retaining the accepted physical
+geometry. A new display map was captured and confirmed rather than reusing the stale IDs:
+
+- display-map SHA-256:
+  `eba6145f9b89526fd6bda6857c2cbc673237beecfa220b7e63ae6988895cdf22`;
+- primary: ID `2314100965`, `1920x1080`, scale `1`, at `0,0`;
+- secondary: ID `18934493`, `1920x1080`, scale `1`, at `776,-1080`.
+
+The operator then completed the final offline forced-restart rehearsal with Wi-Fi, Ethernet, and
+external VPN/TUN routing disconnected:
+
+- Show run ID: `phc6-20260904-011051-f`;
+- evidence root:
+  `D:\VirtualData\JanVim-Exhibition-Rehearsals\phc6-20260904-011051-f`;
+- acceptance scope: `monitor-simulation`; physical projectors tested: `false`;
+- exact artifact tag: `v0.10.1-gmk.4.punctuation.2`;
+- exact artifact commit: `abbd5a5b942b202e7fe4324bcd3ddab47c672cb9`;
+- exact core SHA-256:
+  `3fc76259677185c619db2a76e302b9588df0bdd3e58600ed30a5ea08b4194f54`;
+- exact artifact-lock SHA-256:
+  `9cb5f25c91d8fd7186465de0f90e6ddde8b4a54fadee431d907992a797e54a7c`;
+- content revision: `20260902-songfeng-source-r7`;
+- content manifest SHA-256:
+  `2890e74e289f629896e5c536c7299718447ca6649c9858ca887995f408fa321f`;
+- offline samples: `5`; online samples: `0`; `offlineVerified: true`;
+- one JanVim-domain recovery: generation `2`, attempt `1`, bounded delay `1000 ms`, outcome
+  `recovered`, reason `session-recovered`;
+- completed loops: `3`, all in recovery generation `2`; each dispatched `42` cues, completed `38`
+  primary cues, and presented `5` secondary cues;
+- total retries: `0`; total recoveries: `1`; the three bounded P1 fixture skips remained the
+  documented absent formula, image, and matrix assets;
+- every loop recorded the exact source-poem reset SHA-256
+  `b699de273f5bbaedb08241495f52ce863d3e8e1851275ce3b6251484d75190a8`;
+- aggregate outcome: `pass`; terminal: `intentional-success`, reason `operator-stop`;
+- no controller incident, `loggingIncomplete: false`, no residual run lease, and no residual show
+  process;
+- shutdown recorded JanVim natural exit, bridge closure, and lease removal.
+
+The operator confirmed that the deliberate exact-identity JanVim fault executed, JanVim rebuilt
+automatically, the secondary remained safe, the four-line source poem returned, three fresh
+long-form loops completed, and Stop Show ended the run normally. All requested human observations
+passed, including the accepted half-cell vermilion punctuation, full viewport, semantic colors,
+logical line numbers, continuous write-back, and cursor animation.
+
+After evidence inspection, the selector restored the byte-exact `p0-baseline` manifest with
+SHA-256 `9a39ee522e556860053468854b0858bc1fafd8b7a1ca08ddff57d0371b717b35`.
+This closes the dual-monitor-simulation P0 acceptance for the exact `.punctuation.2` candidate.
+Physical-projector G4 remains a separate hardware-layer rehearsal and is not claimed here.
