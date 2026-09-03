@@ -104,6 +104,35 @@ run("prepare creates a nameless nofile buffer and never touches a source poem", 
   agent:dispose()
 end)
 
+run("prepare and reset keep compact absolute column numbers", function()
+  local window_number = vim.api.nvim_get_current_win()
+  local original_number = vim.api.nvim_get_option_value("number", { win = window_number })
+  local original_relativenumber = vim.api.nvim_get_option_value("relativenumber", { win = window_number })
+  local original_numberwidth = vim.api.nvim_get_option_value("numberwidth", { win = window_number })
+  local agent = new_agent()
+
+  local function assert_column_numbers()
+    equal(vim.api.nvim_get_option_value("number", { win = window_number }), true)
+    equal(vim.api.nvim_get_option_value("relativenumber", { win = window_number }), false)
+    equal(vim.api.nvim_get_option_value("numberwidth", { win = window_number }), 2)
+  end
+
+  local ok, error_message = xpcall(function()
+    prepare(agent)
+    assert_column_numbers()
+    dispatch(agent, command("cue-column-number-reset", { type = "reset" }))
+    assert_column_numbers()
+  end, debug.traceback)
+
+  agent:dispose()
+  vim.api.nvim_set_option_value("number", original_number, { win = window_number })
+  vim.api.nvim_set_option_value("relativenumber", original_relativenumber, { win = window_number })
+  vim.api.nvim_set_option_value("numberwidth", original_numberwidth, { win = window_number })
+  if not ok then
+    error(error_message, 0)
+  end
+end)
+
 run("native vermilion punctuation is display-only and survives reset", function()
   local punctuation_text = "甲，乙。丙；丁：戊？己！庚、辛"
   local mappings = {
