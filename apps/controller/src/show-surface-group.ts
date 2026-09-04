@@ -21,21 +21,27 @@ export interface ShowNarrativeSurface
   show(): void;
 }
 
+export interface ShowPreviewSafetySurface extends ShowSurfaceGroupChild {
+  hide(): void;
+  show(): void;
+}
+
 export interface ShowSurfaceGroupOptions {
   narrative: ShowNarrativeSurface;
   standby?: ShowSurfaceGroupChild;
-  previewVisibility?: boolean;
+  previewSafety?: ShowPreviewSafetySurface;
 }
 
 export class ShowSurfaceGroup implements ShowSecondarySurface {
   public readonly rendererPid: number;
   private readonly narrative: ShowNarrativeSurface;
   private readonly standby: ShowSurfaceGroupChild | undefined;
-  private readonly previewVisibility: boolean;
+  private readonly previewSafety: ShowPreviewSafetySurface | undefined;
   private readonly eventDisposers = new Set<() => void>();
   private readonly destroyedListeners = new Set<() => void>();
   private childDisposers: Array<() => void> = [];
-  private previewVisible = true;
+  private previewStarted = false;
+  private previewSafetyVisible = false;
   private lossObserved = false;
   private lossDelivered = false;
   private lossDeliveryQueued = false;
@@ -43,23 +49,29 @@ export class ShowSurfaceGroup implements ShowSecondarySurface {
 
   public constructor(options: ShowSurfaceGroupOptions) {
     if (
-      options.previewVisibility === true &&
+      options.previewSafety !== undefined &&
       options.standby !== undefined
     ) {
       throw new Error("Preview surface group cannot own a standby window");
     }
-    if (options.standby === options.narrative) {
+    if (
+      options.standby === options.narrative ||
+      options.previewSafety === options.narrative ||
+      (options.previewSafety !== undefined &&
+        options.previewSafety === options.standby)
+    ) {
       throw new Error("Show surface group children must be distinct");
     }
 
     this.narrative = options.narrative;
     this.standby = options.standby;
-    this.previewVisibility = options.previewVisibility === true;
+    this.previewSafety = options.previewSafety;
     this.rendererPid = options.narrative.rendererPid;
 
     const children: readonly ShowSurfaceGroupChild[] = [
       this.narrative,
       ...(this.standby === undefined ? [] : [this.standby]),
+      ...(this.previewSafety === undefined ? [] : [this.previewSafety]),
     ];
     const staged: Array<() => void> = [];
     try {
@@ -75,18 +87,32 @@ export class ShowSurfaceGroup implements ShowSecondarySurface {
 
   public send(event: RunCueEvent | RunStatusEvent): void {
     if (this.closed) return;
-    this.narrative.send(event);
-    if (!this.previewVisibility || event.type !== "run-status") return;
-
-    if (event.state === "running") {
-      if (!this.previewVisible) return;
-      this.narrative.hide();
-      this.previewVisible = false;
+    if (this.previewSafety === undefined || event.type !== "run-status") {
+      this.narrative.send(event);
       return;
     }
-    if (this.previewVisible) return;
-    this.narrative.show();
-    this.previewVisible = true;
+
+    if (!this.previewStarted) {
+      this.narrative.send(event);
+      if (event.state !== "running") return;
+      this.narrative.hide();
+      this.previewStarted = true;
+      return;
+    }
+
+    if (event.state === "running") {
+      this.narrative.send(event);
+      if (!this.previewSafetyVisible) return;
+      this.previewSafety.hide();
+      this.previewSafetyVisible = false;
+      return;
+    }
+
+    if (!this.previewSafetyVisible) {
+      this.previewSafety.show();
+      this.previewSafetyVisible = true;
+    }
+    this.narrative.send(event);
   }
 
   public onEvent(
@@ -137,6 +163,9 @@ export class ShowSurfaceGroup implements ShowSecondarySurface {
     actions.push(() => this.narrative.close());
     if (this.standby !== undefined) {
       actions.push(() => this.standby!.close());
+    }
+    if (this.previewSafety !== undefined) {
+      actions.push(() => this.previewSafety!.close());
     }
     const result = runAll(actions);
     if (result.threw) throw result.error;

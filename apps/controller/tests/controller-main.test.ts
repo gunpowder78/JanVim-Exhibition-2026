@@ -395,6 +395,34 @@ describe("controller composition root", () => {
     ).toThrowError(/local file/i);
   });
 
+  it("rolls back IPC when listener registration installs and then throws", () => {
+    const bindLocalRendererEvents = (controllerMain as Task9ControllerMain)
+      .bindLocalRendererEvents;
+    expect(bindLocalRendererEvents).toBeTypeOf("function");
+    let registered: RendererIpcListener | undefined;
+    const removed: RendererIpcListener[] = [];
+
+    expect(() =>
+      bindLocalRendererEvents?.(
+        {
+          on: (_channel, listener) => {
+            registered = listener;
+            throw new Error("ipc-registration-failed");
+          },
+          removeListener: (_channel, listener) => {
+            removed.push(listener);
+            if (registered === listener) registered = undefined;
+          },
+        },
+        "file:///show/safety.html",
+        () => undefined,
+      ),
+    ).toThrow("ipc-registration-failed");
+
+    expect(registered).toBeUndefined();
+    expect(removed).toHaveLength(1);
+  });
+
   it("requires the exact current sender for Start, Stop, and presentation ACK", () => {
     const bindLocalRendererEvents = (controllerMain as Task9ControllerMain)
       .bindLocalRendererEvents;

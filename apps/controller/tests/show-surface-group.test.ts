@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { JSDOM } from "jsdom";
@@ -58,10 +58,12 @@ class FakeNarrative extends FakeChild implements ShowNarrativeSurface {
   >();
   public hideCount = 0;
   public showCount = 0;
+  public visible = true;
 
   public constructor(
     trace: string[],
     closeFailure?: CloseFailure,
+    private readonly sendFailureState?: RunStatusEvent["state"],
   ) {
     super("narrative", trace, closeFailure);
     this.trace = trace;
@@ -74,6 +76,12 @@ class FakeNarrative extends FakeChild implements ShowNarrativeSurface {
     this.trace.push(
       "type" in event ? `narrative:send:${event.type}:${"state" in event ? event.state : ""}` : "narrative:send:cue",
     );
+    if (
+      event.type === "run-status" &&
+      event.state === this.sendFailureState
+    ) {
+      throw new Error(`narrative send failed for ${event.state}`);
+    }
   }
 
   public onEvent(
@@ -89,11 +97,13 @@ class FakeNarrative extends FakeChild implements ShowNarrativeSurface {
 
   public hide(): void {
     this.hideCount += 1;
+    this.visible = false;
     this.trace.push("narrative:hide");
   }
 
   public show(): void {
     this.showCount += 1;
+    this.visible = true;
     this.trace.push("narrative:show");
   }
 
@@ -102,6 +112,28 @@ class FakeNarrative extends FakeChild implements ShowNarrativeSurface {
       listeners:
         super.diagnostics().listeners + this.eventListeners.size,
     };
+  }
+}
+
+class FakePreviewSafety extends FakeChild {
+  public hideCount = 0;
+  public showCount = 0;
+  public visible = false;
+
+  public constructor(private readonly safetyTrace: string[]) {
+    super("preview-safety", safetyTrace);
+  }
+
+  public hide(): void {
+    this.hideCount += 1;
+    this.visible = false;
+    this.safetyTrace.push("preview-safety:hide");
+  }
+
+  public show(): void {
+    this.showCount += 1;
+    this.visible = true;
+    this.safetyTrace.push("preview-safety:show");
   }
 }
 
@@ -143,6 +175,34 @@ describe("Jianshan standby artifact", () => {
     expect(document.querySelector("style")?.textContent).toMatch(
       /background:\s*#[0-1][0-9a-f]{5}/iu,
     );
+  });
+});
+
+describe("preview safety artifact", () => {
+  it("is a bounded blank script-free local cover with a strict CSP", () => {
+    const path = join(process.cwd(), "show", "preview-safe.html");
+    expect(existsSync(path)).toBe(true);
+    if (!existsSync(path)) return;
+
+    const bytes = readFileSync(path);
+    const document = new JSDOM(bytes.toString("utf8")).window.document;
+    const policy = document
+      .querySelector('meta[http-equiv="Content-Security-Policy"]')
+      ?.getAttribute("content");
+    const style = document.querySelector("style")?.textContent;
+
+    expect(bytes.byteLength).toBeLessThanOrEqual(2_048);
+    expect(style).toBeDefined();
+    expect(policy).toContain("default-src 'none'");
+    expect(policy).toContain("script-src 'none'");
+    expect(policy).toContain(
+      `style-src 'sha256-${createHash("sha256").update(style!).digest("base64")}'`,
+    );
+    expect(policy).not.toContain("'unsafe-inline'");
+    expect(policy).toContain("connect-src 'none'");
+    expect(document.querySelectorAll("script, [src], [href]")).toHaveLength(0);
+    expect(document.body.textContent?.trim()).toBe("");
+    expect(style).toMatch(/background:\s*#[0-1][0-9a-f]{5}/iu);
   });
 });
 
@@ -242,12 +302,13 @@ describe("ShowSurfaceGroup", () => {
     expect(standby.closeCount).toBe(1);
   });
 
-  it("hides preview only after running is sent and re-shows on non-running status", () => {
+  it("keeps Narrative hidden and orders the safety cover around preview statuses", () => {
     const trace: string[] = [];
     const narrative = new FakeNarrative(trace);
+    const previewSafety = new FakePreviewSafety(trace);
     const group = new ShowSurfaceGroup({
       narrative,
-      previewVisibility: true,
+      previewSafety,
     });
     const status = (
       state: RunStatusEvent["state"],
@@ -272,15 +333,84 @@ describe("ShowSurfaceGroup", () => {
       "narrative:send:run-status:running",
       "narrative:hide",
       "narrative:send:run-status:running",
+      "preview-safety:show",
       "narrative:send:run-status:black-recovering",
-      "narrative:show",
       "narrative:send:run-status:safe-ready",
       "narrative:send:run-status:running",
-      "narrative:hide",
+      "preview-safety:hide",
+      "preview-safety:show",
       "narrative:send:run-status:shutting-down",
-      "narrative:show",
     ]);
-    expect(narrative.hideCount).toBe(2);
-    expect(narrative.showCount).toBe(2);
+    expect(narrative.hideCount).toBe(1);
+    expect(narrative.showCount).toBe(0);
+    expect(narrative.visible).toBe(false);
+    expect(previewSafety.hideCount).toBe(1);
+    expect(previewSafety.showCount).toBe(2);
+    expect(previewSafety.visible).toBe(true);
+  });
+
+  it("shows the preview safety cover before a failing non-running status send", () => {
+    const trace: string[] = [];
+    const narrative = new FakeNarrative(
+      trace,
+      undefined,
+      "black-recovering",
+    );
+    const previewSafety = new FakePreviewSafety(trace);
+    const group = new ShowSurfaceGroup({ narrative, previewSafety });
+    const status = (state: RunStatusEvent["state"]): RunStatusEvent => ({
+      schema: 1,
+      type: "run-status",
+      generationId: 1,
+      state,
+    });
+
+    group.send(status("running"));
+    expect(() => group.send(status("black-recovering"))).toThrow(
+      "narrative send failed for black-recovering",
+    );
+
+    expect(trace).toEqual([
+      "narrative:send:run-status:running",
+      "narrative:hide",
+      "preview-safety:show",
+      "narrative:send:run-status:black-recovering",
+    ]);
+    expect(previewSafety.visible).toBe(true);
+    expect(narrative.visible).toBe(false);
+    expect(narrative.showCount).toBe(0);
+  });
+
+  it("treats preview safety loss as one grouped destruction", async () => {
+    const narrative = new FakeNarrative([]);
+    const previewSafety = new FakePreviewSafety([]);
+    const group = new ShowSurfaceGroup({ narrative, previewSafety });
+    const lost = vi.fn();
+    group.onDestroyed(lost);
+
+    previewSafety.destroyUnexpectedly();
+    await Promise.resolve();
+
+    expect(lost).toHaveBeenCalledOnce();
+    narrative.destroyUnexpectedly();
+    await Promise.resolve();
+
+    expect(lost).toHaveBeenCalledOnce();
+    expect(narrative.destroyedListeners).toHaveLength(0);
+    expect(previewSafety.destroyedListeners).toHaveLength(0);
+  });
+
+  it("closes the preview safety cover with Narrative", () => {
+    const trace: string[] = [];
+    const narrative = new FakeNarrative(trace);
+    const previewSafety = new FakePreviewSafety(trace);
+    const group = new ShowSurfaceGroup({ narrative, previewSafety });
+
+    group.close();
+    group.close();
+
+    expect(trace).toEqual(["narrative:close", "preview-safety:close"]);
+    expect(narrative.closeCount).toBe(1);
+    expect(previewSafety.closeCount).toBe(1);
   });
 });

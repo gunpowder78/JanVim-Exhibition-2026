@@ -519,6 +519,7 @@ function createValidationHarness(options: {
   profiles?: readonly FakeNetworkProfile[];
   realpathOverrides?: Readonly<Record<string, string>>;
   artifactLockBytes?: Buffer;
+  displayMapBytes?: Buffer;
 } = {}) {
   const trace: string[] = [];
   const files = new Map<string, Buffer>([
@@ -543,7 +544,11 @@ function createValidationHarness(options: {
       ),
       pluginLabInit,
     ],
-    [displayMapPath, Buffer.from(`${JSON.stringify(confirmedMap)}\n`, "utf8")],
+    [
+      displayMapPath,
+      options.displayMapBytes ??
+        Buffer.from(`${JSON.stringify(confirmedMap)}\n`, "utf8"),
+    ],
     [
       win32.join(repositoryRoot, "runtime", "janvim", "janvim-core.exe"),
       Buffer.from(janVimCore),
@@ -728,6 +733,15 @@ function createStartupHarness(options: {
     action: "close-listener" | "ipc" | "web-guard";
     value: unknown;
   }[];
+  windowSetupFailure?: {
+    surface: "narrative" | "standby" | "preview-safety";
+    stage:
+      | "guard"
+      | "renderer-listener"
+      | "close-listener"
+      | "closed-listener"
+      | "ipc";
+  };
   deferResetPresentationAck?: boolean;
   rejectFirstEditorCueId?: string;
   writeShowEvidence?: (
@@ -850,6 +864,7 @@ function createStartupHarness(options: {
   const timedOutBridgeCloseGates: Array<ReturnType<typeof publicationGate>> = [];
   let deadlineOperationDepth = 0;
   const sent: Array<{ channel: string; payload: unknown }> = [];
+  const surfaceOperations: string[] = [];
   const agentCommands: AgentCommand[] = [];
   const sampledPids: number[] = [];
   const evidenceAttempts: Array<{ path: string; value: unknown }> = [];
@@ -915,10 +930,12 @@ function createStartupHarness(options: {
 
   class FakeWebContents extends EventEmitter {
     public loadedUrl: string | undefined;
+    private requestGuardInstalled = false;
 
     public constructor(
       private rendererPid: number,
       private readonly operations: string[],
+      public readonly surface: "narrative" | "standby" | "preview-safety",
     ) {
       super();
       pendingRendererIdentityPids.add(rendererPid);
@@ -934,10 +951,12 @@ function createStartupHarness(options: {
           ) => void,
         ) => {
           if (filter === null) {
+            this.requestGuardInstalled = false;
             requestFilter = undefined;
             beforeRequest = undefined;
             return;
           }
+          this.requestGuardInstalled = true;
           requestFilter = filter;
           beforeRequest = listener;
         },
@@ -950,6 +969,11 @@ function createStartupHarness(options: {
         event.type === "run-status"
           ? `send:run-status:${String(event.state)}`
           : `send:${String(event.type ?? "cue")}`,
+      );
+      surfaceOperations.push(
+        event.type === "run-status"
+          ? `${this.surface}:send:run-status:${String(event.state)}`
+          : `${this.surface}:send:${String(event.type ?? "cue")}`,
       );
       if (
         payload !== null &&
@@ -999,12 +1023,39 @@ function createStartupHarness(options: {
     public readonly setWindowOpenHandler = vi.fn(
       (handler: (details: { url: string }) => { action: "deny" }) => {
         windowOpenHandler = handler;
+        if (
+          options.windowSetupFailure?.surface === this.surface &&
+          options.windowSetupFailure.stage === "guard"
+        ) {
+          throw new Error(`injected ${this.surface} guard setup failure`);
+        }
       },
     );
     public readonly getOSProcessId = vi.fn(() => this.rendererPid);
 
     public replaceRendererPid(pid: number): void {
       this.rendererPid = pid;
+    }
+
+    public hasRequestGuard(): boolean {
+      return this.requestGuardInstalled;
+    }
+
+    public override on(
+      eventName: string | symbol,
+      listener: (...args: unknown[]) => void,
+    ): this {
+      super.on(eventName, listener);
+      if (
+        eventName === "render-process-gone" &&
+        options.windowSetupFailure?.surface === this.surface &&
+        options.windowSetupFailure.stage === "renderer-listener"
+      ) {
+        throw new Error(
+          `injected ${this.surface} renderer listener setup failure`,
+        );
+      }
+      return this;
     }
 
     public override removeListener(
@@ -1033,19 +1084,32 @@ function createStartupHarness(options: {
   class FakeBrowserWindow extends EventEmitter {
     public readonly webContents: FakeWebContents;
     public readonly operations: string[] = [];
+    public readonly surface: "narrative" | "standby" | "preview-safety";
     private destroyed = false;
-    private visible = true;
+    private visible: boolean;
 
     public constructor(public readonly options: Record<string, unknown>) {
       super();
       const preferences = options.webPreferences as
         | Record<string, unknown>
         | undefined;
-      const rendererPid =
+      const partition = String(preferences?.partition ?? "");
+      this.surface =
         typeof preferences?.preload === "string"
+          ? "narrative"
+          : partition.includes("preview-safe")
+            ? "preview-safety"
+            : "standby";
+      this.visible = options.show !== false;
+      const rendererPid =
+        this.surface === "narrative"
           ? 8002 + narrativeRendererCount++
           : 9002 + standbyRendererCount++;
-      this.webContents = new FakeWebContents(rendererPid, this.operations);
+      this.webContents = new FakeWebContents(
+        rendererPid,
+        this.operations,
+        this.surface,
+      );
       webContentsHistory.push(this.webContents);
       browserWindows.push(this);
       trace.push("browser-window");
@@ -1060,6 +1124,7 @@ function createStartupHarness(options: {
       loadedUrls.push(url);
       this.webContents.loadedUrl = url;
       this.operations.push(`load:${url}`);
+      surfaceOperations.push(`${this.surface}:load`);
     }
 
     public close(): void {
@@ -1081,11 +1146,13 @@ function createStartupHarness(options: {
     public hide(): void {
       this.visible = false;
       this.operations.push("hide");
+      surfaceOperations.push(`${this.surface}:hide`);
     }
 
     public show(): void {
       this.visible = true;
       this.operations.push("show");
+      surfaceOperations.push(`${this.surface}:show`);
     }
 
     public isVisible(): boolean {
@@ -1108,6 +1175,40 @@ function createStartupHarness(options: {
       }
       return super.removeListener(eventName, listener);
     }
+
+    public override on(
+      eventName: string | symbol,
+      listener: (...args: unknown[]) => void,
+    ): this {
+      super.on(eventName, listener);
+      if (
+        eventName === "close" &&
+        options.windowSetupFailure?.surface === this.surface &&
+        options.windowSetupFailure.stage === "close-listener"
+      ) {
+        throw new Error(
+          `injected ${this.surface} close listener setup failure`,
+        );
+      }
+      return this;
+    }
+
+    public override once(
+      eventName: string | symbol,
+      listener: (...args: unknown[]) => void,
+    ): this {
+      super.once(eventName, listener);
+      if (
+        eventName === "closed" &&
+        options.windowSetupFailure?.surface === this.surface &&
+        options.windowSetupFailure.stage === "closed-listener"
+      ) {
+        throw new Error(
+          `injected ${this.surface} closed listener setup failure`,
+        );
+      }
+      return this;
+    }
   }
 
   const valueAfter = (args: readonly string[], flag: string): number => {
@@ -1126,6 +1227,12 @@ function createStartupHarness(options: {
         ) => void,
       ) => {
         ipcListeners.set(channel, listener);
+        if (
+          options.windowSetupFailure?.surface === "narrative" &&
+          options.windowSetupFailure.stage === "ipc"
+        ) {
+          throw new Error("injected narrative IPC setup failure");
+        }
       },
       removeListener: (channel: string) => {
         cleanupAttempts.ipcRemoval += 1;
@@ -1548,6 +1655,7 @@ function createStartupHarness(options: {
     leases,
     agentCommands,
     sent,
+    surfaceOperations,
     sampledPids,
     evidenceAttempts,
     evidenceWrites,
@@ -1791,6 +1899,57 @@ describe("real Task 9 show runtime adapters", () => {
     expect(harness.lastWindowIsDestroyed()).toBe(true);
     expect(harness.cleanupAttempts.windowClose).toBe(1);
   });
+
+  it.each([
+    ["Narrative guard", "narrative", "guard", false],
+    ["Narrative renderer listener", "narrative", "renderer-listener", false],
+    ["Narrative close listener", "narrative", "close-listener", false],
+    ["Narrative closed listener", "narrative", "closed-listener", false],
+    ["Narrative IPC", "narrative", "ipc", false],
+    ["standby guard", "standby", "guard", true],
+    ["standby renderer listener", "standby", "renderer-listener", true],
+    ["standby close listener", "standby", "close-listener", true],
+    ["standby closed listener", "standby", "closed-listener", true],
+  ] as const)(
+    "rolls back every created surface after %s setup throws",
+    async (_caseName, surface, stage, production) => {
+      const harness = createStartupHarness({
+        ...(production
+          ? {
+              displayMapBytes: Buffer.from(
+                `${JSON.stringify(g4ProductionMap())}\n`,
+              ),
+              liveDisplays: [g4Displays[0], g4Displays[1], g4Displays[2]],
+            }
+          : {}),
+        windowSetupFailure: { surface, stage },
+      });
+      const coordinator = harness.adapters.createCoordinator(showCommand("Show"));
+      const dependencies = (
+        coordinator as unknown as {
+          dependencies: ShowRunCoordinatorDependencies;
+        }
+      ).dependencies;
+      await dependencies.validate();
+
+      await expect(
+        dependencies.openSecondary(1, new AbortController().signal),
+      ).rejects.toThrow(`injected ${surface}`);
+
+      expect(harness.browserWindows).toHaveLength(production ? 2 : 1);
+      for (const window of harness.browserWindows) {
+        expect(window.isDestroyed()).toBe(true);
+        expect(window.listenerCount("close")).toBe(0);
+        expect(window.listenerCount("closed")).toBe(0);
+        expect(window.webContents.hasRequestGuard()).toBe(false);
+        expect(window.webContents.listenerCount("will-navigate")).toBe(0);
+        expect(
+          window.webContents.listenerCount("render-process-gone"),
+        ).toBe(0);
+      }
+      expect(harness.ipcListeners).toHaveLength(0);
+    },
+  );
 
   it("retains the same bridge when disconnect registration fails and bounded compensation rejects", async () => {
     const harness = createStartupHarness({
@@ -2209,6 +2368,25 @@ describe("real Task 9 show runtime adapters", () => {
     expect(harness.appListeners).toHaveLength(0);
   });
 
+  it("rejects an oversized schema-2 map before its invalid JSON can be parsed", async () => {
+    const oversizedMap = Buffer.concat([
+      Buffer.from('{"schema":2,"padding":"', "utf8"),
+      Buffer.alloc(64 * 1_024, "a"),
+    ]);
+    const harness = createValidationHarness({
+      displayMapBytes: oversizedMap,
+    });
+
+    await expect(harness.adapters.validate(showCommand())).rejects.toThrow(
+      /display map.*64 KiB/i,
+    );
+
+    expect(harness.trace).not.toContain("display-snapshot");
+    expect(
+      harness.trace.some((event) => event.startsWith("verify-artifact:")),
+    ).toBe(false);
+  });
+
   it("rejects a structurally valid artifact lock whose exact file hash changed", async () => {
     const changedLock = Buffer.from(
       artifactLock
@@ -2476,9 +2654,10 @@ describe("real Task 9 show runtime adapters", () => {
 
     await expect(coordinator.boot()).resolves.toEqual({ ready: true });
 
-    expect(harness.browserWindows).toHaveLength(1);
-    const safeSurface = harness.browserWindows[0]!;
-    expect(safeSurface.options).toMatchObject({
+    expect(harness.browserWindows).toHaveLength(2);
+    const narrative = harness.browserWindows[0]!;
+    const safetyCover = harness.browserWindows[1]!;
+    expect(narrative.options).toMatchObject({
       alwaysOnTop: true,
       x: 0,
       y: 0,
@@ -2489,10 +2668,32 @@ describe("real Task 9 show runtime adapters", () => {
         backgroundThrottling: false,
       },
     });
-    expect(safeSurface.isVisible()).toBe(true);
-    expect(safeSurface.operations).not.toContain("hide");
+    expect(safetyCover.options).toMatchObject({
+      alwaysOnTop: true,
+      show: false,
+      x: 0,
+      y: 0,
+      width: 1920,
+      height: 1080,
+      webPreferences: {
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
+        partition: expect.stringMatching(
+          /^janvim-exhibition-preview-safe-g\d+$/u,
+        ),
+      },
+    });
+    expect(
+      safetyCover.options.webPreferences as Record<string, unknown>,
+    ).not.toHaveProperty("preload");
+    expect(narrative.isVisible()).toBe(true);
+    expect(safetyCover.isVisible()).toBe(false);
+    expect(narrative.operations).not.toContain("hide");
+    expect(safetyCover.operations).not.toContain("hide");
     expect(harness.loadedUrls).toEqual([
       "file:///D:/show/apps/secondary-screen/dist/index.html",
+      "file:///D:/show/show/preview-safe.html",
     ]);
     expect(harness.placement).toEqual({
       pid: 8003,
@@ -2508,26 +2709,34 @@ describe("real Task 9 show runtime adapters", () => {
     ).toBe(true);
     await settlePromises();
 
-    const runningStatus = safeSurface.operations.indexOf(
+    const runningStatus = narrative.operations.indexOf(
       "send:run-status:running",
     );
-    const firstHide = safeSurface.operations.indexOf("hide");
+    const firstHide = narrative.operations.indexOf("hide");
     expect(runningStatus).toBeGreaterThan(-1);
     expect(firstHide).toBeGreaterThan(runningStatus);
-    expect(safeSurface.operations.filter((entry) => entry === "hide")).toHaveLength(1);
-    expect(safeSurface.isVisible()).toBe(false);
-    expect(harness.browserWindows).toHaveLength(1);
+    expect(
+      narrative.operations.filter((entry) => entry === "hide"),
+    ).toHaveLength(1);
+    expect(narrative.isVisible()).toBe(false);
+    expect(safetyCover.isVisible()).toBe(false);
+    expect(harness.browserWindows).toHaveLength(2);
     expect(harness.spawnInvocationCount()).toBe(1);
 
     await coordinator.requestEmergencyStop("sigint");
 
-    const shutdownStatus = safeSurface.operations.indexOf(
-      "send:run-status:shutting-down",
+    const coverShow = harness.surfaceOperations.indexOf(
+      "preview-safety:show",
     );
-    const firstShow = safeSurface.operations.indexOf("show");
-    expect(shutdownStatus).toBeGreaterThan(-1);
-    expect(firstShow).toBeGreaterThan(shutdownStatus);
-    expect(safeSurface.operations.filter((entry) => entry === "show")).toHaveLength(1);
+    const shutdownStatus = harness.surfaceOperations.indexOf(
+      "narrative:send:run-status:shutting-down",
+    );
+    expect(coverShow).toBeGreaterThan(-1);
+    expect(shutdownStatus).toBeGreaterThan(coverShow);
+    expect(narrative.operations).not.toContain("show");
+    expect(safetyCover.operations.filter((entry) => entry === "show")).toHaveLength(1);
+    expect(narrative.isDestroyed()).toBe(true);
+    expect(safetyCover.isDestroyed()).toBe(true);
   });
 
   it("rejects a runtime-core byte change after validation before spawn", async () => {

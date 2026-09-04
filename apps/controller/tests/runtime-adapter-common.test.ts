@@ -342,6 +342,35 @@ describe("local-only secondary web guards", () => {
     expect(on).not.toHaveBeenCalled();
   });
 
+  it("rolls back a request guard whose registration installs and then throws", () => {
+    let requestFilter: { urls: string[] } | null | undefined;
+    const on = vi.fn();
+
+    expect(() =>
+      installLocalOnlyWebGuards({
+        entryUrl: "file:///D:/show/apps/secondary-screen/dist/index.html",
+        webContents: {
+          session: {
+            webRequest: {
+              onBeforeRequest: (filter) => {
+                requestFilter = filter;
+                if (filter !== null) {
+                  throw new Error("request-guard-registration-failed");
+                }
+              },
+            },
+          },
+          on,
+          removeListener: vi.fn(),
+          setWindowOpenHandler: vi.fn(),
+        },
+      }),
+    ).toThrow("request-guard-registration-failed");
+
+    expect(requestFilter).toBeNull();
+    expect(on).not.toHaveBeenCalled();
+  });
+
   it("rolls back the request filter and navigation listener when guard installation fails", () => {
     let requestFilter: { urls: string[] } | null | undefined;
     const navigationListener = vi.fn();

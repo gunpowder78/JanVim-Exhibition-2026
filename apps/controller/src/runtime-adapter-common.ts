@@ -162,27 +162,31 @@ export function installLocalOnlyWebGuards(
   ): void => {
     if (targetUrl !== input.entryUrl) event.preventDefault();
   };
-  webRequest.onBeforeRequest(
-    { urls: [...REMOTE_REQUEST_FILTER.urls] },
-    (_details, callback) => callback({ cancel: true }),
-  );
-  let navigationInstalled = false;
+  let requestRegistrationAttempted = false;
+  let navigationRegistrationAttempted = false;
   try {
+    requestRegistrationAttempted = true;
+    webRequest.onBeforeRequest(
+      { urls: [...REMOTE_REQUEST_FILTER.urls] },
+      (_details, callback) => callback({ cancel: true }),
+    );
+    navigationRegistrationAttempted = true;
     input.webContents.on("will-navigate", navigationListener);
-    navigationInstalled = true;
     input.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
   } catch (error) {
-    if (navigationInstalled) {
+    if (navigationRegistrationAttempted) {
       try {
         input.webContents.removeListener("will-navigate", navigationListener);
       } catch {
         // Preserve the installation failure after attempting both cleanup steps.
       }
     }
-    try {
-      webRequest.onBeforeRequest(null);
-    } catch {
-      // Preserve the installation failure after attempting both cleanup steps.
+    if (requestRegistrationAttempted) {
+      try {
+        webRequest.onBeforeRequest(null);
+      } catch {
+        // Preserve the installation failure after attempting both cleanup steps.
+      }
     }
     throw error;
   }

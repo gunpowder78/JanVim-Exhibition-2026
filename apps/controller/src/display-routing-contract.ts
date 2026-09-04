@@ -301,6 +301,10 @@ export function parseDisplayMap(bytes: Uint8Array): DisplayMapV2 {
   return deepFreeze(displayMapV2Schema.parse(value)) as DisplayMapV2;
 }
 
+export function assertDisplayMapBytesWithinLimit(bytes: Uint8Array): void {
+  assertBoundedBytes(bytes, MAP_MAX_BYTES, "display map", "64 KiB");
+}
+
 export function hashDisplayGeometryV2(display: DisplayGeometryV2): string {
   return hashCanonical([
     String(display.displayId),
@@ -379,12 +383,7 @@ function parseBoundedJson(
   label: string,
   displayLimit: string,
 ): unknown {
-  if (!(bytes instanceof Uint8Array)) {
-    throw new TypeError(`${label} must be supplied as Uint8Array bytes`);
-  }
-  if (bytes.byteLength > maxBytes) {
-    throw new Error(`${label} exceeds the ${displayLimit} limit`);
-  }
+  assertBoundedBytes(bytes, maxBytes, label, displayLimit);
 
   let text: string;
   try {
@@ -393,6 +392,20 @@ function parseBoundedJson(
     throw new Error(`${label} must contain valid UTF-8`);
   }
   return JSON.parse(text) as unknown;
+}
+
+function assertBoundedBytes(
+  bytes: Uint8Array,
+  maxBytes: number,
+  label: string,
+  displayLimit: string,
+): void {
+  if (!(bytes instanceof Uint8Array)) {
+    throw new TypeError(`${label} must be supplied as Uint8Array bytes`);
+  }
+  if (bytes.byteLength > maxBytes) {
+    throw new Error(`${label} exceeds the ${displayLimit} limit`);
+  }
 }
 
 function isCanonicalUtcTimestamp(value: string): boolean {

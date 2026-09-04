@@ -169,7 +169,16 @@ export function bindLocalRendererEvents(
       // Invalid or unknown renderer events fail closed in Electron main.
     }
   };
-  ipcMain.on(RENDERER_EVENT_CHANNEL, listener);
+  try {
+    ipcMain.on(RENDERER_EVENT_CHANNEL, listener);
+  } catch (error) {
+    try {
+      ipcMain.removeListener(RENDERER_EVENT_CHANNEL, listener);
+    } catch {
+      // Preserve the registration failure after attempting rollback.
+    }
+    throw error;
+  }
 
   let bound = true;
   return () => {

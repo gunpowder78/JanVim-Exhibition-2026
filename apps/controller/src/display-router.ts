@@ -176,6 +176,7 @@ export interface FullscreenWindowPlanOptions {
   partition?: string;
   alwaysOnTop?: boolean;
   backgroundThrottling?: boolean;
+  show?: boolean;
 }
 
 export interface FullscreenWindowPlan {
@@ -188,6 +189,7 @@ export interface FullscreenWindowPlan {
     width: number;
     height: number;
     alwaysOnTop?: boolean;
+    show?: boolean;
     webPreferences: {
       contextIsolation: true;
       nodeIntegration: false;
@@ -328,6 +330,7 @@ export function createFullscreenWindowPlan(
       ...(options.alwaysOnTop === undefined
         ? {}
         : { alwaysOnTop: options.alwaysOnTop }),
+      ...(options.show === undefined ? {} : { show: options.show }),
       webPreferences: {
         contextIsolation: true,
         nodeIntegration: false,

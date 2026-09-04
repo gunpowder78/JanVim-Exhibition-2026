@@ -47,6 +47,7 @@ import {
   type ResolvedDisplayRoute,
 } from "./display-router.js";
 import {
+  assertDisplayMapBytesWithinLimit,
   parseDisplayLayout,
   parseDisplayMap,
   type DisplayMapV2,
@@ -124,6 +125,7 @@ import {
 import {
   ShowSurfaceGroup,
   type ShowNarrativeSurface,
+  type ShowPreviewSafetySurface,
   type ShowSurfaceGroupChild,
 } from "./show-surface-group.js";
 import { placeJanVimWindow, type WindowPlacementReceipt } from "./window-placer.js";
@@ -381,6 +383,7 @@ function createCoordinator(
         route: current.displayRoute,
         narrativeEntryUrl: fixedEntryUrl(host.repositoryRoot),
         standbyEntryUrl: pathToFileURL(paths.jianshanStandby).href,
+        previewSafetyEntryUrl: pathToFileURL(paths.previewSafe).href,
         preloadPath: resolveBelowRoot(
           host.repositoryRoot,
           "apps\\controller\\dist\\preload\\preload.cjs",
@@ -641,6 +644,7 @@ async function validateShowInputs(
     throw new Error("poem-hash-mismatch");
   }
   const displayMapBytes = file("display-map");
+  assertDisplayMapBytesWithinLimit(displayMapBytes);
   const untypedDisplayMap = JSON.parse(
     displayMapBytes.toString("utf8"),
   ) as unknown;
@@ -1029,6 +1033,10 @@ function showRuntimePaths(repositoryRoot: string, rehearsalRoot: string) {
       repositoryRoot,
       "show\\jianshan-standby.html",
     ),
+    previewSafe: resolveBelowRoot(
+      repositoryRoot,
+      "show\\preview-safe.html",
+    ),
     windowPlacementScript: resolveBelowRoot(
       repositoryRoot,
       "scripts\\place-janvim-window.ps1",
@@ -1343,6 +1351,7 @@ async function openShowSurfaceGroup(input: {
   route: Extract<ResolvedDisplayRoute, { state: "mapped" }>;
   narrativeEntryUrl: string;
   standbyEntryUrl: string;
+  previewSafetyEntryUrl: string;
   preloadPath: string;
   logger: RuntimeLogger;
   lifecycle: EmergencyLifecycleHub;
@@ -1359,6 +1368,7 @@ async function openShowSurfaceGroup(input: {
     previewVisibility,
   });
   let standby: ShowSurfaceGroupChild | undefined;
+  let previewSafety: ShowPreviewSafetySurface | undefined;
   try {
     if (input.route.mode === "production-3") {
       standby = await openShowStandby({
@@ -1370,13 +1380,23 @@ async function openShowSurfaceGroup(input: {
         lifecycle: input.lifecycle,
       });
     }
+    if (previewVisibility) {
+      previewSafety = await openShowPreviewSafety({
+        host: input.host,
+        generationId: input.generationId,
+        signal: input.signal,
+        display: narrativeDisplay,
+        entryUrl: input.previewSafetyEntryUrl,
+        lifecycle: input.lifecycle,
+      });
+    }
     return new ShowSurfaceGroup({
       narrative,
       ...(standby === undefined ? {} : { standby }),
-      previewVisibility,
+      ...(previewSafety === undefined ? {} : { previewSafety }),
     });
   } catch (error) {
-    const children = [narrative, standby].filter(
+    const children = [narrative, standby, previewSafety].filter(
       (child): child is ShowSurfaceGroupChild => child !== undefined,
     );
     for (const child of children) {
@@ -1417,76 +1437,23 @@ async function openShowNarrative(input: {
   const window = new input.host.source.BrowserWindow(
     plan.browserWindowOptions as unknown as Record<string, unknown>,
   ) as unknown as ShowBrowserWindowAdapter;
-  const disposeGuards = installLocalOnlyWebGuards({
-    webContents: window.webContents,
-    entryUrl: input.entryUrl,
-  });
   const eventListeners = new Set<(event: RendererToControllerEvent) => void>();
-  const destruction = new LatchedDestruction();
-  let intentionalClose = false;
-  const onRendererGone = (): void => {
-    if (!intentionalClose) destruction.observe();
-  };
-  window.webContents.on("render-process-gone", onRendererGone);
-  const onWindowClose = (): void => {
-    if (!intentionalClose) input.lifecycle.notifyWindowClose();
-  };
-  const closeEvents = window as unknown as {
-    on(event: "close", listener: () => void): void;
-    removeListener(event: "close", listener: () => void): void;
-  };
-  closeEvents.on("close", onWindowClose);
-  const disposeIpc = bindLocalRendererEvents(
-    input.host.source.ipcMain,
-    input.entryUrl,
-    (event) => {
-      for (const listener of [...eventListeners]) listener(event);
-    },
-    window.webContents,
-  );
-  let disposed = false;
-  const dispose = (intentional = true): void => {
-    if (disposed) return;
-    disposed = true;
-    if (intentional) {
-      intentionalClose = true;
-      destruction.cancel();
-    }
-    let cleanupError: unknown;
-    let hasCleanupError = false;
-    const cleanupActions: readonly (() => void)[] = [
-      () => closeEvents.removeListener("close", onWindowClose),
-      () => window.webContents.removeListener("render-process-gone", onRendererGone),
-      disposeIpc,
-      disposeGuards,
-      () => {
-        eventListeners.clear();
-      },
-      () => {
-        if (!window.isDestroyed()) window.close();
-      },
-    ];
-    for (const action of cleanupActions) {
-      try {
-        action();
-      } catch (error) {
-        if (!hasCleanupError) {
-          cleanupError = error;
-          hasCleanupError = true;
-        }
-      }
-    }
-    if (hasCleanupError) throw cleanupError;
-  };
-  const onClosed = (): void => {
-    if (!intentionalClose) destruction.observe();
-    try {
-      dispose(false);
-    } catch {
-      // A closed surface cannot retain guards even if one host cleanup hook fails.
-    }
-  };
-  window.once("closed", onClosed);
+  const resources = installShowWindowResources({
+    window,
+    entryUrl: input.entryUrl,
+    lifecycle: input.lifecycle,
+    bindIpc: () =>
+      bindLocalRendererEvents(
+        input.host.source.ipcMain,
+        input.entryUrl,
+        (event) => {
+          for (const listener of [...eventListeners]) listener(event);
+        },
+        window.webContents,
+      ),
+    onDispose: () => eventListeners.clear(),
+  });
+  const { destruction } = resources;
 
   let rendererPid: number;
   let rendererStartedAtUtc: string;
@@ -1512,13 +1479,7 @@ async function openShowNarrative(input: {
       throw new Error("secondary-renderer-pid-changed-during-identity-inspection");
     }
   } catch (error) {
-    try {
-      dispose();
-    } catch {
-      // Preserve the original load/abort classification.
-    }
-    if (!window.isDestroyed()) window.destroy();
-    throw error;
+    rollbackCreatedWindow(window, resources.dispose, error);
   }
 
   input.logger.writeJson("controller", {
@@ -1545,7 +1506,7 @@ async function openShowNarrative(input: {
       return destruction.subscribe(listener);
     },
     close: () => {
-      dispose();
+      resources.dispose();
     },
     diagnostics: () => ({
       listeners: eventListeners.size + destruction.listenerCount,
@@ -1567,33 +1528,123 @@ async function openShowStandby(input: {
   entryUrl: string;
   lifecycle: EmergencyLifecycleHub;
 }): Promise<ShowSurfaceGroupChild> {
-  if (input.signal.aborted) throw new Error("standby-open-aborted");
   const plan = createFullscreenWindowPlan(input.display.bounds, input.entryUrl, {
-    partition: standbyPartition(input.generationId),
+    partition: surfacePartition("jianshan", input.generationId),
   });
-  const window = new input.host.source.BrowserWindow(
-    plan.browserWindowOptions as unknown as Record<string, unknown>,
-  ) as unknown as ShowBrowserWindowAdapter;
-  const disposeGuards = installLocalOnlyWebGuards({
-    webContents: window.webContents,
+  return openShowStaticSurface({
+    host: input.host,
+    signal: input.signal,
     entryUrl: input.entryUrl,
+    lifecycle: input.lifecycle,
+    kind: "standby",
+    browserWindowOptions:
+      plan.browserWindowOptions as unknown as Record<string, unknown>,
   });
-  const destruction = new LatchedDestruction();
-  let intentionalClose = false;
-  const onRendererGone = (): void => {
-    if (!intentionalClose) destruction.observe();
+}
+
+async function openShowPreviewSafety(input: {
+  host: NormalizedShowHost;
+  generationId: number;
+  signal: AbortSignal;
+  display: ShowRuntimeDisplay;
+  entryUrl: string;
+  lifecycle: EmergencyLifecycleHub;
+}): Promise<ShowPreviewSafetySurface> {
+  const plan = createFullscreenWindowPlan(input.display.bounds, input.entryUrl, {
+    partition: surfacePartition("preview-safe", input.generationId),
+    alwaysOnTop: true,
+    show: false,
+  });
+  return openShowStaticSurface({
+    host: input.host,
+    signal: input.signal,
+    entryUrl: input.entryUrl,
+    lifecycle: input.lifecycle,
+    kind: "preview-safety",
+    browserWindowOptions:
+      plan.browserWindowOptions as unknown as Record<string, unknown>,
+  });
+}
+
+async function openShowStaticSurface(input: {
+  host: NormalizedShowHost;
+  signal: AbortSignal;
+  entryUrl: string;
+  lifecycle: EmergencyLifecycleHub;
+  kind: "standby" | "preview-safety";
+  browserWindowOptions: Record<string, unknown>;
+}): Promise<ShowPreviewSafetySurface> {
+  if (input.signal.aborted) throw new Error(`${input.kind}-open-aborted`);
+  const window = new input.host.source.BrowserWindow(
+    input.browserWindowOptions,
+  ) as unknown as ShowBrowserWindowAdapter;
+  const resources = installShowWindowResources({
+    window,
+    entryUrl: input.entryUrl,
+    lifecycle: input.lifecycle,
+  });
+
+  try {
+    await input.host.runWithDeadline(15_000, () => window.loadURL(input.entryUrl));
+    if (input.signal.aborted) throw new Error(`${input.kind}-open-aborted`);
+    if (resources.destruction.observed || window.isDestroyed()) {
+      throw new Error(`${input.kind}-renderer-lost-during-open`);
+    }
+  } catch (error) {
+    rollbackCreatedWindow(window, resources.dispose, error);
+  }
+
+  return {
+    onDestroyed: (listener) => resources.destruction.subscribe(listener),
+    close: () => resources.dispose(),
+    diagnostics: () => ({ listeners: resources.destruction.listenerCount }),
+    hide: () => {
+      if (!window.isDestroyed()) window.hide();
+    },
+    show: () => {
+      if (!window.isDestroyed()) window.show();
+    },
   };
-  window.webContents.on("render-process-gone", onRendererGone);
+}
+
+function installShowWindowResources(input: {
+  window: ShowBrowserWindowAdapter;
+  entryUrl: string;
+  lifecycle: EmergencyLifecycleHub;
+  bindIpc?: () => () => void;
+  onDispose?: () => void;
+}): {
+  destruction: LatchedDestruction;
+  dispose(intentional?: boolean): void;
+} {
+  const { window } = input;
+  const destruction = new LatchedDestruction();
   const closeEvents = window as unknown as {
     on(event: "close", listener: () => void): void;
     removeListener(event: "close", listener: () => void): void;
   };
+  let intentionalClose = false;
+  let disposed = false;
+  let disposeGuards: (() => void) | undefined;
+  let disposeIpc: (() => void) | undefined;
+  let rendererListenerAttempted = false;
+  let closeListenerAttempted = false;
+  let closedListenerAttempted = false;
+
+  const onRendererGone = (): void => {
+    if (!intentionalClose) destruction.observe();
+  };
   const onWindowClose = (): void => {
     if (!intentionalClose) input.lifecycle.notifyWindowClose();
   };
-  closeEvents.on("close", onWindowClose);
-
-  let disposed = false;
+  const onClosed = (): void => {
+    if (!intentionalClose) destruction.observe();
+    try {
+      dispose(false);
+    } catch {
+      // A closed surface cannot retain resources after host cleanup failure.
+    }
+  };
   const dispose = (intentional = true): void => {
     if (disposed) return;
     disposed = true;
@@ -1601,50 +1652,68 @@ async function openShowStandby(input: {
       intentionalClose = true;
       destruction.cancel();
     }
-    const result = runCleanupActions([
-      () => closeEvents.removeListener("close", onWindowClose),
-      () =>
+    const actions: Array<() => void> = [];
+    if (closedListenerAttempted) {
+      actions.push(() => window.removeListener("closed", onClosed));
+    }
+    if (closeListenerAttempted) {
+      actions.push(() => closeEvents.removeListener("close", onWindowClose));
+    }
+    if (rendererListenerAttempted) {
+      actions.push(() =>
         window.webContents.removeListener(
           "render-process-gone",
           onRendererGone,
         ),
-      disposeGuards,
-      () => {
-        if (!window.isDestroyed()) window.close();
-      },
-    ]);
+      );
+    }
+    if (disposeIpc !== undefined) actions.push(disposeIpc);
+    if (disposeGuards !== undefined) actions.push(disposeGuards);
+    if (input.onDispose !== undefined) actions.push(input.onDispose);
+    actions.push(() => {
+      if (!window.isDestroyed()) window.close();
+    });
+    const result = runCleanupActions(actions);
     if (result.threw) throw result.error;
   };
-  window.once("closed", () => {
-    if (!intentionalClose) destruction.observe();
-    try {
-      dispose(false);
-    } catch {
-      // A closed standby cannot retain guards after host cleanup failure.
-    }
-  });
 
   try {
-    await input.host.runWithDeadline(15_000, () => window.loadURL(input.entryUrl));
-    if (input.signal.aborted) throw new Error("standby-open-aborted");
-    if (destruction.observed || window.isDestroyed()) {
-      throw new Error("standby-renderer-lost-during-open");
-    }
+    disposeGuards = installLocalOnlyWebGuards({
+      webContents: window.webContents,
+      entryUrl: input.entryUrl,
+    });
+    rendererListenerAttempted = true;
+    window.webContents.on("render-process-gone", onRendererGone);
+    closeListenerAttempted = true;
+    closeEvents.on("close", onWindowClose);
+    disposeIpc = input.bindIpc?.();
+    closedListenerAttempted = true;
+    window.once("closed", onClosed);
   } catch (error) {
-    try {
-      dispose();
-    } catch {
-      // Preserve the original standby load/abort classification.
-    }
-    if (!window.isDestroyed()) window.destroy();
-    throw error;
+    rollbackCreatedWindow(window, dispose, error);
   }
 
-  return {
-    onDestroyed: (listener) => destruction.subscribe(listener),
-    close: () => dispose(),
-    diagnostics: () => ({ listeners: destruction.listenerCount }),
-  };
+  return { destruction, dispose };
+}
+
+function rollbackCreatedWindow(
+  window: ShowBrowserWindowAdapter,
+  dispose: () => void,
+  error: unknown,
+): never {
+  try {
+    dispose();
+  } catch {
+    // Preserve the setup/load failure after attempting every staged cleanup.
+  }
+  if (!window.isDestroyed()) {
+    try {
+      window.destroy();
+    } catch {
+      // Preserve the setup/load failure after a final forced-close attempt.
+    }
+  }
+  throw error;
 }
 
 class LatchedDestruction {
@@ -1720,11 +1789,14 @@ function runCleanupActions(actions: readonly (() => void)[]): {
   return threw ? { threw: true, error: firstError } : { threw: false };
 }
 
-function standbyPartition(generationId: number): string {
+function surfacePartition(
+  surface: "jianshan" | "preview-safe",
+  generationId: number,
+): string {
   if (!Number.isSafeInteger(generationId) || generationId <= 0) {
-    throw new Error("Standby generation is invalid");
+    throw new Error("Show surface generation is invalid");
   }
-  return `janvim-exhibition-jianshan-g${generationId}`;
+  return `janvim-exhibition-${surface}-g${generationId}`;
 }
 
 function requireDisplayRole(

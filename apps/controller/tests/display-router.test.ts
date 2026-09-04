@@ -201,6 +201,15 @@ describe("display router", () => {
         backgroundThrottling: false,
       },
     );
+    const previewCover = createFullscreenWindowPlan(
+      primaryGeometry.bounds,
+      "file:///show/preview-safe.html",
+      {
+        partition: "janvim-exhibition-preview-safe-g1",
+        alwaysOnTop: true,
+        show: false,
+      },
+    );
     const legacy = createSecondaryWindowPlan(
       secondaryGeometry.bounds,
       "D:\\show\\preload.cjs",
@@ -231,6 +240,16 @@ describe("display router", () => {
         backgroundThrottling: false,
       },
     });
+    expect(previewCover.browserWindowOptions).toMatchObject({
+      alwaysOnTop: true,
+      show: false,
+      webPreferences: {
+        partition: "janvim-exhibition-preview-safe-g1",
+      },
+    });
+    expect(
+      previewCover.browserWindowOptions.webPreferences,
+    ).not.toHaveProperty("preload");
     expect(legacy.browserWindowOptions).toEqual({
       frame: false,
       fullscreen: true,
