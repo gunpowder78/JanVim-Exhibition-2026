@@ -1,7 +1,14 @@
 import { resolve } from "node:path";
 
-import { app, BrowserWindow, ipcMain, screen } from "electron";
+import { app, BrowserWindow, ipcMain, screen, session } from "electron";
 
+import { parseDisplayConfigCommand } from "./display-config-command.js";
+import {
+  runDisplayConfigurator,
+  type DisplayConfigBrowserWindowConstructor,
+  type DisplayConfigIpcMainAdapter,
+  type DisplayConfigSessionAdapter,
+} from "./display-configurator.js";
 import { parseG2Command } from "./g2-command.js";
 import { runElectronCommand } from "./electron-command.js";
 import { runElectronLifecycle } from "./electron-lifecycle.js";
@@ -27,6 +34,22 @@ void runElectronLifecycle(
       const repositoryRoot = resolve(app.getAppPath(), "..", "..");
       const argv = process.argv.slice(2);
       const family = selectElectronCommandFamily(argv);
+      if (family === "display-config") {
+        return await runDisplayConfigurator(
+          parseDisplayConfigCommand(argv, repositoryRoot),
+          {
+            repositoryRoot,
+            BrowserWindow:
+              BrowserWindow as unknown as DisplayConfigBrowserWindowConstructor,
+            ipcMain: ipcMain as unknown as DisplayConfigIpcMainAdapter,
+            screen,
+            fromPartition: (partition) =>
+              session.fromPartition(
+                partition,
+              ) as unknown as DisplayConfigSessionAdapter,
+          },
+        );
+      }
       if (family === "g2") {
         const command = parseG2Command(argv, repositoryRoot);
         return await runElectronCommand(

@@ -9,6 +9,6 @@
   },
   "main": "dist/main/electron-main.js",
   "scripts": {
-    "build": "tsc -b && vite build --config vite.main.config.ts && vite build --config vite.preload.config.ts"
+    "build": "tsc -b && vite build --config vite.main.config.ts && vite build --config vite.preload.config.ts && vite build --config vite.display-config-preload.config.ts"
   }
 }

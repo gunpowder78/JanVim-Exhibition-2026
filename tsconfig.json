@@ -3,7 +3,8 @@
   "references": [
     { "path": "packages/show-schema" },
     { "path": "apps/controller" },
-    { "path": "apps/secondary-screen" }
+    { "path": "apps/secondary-screen" },
+    { "path": "apps/display-configurator" }
   ],
   "compilerOptions": {
     "composite": true,

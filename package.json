@@ -10,7 +10,7 @@
     "packages/*"
   ],
   "scripts": {
-    "build": "tsc -b && vite build --config apps/controller/vite.main.config.ts && vite build --config apps/controller/vite.preload.config.ts && vite build --config apps/secondary-screen/vite.config.ts && node scripts/verify-electron-module-graph.mjs",
+    "build": "tsc -b && vite build --config apps/controller/vite.main.config.ts && vite build --config apps/controller/vite.preload.config.ts && vite build --config apps/controller/vite.display-config-preload.config.ts && vite build --config apps/secondary-screen/vite.config.ts && vite build --config apps/display-configurator/vite.config.ts && node scripts/verify-electron-module-graph.mjs",
     "test": "vitest run --exclude \"**/dist/**\"",
     "lint": "eslint . --max-warnings 0",
     "typecheck": "tsc -b --pretty false"

@@ -35,14 +35,23 @@ function replaceFlag(arguments_: string[], name: string, value: string): string[
 }
 
 describe("Task 9 show command parser", () => {
-  it("selects exactly one explicit G2 or Task 9 command family", () => {
+  it("selects exactly one explicit G2, Task 9, or display-config command family", () => {
     expect(selectElectronCommandFamily(["--g2-mode=run"])).toBe("g2");
     expect(selectElectronCommandFamily(["--show-mode=soak3"])).toBe("show");
+    expect(
+      selectElectronCommandFamily(["--display-config-mode=configure"]),
+    ).toBe("display-config");
     expect(() => selectElectronCommandFamily([])).toThrow(/exactly one|mode/i);
     expect(() =>
       selectElectronCommandFamily([
         "--g2-mode=run",
         "--show-mode=soak3",
+      ]),
+    ).toThrow(/mixed|exactly one|mode/i);
+    expect(() =>
+      selectElectronCommandFamily([
+        "--show-mode=soak3",
+        "--display-config-mode=configure",
       ]),
     ).toThrow(/mixed|exactly one|mode/i);
   });

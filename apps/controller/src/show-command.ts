@@ -31,15 +31,27 @@ const KNOWN_FLAGS = new Set([
 
 export function selectElectronCommandFamily(
   argv: readonly string[],
-): "g2" | "show" {
-  const hasG2Mode = argv.some((argument) => argument.startsWith("--g2-mode="));
-  const hasShowMode = argv.some((argument) =>
-    argument.startsWith("--show-mode="),
-  );
-  if (hasG2Mode === hasShowMode) {
-    throw new Error("Electron command requires exactly one G2 or show mode family");
+): "g2" | "show" | "display-config" {
+  const families = [
+    {
+      family: "g2" as const,
+      present: argv.some((argument) => argument.startsWith("--g2-mode=")),
+    },
+    {
+      family: "show" as const,
+      present: argv.some((argument) => argument.startsWith("--show-mode=")),
+    },
+    {
+      family: "display-config" as const,
+      present: argv.some((argument) =>
+        argument.startsWith("--display-config-mode="),
+      ),
+    },
+  ].filter(({ present }) => present);
+  if (families.length !== 1) {
+    throw new Error("Electron command requires exactly one mode family");
   }
-  return hasG2Mode ? "g2" : "show";
+  return families[0]!.family;
 }
 
 export function parseShowCommand(
