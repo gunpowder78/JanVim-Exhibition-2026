@@ -163,6 +163,9 @@ function createAdapterHarness(
     | undefined;
   let evidenceRecord: unknown;
   const sentRendererEvents: Array<{ channel: string; payload: unknown }> = [];
+  const browserWindowOptions: unknown[] = [];
+  let browserWindowHideCount = 0;
+  let browserWindowShowCount = 0;
 
   class FakeWebContents extends EventEmitter {
     public readonly session = {
@@ -207,6 +210,7 @@ function createAdapterHarness(
 
     public constructor(public readonly options: unknown) {
       super();
+      browserWindowOptions.push(options);
     }
 
     public async loadURL(url: string): Promise<void> {
@@ -225,6 +229,14 @@ function createAdapterHarness(
 
     public isDestroyed(): boolean {
       return this.destroyed;
+    }
+
+    public hide(): void {
+      browserWindowHideCount += 1;
+    }
+
+    public show(): void {
+      browserWindowShowCount += 1;
     }
   }
 
@@ -417,6 +429,15 @@ function createAdapterHarness(
     get sentRendererEvents() {
       return sentRendererEvents;
     },
+    get browserWindowOptions() {
+      return browserWindowOptions;
+    },
+    get browserWindowHideCount() {
+      return browserWindowHideCount;
+    },
+    get browserWindowShowCount() {
+      return browserWindowShowCount;
+    },
     get confirmedMapSha256() {
       return createHash("sha256")
         .update(files.get(displayMapPath)!)
@@ -574,6 +595,25 @@ describe("real G2 runtime adapter boundaries", () => {
     expect(
       harness.dispatchNavigation("file:///D:/show/apps/secondary-screen/dist/index.html"),
     ).toBe(0);
+    expect(harness.browserWindowOptions).toEqual([
+      {
+        frame: false,
+        fullscreen: true,
+        autoHideMenuBar: true,
+        x: 1920,
+        y: 0,
+        width: 1920,
+        height: 1080,
+        webPreferences: {
+          contextIsolation: true,
+          nodeIntegration: false,
+          sandbox: true,
+          preload: "D:\\show\\apps\\controller\\dist\\preload\\preload.cjs",
+        },
+      },
+    ]);
+    expect(harness.browserWindowHideCount).toBe(0);
+    expect(harness.browserWindowShowCount).toBe(0);
   });
 
   it("classifies the bounded child streams from the observed process output", async () => {

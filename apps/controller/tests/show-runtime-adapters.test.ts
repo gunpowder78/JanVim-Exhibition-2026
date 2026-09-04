@@ -52,6 +52,9 @@ const pluginLabInit = readFileSync(
     "init.lua",
   ),
 );
+const displayLayout = readFileSync(
+  join(fixtureRoot, "show", "display-layout.json"),
+);
 const janVimCore = readFileSync(
   join(fixtureRoot, "runtime", "janvim", "janvim-core.exe"),
 );
@@ -97,6 +100,101 @@ const displays = [
     rotation: 0,
   },
 ] as const;
+
+const g4Displays = [
+  {
+    id: "display-A",
+    bounds: { x: 0, y: 0, width: 1920, height: 1080 },
+    workArea: { x: 0, y: 0, width: 1920, height: 1040 },
+    scaleFactor: 1,
+    rotation: 0,
+  },
+  {
+    id: "display-B",
+    bounds: { x: 1920, y: 0, width: 1920, height: 1080 },
+    workArea: { x: 1920, y: 0, width: 1920, height: 1040 },
+    scaleFactor: 1.25,
+    rotation: 90,
+  },
+  {
+    id: "display-C",
+    bounds: { x: 3840, y: 0, width: 1920, height: 1080 },
+    workArea: { x: 3840, y: 0, width: 1920, height: 1040 },
+    scaleFactor: 1,
+    rotation: 180,
+  },
+] as const;
+
+function g4ProductionMap() {
+  return {
+    schema: 2,
+    mappingStatus: "confirmed",
+    mode: "production-3",
+    layoutSha256: createHash("sha256").update(displayLayout).digest("hex"),
+    capturedAtUtc: "2026-09-04T00:00:00.000Z",
+    topologySha256:
+      "b7145669274cfe19a1276b972e97e488b52a12f252c0275846124c5f98024d65",
+    bindings: [
+      {
+        softId: "SCREEN-1",
+        displayId: "display-A",
+        label: "Projector A",
+        bounds: { x: 0, y: 0, width: 1920, height: 1080 },
+        workingArea: { x: 0, y: 0, width: 1920, height: 1040 },
+        scaleFactor: 1,
+        rotation: 0,
+        geometrySha256:
+          "07b21d0e2485470a1cfd693c6f6e1ced4f444dc02a3a663c67133e72322bff9d",
+      },
+      {
+        softId: "SCREEN-2",
+        displayId: "display-B",
+        label: "Projector B",
+        bounds: { x: 1920, y: 0, width: 1920, height: 1080 },
+        workingArea: { x: 1920, y: 0, width: 1920, height: 1040 },
+        scaleFactor: 1.25,
+        rotation: 90,
+        geometrySha256:
+          "6041ec2eaf12d60e78e71f29a284800bdebe421f9c2ac9132e0ff43f9e60027a",
+      },
+      {
+        softId: "SCREEN-3",
+        displayId: "display-C",
+        label: "Projector C",
+        bounds: { x: 3840, y: 0, width: 1920, height: 1080 },
+        workingArea: { x: 3840, y: 0, width: 1920, height: 1040 },
+        scaleFactor: 1,
+        rotation: 180,
+        geometrySha256:
+          "8ff9b6687b7700b4690ff4682839e1e3a35d1ba4956f9ffb21fc6a2bf9c77771",
+      },
+    ],
+    unassignedDisplays: [
+      {
+        displayId: "display-Z",
+        label: "Operator monitor",
+        bounds: { x: 5760, y: 0, width: 1280, height: 720 },
+        workingArea: { x: 5760, y: 0, width: 1280, height: 680 },
+        scaleFactor: 1.5,
+        rotation: 270,
+        geometrySha256:
+          "1dde2c34dd561649aa6eed60d66ef81e6e4c55ffa2c6243ee5c82a4ea4ce02d4",
+      },
+    ],
+  } as const;
+}
+
+function g4PreviewMap() {
+  const production = g4ProductionMap();
+  return {
+    ...production,
+    mode: "single-display-preview",
+    topologySha256:
+      "0b67716859be735322d7f4b5a788e369b8c15753cd0b345b1c6bfc1fce02eb6a",
+    bindings: [production.bindings[0]],
+    unassignedDisplays: [],
+  } as const;
+}
 
 class MemoryLogStorage implements LogStorage {
   public readonly files = new Map<string, string>();
@@ -593,6 +691,8 @@ function createValidationHarness(options: {
 function createStartupHarness(options: {
   logStorage?: MemoryLogStorage;
   artifactLockBytes?: Buffer;
+  displayMapBytes?: Buffer;
+  liveDisplays?: readonly unknown[];
   closeChildOnWindowClose?: boolean;
   processStartTimes?: readonly string[];
   failAwaitAgent?: boolean;
@@ -679,7 +779,15 @@ function createStartupHarness(options: {
       ),
       pluginLabInit,
     ],
-    [displayMapPath, Buffer.from(`${JSON.stringify(confirmedMap)}\n`, "utf8")],
+    [
+      win32.join(repositoryRoot, "show", "display-layout.json"),
+      displayLayout,
+    ],
+    [
+      displayMapPath,
+      options.displayMapBytes ??
+        Buffer.from(`${JSON.stringify(confirmedMap)}\n`, "utf8"),
+    ],
     [
       win32.join(repositoryRoot, "runtime", "janvim", "janvim-core.exe"),
       Buffer.from(janVimCore),
@@ -764,6 +872,8 @@ function createStartupHarness(options: {
   };
   let browserOptions: Record<string, unknown> | undefined;
   let loadedUrl: string | undefined;
+  const browserOptionsHistory: Record<string, unknown>[] = [];
+  const loadedUrls: string[] = [];
   let spawnCall:
     | {
         file: string;
@@ -804,7 +914,12 @@ function createStartupHarness(options: {
   const pendingResetPresentationAcks: Array<() => void> = [];
 
   class FakeWebContents extends EventEmitter {
-    public constructor(private rendererPid: number) {
+    public loadedUrl: string | undefined;
+
+    public constructor(
+      private rendererPid: number,
+      private readonly operations: string[],
+    ) {
       super();
       pendingRendererIdentityPids.add(rendererPid);
     }
@@ -830,6 +945,12 @@ function createStartupHarness(options: {
     };
     public readonly send = vi.fn((channel: string, payload: unknown) => {
       sent.push({ channel, payload });
+      const event = payload as { type?: unknown; state?: unknown };
+      this.operations.push(
+        event.type === "run-status"
+          ? `send:run-status:${String(event.state)}`
+          : `send:${String(event.type ?? "cue")}`,
+      );
       if (
         payload !== null &&
         typeof payload === "object" &&
@@ -850,7 +971,7 @@ function createStartupHarness(options: {
         const listener = [...ipcListeners.values()][0];
         const acknowledge = (): void => {
           listener?.(
-            { sender: this, senderFrame: { url: loadedUrl! } },
+            { sender: this, senderFrame: { url: this.loadedUrl! } },
             {
               schema: 1,
               type: "presentation-ack",
@@ -905,23 +1026,40 @@ function createStartupHarness(options: {
   }
 
   const webContentsHistory: FakeWebContents[] = [];
+  const browserWindows: FakeBrowserWindow[] = [];
+  let narrativeRendererCount = 0;
+  let standbyRendererCount = 0;
 
   class FakeBrowserWindow extends EventEmitter {
     public readonly webContents: FakeWebContents;
+    public readonly operations: string[] = [];
     private destroyed = false;
+    private visible = true;
 
-    public constructor(options: Record<string, unknown>) {
+    public constructor(public readonly options: Record<string, unknown>) {
       super();
-      this.webContents = new FakeWebContents(8002 + webContentsHistory.length);
+      const preferences = options.webPreferences as
+        | Record<string, unknown>
+        | undefined;
+      const rendererPid =
+        typeof preferences?.preload === "string"
+          ? 8002 + narrativeRendererCount++
+          : 9002 + standbyRendererCount++;
+      this.webContents = new FakeWebContents(rendererPid, this.operations);
       webContentsHistory.push(this.webContents);
+      browserWindows.push(this);
       trace.push("browser-window");
       browserOptions = options;
+      browserOptionsHistory.push(options);
       lastWindow = this;
     }
 
     public async loadURL(url: string): Promise<void> {
       trace.push("load-secondary");
       loadedUrl = url;
+      loadedUrls.push(url);
+      this.webContents.loadedUrl = url;
+      this.operations.push(`load:${url}`);
     }
 
     public close(): void {
@@ -938,6 +1076,20 @@ function createStartupHarness(options: {
 
     public isDestroyed(): boolean {
       return this.destroyed;
+    }
+
+    public hide(): void {
+      this.visible = false;
+      this.operations.push("hide");
+    }
+
+    public show(): void {
+      this.visible = true;
+      this.operations.push("show");
+    }
+
+    public isVisible(): boolean {
+      return this.visible;
     }
 
     public override removeListener(
@@ -990,7 +1142,7 @@ function createStartupHarness(options: {
     screen: {
       getAllDisplays: () => {
         trace.push("display-snapshot");
-        return displays;
+        return options.liveDisplays ?? displays;
       },
     },
     controllerProcess: {
@@ -1407,6 +1559,9 @@ function createStartupHarness(options: {
     child,
     children,
     webContentsHistory,
+    browserWindows,
+    browserOptionsHistory,
+    loadedUrls,
     get browserOptions() {
       return browserOptions;
     },
@@ -2161,6 +2316,12 @@ describe("real Task 9 show runtime adapters", () => {
         preload: "D:\\show\\apps\\controller\\dist\\preload\\preload.cjs",
       },
     });
+    expect(harness.browserWindows).toHaveLength(1);
+    expect(harness.browserOptions).not.toHaveProperty("alwaysOnTop");
+    expect(
+      (harness.browserOptions?.webPreferences as Record<string, unknown>) ?? {},
+    ).not.toHaveProperty("backgroundThrottling");
+    expect(harness.trace.join("\n")).not.toContain("display-layout.json");
     expect(harness.spawnCall).toEqual({
       file: "D:\\show\\runtime\\janvim\\janvim-core.exe",
       args: [
@@ -2235,6 +2396,138 @@ describe("real Task 9 show runtime adapters", () => {
     expect([...harness.logStorage.files.keys()].join("\n")).not.toMatch(
       /generation|g1/i,
     );
+  });
+
+  it("opens the schema-2 Narrative and standby roles as one production surface", async () => {
+    const harness = createStartupHarness({
+      displayMapBytes: Buffer.from(`${JSON.stringify(g4ProductionMap())}\n`),
+      liveDisplays: [g4Displays[2], g4Displays[0], g4Displays[1]],
+    });
+    const coordinator = harness.adapters.createCoordinator(showCommand("Show"));
+
+    await expect(coordinator.boot()).resolves.toEqual({ ready: true });
+
+    expect(harness.browserWindows).toHaveLength(2);
+    const [narrative, standby] = harness.browserWindows;
+    expect(narrative?.options).toMatchObject({
+      x: 1920,
+      y: 0,
+      width: 1920,
+      height: 1080,
+      webPreferences: {
+        preload: "D:\\show\\apps\\controller\\dist\\preload\\preload.cjs",
+      },
+    });
+    expect(standby?.options).toMatchObject({
+      x: 3840,
+      y: 0,
+      width: 1920,
+      height: 1080,
+      webPreferences: {
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
+        partition: expect.stringMatching(/^(?!persist:).{1,128}$/u),
+      },
+    });
+    expect(
+      standby?.options.webPreferences as Record<string, unknown>,
+    ).not.toHaveProperty("preload");
+    expect(harness.loadedUrls).toEqual([
+      "file:///D:/show/apps/secondary-screen/dist/index.html",
+      "file:///D:/show/show/jianshan-standby.html",
+    ]);
+    expect(narrative?.webContents.send).toHaveBeenCalledWith(
+      "janvim-exhibition:show-event",
+      expect.objectContaining({ type: "run-status", state: "ready" }),
+    );
+    expect(standby?.webContents.send).not.toHaveBeenCalled();
+    expect(harness.ipcListeners).toHaveLength(1);
+    expect(narrative?.webContents.listenerCount("render-process-gone")).toBe(1);
+    expect(standby?.webContents.listenerCount("render-process-gone")).toBe(1);
+    expect(harness.placement).toEqual({
+      pid: 8003,
+      bounds: { x: 0, y: 0, width: 1920, height: 1080 },
+    });
+    expect(harness.spawnInvocationCount()).toBe(1);
+
+    expect(
+      coordinator.handleRendererEvent({
+        schema: 1,
+        type: "operator-action",
+        action: "start",
+      }),
+    ).toBe(true);
+    await settlePromises();
+    expect(harness.sampledPids.slice(0, 3)).toEqual([8001, 8002, 8003]);
+    expect(standby?.webContents.send).not.toHaveBeenCalled();
+
+    await coordinator.requestEmergencyStop("sigint");
+    expect(narrative?.isDestroyed()).toBe(true);
+    expect(standby?.isDestroyed()).toBe(true);
+  });
+
+  it("keeps the one-display Start surface above SCREEN-1 until accepted running", async () => {
+    const harness = createStartupHarness({
+      displayMapBytes: Buffer.from(`${JSON.stringify(g4PreviewMap())}\n`),
+      liveDisplays: [g4Displays[0]],
+    });
+    const coordinator = harness.adapters.createCoordinator(showCommand("Show"));
+
+    await expect(coordinator.boot()).resolves.toEqual({ ready: true });
+
+    expect(harness.browserWindows).toHaveLength(1);
+    const safeSurface = harness.browserWindows[0]!;
+    expect(safeSurface.options).toMatchObject({
+      alwaysOnTop: true,
+      x: 0,
+      y: 0,
+      width: 1920,
+      height: 1080,
+      webPreferences: {
+        preload: "D:\\show\\apps\\controller\\dist\\preload\\preload.cjs",
+        backgroundThrottling: false,
+      },
+    });
+    expect(safeSurface.isVisible()).toBe(true);
+    expect(safeSurface.operations).not.toContain("hide");
+    expect(harness.loadedUrls).toEqual([
+      "file:///D:/show/apps/secondary-screen/dist/index.html",
+    ]);
+    expect(harness.placement).toEqual({
+      pid: 8003,
+      bounds: { x: 0, y: 0, width: 1920, height: 1080 },
+    });
+
+    expect(
+      coordinator.handleRendererEvent({
+        schema: 1,
+        type: "operator-action",
+        action: "start",
+      }),
+    ).toBe(true);
+    await settlePromises();
+
+    const runningStatus = safeSurface.operations.indexOf(
+      "send:run-status:running",
+    );
+    const firstHide = safeSurface.operations.indexOf("hide");
+    expect(runningStatus).toBeGreaterThan(-1);
+    expect(firstHide).toBeGreaterThan(runningStatus);
+    expect(safeSurface.operations.filter((entry) => entry === "hide")).toHaveLength(1);
+    expect(safeSurface.isVisible()).toBe(false);
+    expect(harness.browserWindows).toHaveLength(1);
+    expect(harness.spawnInvocationCount()).toBe(1);
+
+    await coordinator.requestEmergencyStop("sigint");
+
+    const shutdownStatus = safeSurface.operations.indexOf(
+      "send:run-status:shutting-down",
+    );
+    const firstShow = safeSurface.operations.indexOf("show");
+    expect(shutdownStatus).toBeGreaterThan(-1);
+    expect(firstShow).toBeGreaterThan(shutdownStatus);
+    expect(safeSurface.operations.filter((entry) => entry === "show")).toHaveLength(1);
   });
 
   it("rejects a runtime-core byte change after validation before spawn", async () => {

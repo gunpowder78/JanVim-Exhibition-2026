@@ -163,6 +163,8 @@ export interface G2BrowserWindowAdapter extends SecondaryBrowserWindowAdapter {
   close(): void;
   destroy(): void;
   isDestroyed(): boolean;
+  hide(): void;
+  show(): void;
 }
 
 export type G2BrowserWindowConstructor = new (

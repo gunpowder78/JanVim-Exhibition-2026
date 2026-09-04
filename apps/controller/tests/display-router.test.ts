@@ -1,12 +1,8 @@
-import { readFileSync } from "node:fs";
-
 import { describe, expect, it } from "vitest";
 
+import type { ShowRuntimeDisplay } from "../src/display-routing-contract.ts";
 import {
-  parseDisplayLayout,
-  type ShowRuntimeDisplay,
-} from "../src/display-routing-contract.ts";
-import {
+  createFullscreenWindowPlan,
   createSecondaryWindowPlan,
   hashDisplayGeometry,
   installSecondaryNavigationGuard,
@@ -86,9 +82,6 @@ describe("display router", () => {
   });
 
   it("normalizes the accepted schema-1 route without changing its legacy behavior", () => {
-    const layout = parseDisplayLayout(
-      readFileSync(new URL("../../../show/display-layout.json", import.meta.url)),
-    );
     const primary: ShowRuntimeDisplay = {
       ...runtimeDisplay(primaryGeometry),
       workingArea: { ...primaryGeometry.bounds },
@@ -100,7 +93,7 @@ describe("display router", () => {
       rotation: 0,
     };
 
-    expect(resolveDisplayRoute([secondary, primary], layout, displayMap())).toMatchObject({
+    expect(resolveDisplayRoute([secondary, primary], undefined, displayMap())).toMatchObject({
       state: "mapped",
       mode: "legacy-dual",
       roles: { "SCREEN-1": primary, "SCREEN-2": secondary },
@@ -192,6 +185,72 @@ describe("display router", () => {
     expect(plan.isNavigationAllowed(entryUrl)).toBe(true);
     expect(plan.isNavigationAllowed("https://example.com/remote")) .toBe(false);
     expect(plan.isNavigationAllowed("file:///show/another.html")).toBe(false);
+  });
+
+  it("generalizes fullscreen plans without changing the legacy wrapper shape", () => {
+    const entryUrl = "file:///show/jianshan-standby.html";
+    const standby = createFullscreenWindowPlan(secondaryGeometry.bounds, entryUrl, {
+      partition: "janvim-exhibition-jianshan-g1",
+    });
+    const preview = createFullscreenWindowPlan(
+      primaryGeometry.bounds,
+      "file:///show/apps/secondary-screen/dist/index.html",
+      {
+        preloadPath: "D:\\show\\preload.cjs",
+        alwaysOnTop: true,
+        backgroundThrottling: false,
+      },
+    );
+    const legacy = createSecondaryWindowPlan(
+      secondaryGeometry.bounds,
+      "D:\\show\\preload.cjs",
+      "file:///show/apps/secondary-screen/dist/index.html",
+    );
+
+    expect(standby.browserWindowOptions).toMatchObject({
+      frame: false,
+      fullscreen: true,
+      x: 1920,
+      y: 0,
+      width: 1920,
+      height: 1080,
+      webPreferences: {
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
+        partition: "janvim-exhibition-jianshan-g1",
+      },
+    });
+    expect(standby.browserWindowOptions.webPreferences).not.toHaveProperty(
+      "preload",
+    );
+    expect(preview.browserWindowOptions).toMatchObject({
+      alwaysOnTop: true,
+      webPreferences: {
+        preload: "D:\\show\\preload.cjs",
+        backgroundThrottling: false,
+      },
+    });
+    expect(legacy.browserWindowOptions).toEqual({
+      frame: false,
+      fullscreen: true,
+      autoHideMenuBar: true,
+      x: 1920,
+      y: 0,
+      width: 1920,
+      height: 1080,
+      webPreferences: {
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
+        preload: "D:\\show\\preload.cjs",
+      },
+    });
+    expect(() =>
+      createFullscreenWindowPlan(secondaryGeometry.bounds, entryUrl, {
+        partition: "persist:jianshan",
+      }),
+    ).toThrow(/non-persistent|partition/i);
   });
 
   it("blocks real navigation events and every attempt to open another window", () => {

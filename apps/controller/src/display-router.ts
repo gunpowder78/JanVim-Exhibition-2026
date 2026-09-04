@@ -171,9 +171,38 @@ export function routeDisplays(displays: readonly RuntimeDisplay[], config: Displ
   return { state: "mapped", primary, secondary };
 }
 
+export interface FullscreenWindowPlanOptions {
+  preloadPath?: string;
+  partition?: string;
+  alwaysOnTop?: boolean;
+  backgroundThrottling?: boolean;
+}
+
+export interface FullscreenWindowPlan {
+  browserWindowOptions: {
+    frame: false;
+    fullscreen: true;
+    autoHideMenuBar: true;
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    alwaysOnTop?: boolean;
+    webPreferences: {
+      contextIsolation: true;
+      nodeIntegration: false;
+      sandbox: true;
+      preload?: string;
+      partition?: string;
+      backgroundThrottling?: boolean;
+    };
+  };
+  isNavigationAllowed: (targetUrl: string) => boolean;
+}
+
 export function resolveDisplayRoute(
   displays: readonly ShowRuntimeDisplay[],
-  layout: DisplayLayout,
+  layout: DisplayLayout | undefined,
   map: DisplayMapConfig | DisplayMapV2,
 ): ResolvedDisplayRoute {
   if (map.schema === 1) {
@@ -198,6 +227,9 @@ export function resolveDisplayRoute(
     );
   }
 
+  if (layout === undefined) {
+    return configurationRequired("display-layout-hash-mismatch");
+  }
   if (map.mappingStatus !== "confirmed") {
     return configurationRequired("display-map-unconfirmed");
   }
@@ -252,15 +284,36 @@ export function createSecondaryWindowPlan(
   preloadPath: string,
   entryUrl: string,
 ): SecondaryWindowPlan {
-  if (!isRectangle(bounds)) throw new Error("Secondary window rectangle is invalid");
-  if (!win32.isAbsolute(preloadPath)) {
-    throw new Error("Secondary preload path must be absolute");
-  }
-  if (win32.extname(preloadPath).toLowerCase() !== ".cjs") {
-    throw new Error("Secondary preload must be a CommonJS .cjs bundle");
+  return createFullscreenWindowPlan(bounds, entryUrl, {
+    preloadPath,
+  }) as SecondaryWindowPlan;
+}
+
+export function createFullscreenWindowPlan(
+  bounds: Rectangle,
+  entryUrl: string,
+  options: FullscreenWindowPlanOptions = {},
+): FullscreenWindowPlan {
+  if (!isRectangle(bounds)) {
+    throw new Error("Fullscreen window rectangle is invalid");
   }
   if (!isLocalFileUrl(entryUrl)) {
-    throw new Error("Secondary entry URL must be a local file URL");
+    throw new Error("Fullscreen entry URL must be a local file URL");
+  }
+  if (options.preloadPath !== undefined) {
+    if (!win32.isAbsolute(options.preloadPath)) {
+      throw new Error("Fullscreen preload path must be absolute");
+    }
+    if (win32.extname(options.preloadPath).toLowerCase() !== ".cjs") {
+      throw new Error("Fullscreen preload must be a CommonJS .cjs bundle");
+    }
+  }
+  if (
+    options.partition !== undefined &&
+    (!/^[A-Za-z0-9._-]{1,128}$/u.test(options.partition) ||
+      options.partition.toLowerCase().startsWith("persist:"))
+  ) {
+    throw new Error("Fullscreen partition must be bounded and non-persistent");
   }
 
   return {
@@ -272,11 +325,22 @@ export function createSecondaryWindowPlan(
       y: bounds.y,
       width: bounds.width,
       height: bounds.height,
+      ...(options.alwaysOnTop === undefined
+        ? {}
+        : { alwaysOnTop: options.alwaysOnTop }),
       webPreferences: {
         contextIsolation: true,
         nodeIntegration: false,
         sandbox: true,
-        preload: preloadPath,
+        ...(options.preloadPath === undefined
+          ? {}
+          : { preload: options.preloadPath }),
+        ...(options.partition === undefined
+          ? {}
+          : { partition: options.partition }),
+        ...(options.backgroundThrottling === undefined
+          ? {}
+          : { backgroundThrottling: options.backgroundThrottling }),
       },
     },
     isNavigationAllowed: (targetUrl) => targetUrl === entryUrl,

@@ -39,12 +39,20 @@ import {
 } from "./bounded-log.js";
 import { BridgeServer } from "./bridge-server.js";
 import {
+  createFullscreenWindowPlan,
   createSecondaryWindowPlan,
-  routeDisplays,
-  type DisplayRoute,
+  resolveDisplayRoute,
+  type DisplayMapConfig,
   type Rectangle,
-  type RuntimeDisplay,
+  type ResolvedDisplayRoute,
 } from "./display-router.js";
+import {
+  parseDisplayLayout,
+  parseDisplayMap,
+  type DisplayMapV2,
+  type ShowRuntimeDisplay as ResolvedShowRuntimeDisplay,
+  type SoftDisplayId,
+} from "./display-routing-contract.js";
 import type {
   G2BrowserWindowConstructor,
   G2BrowserWindowAdapter,
@@ -113,6 +121,11 @@ import {
   type ShowRunSession,
   type ShowSecondarySurface,
 } from "./show-run-coordinator.js";
+import {
+  ShowSurfaceGroup,
+  type ShowNarrativeSurface,
+  type ShowSurfaceGroupChild,
+} from "./show-surface-group.js";
 import { placeJanVimWindow, type WindowPlacementReceipt } from "./window-placer.js";
 import { closePlacedJanVimWindow } from "./window-closer.js";
 
@@ -169,13 +182,7 @@ export interface ShowElectronAppAdapter {
   ): void;
 }
 
-export interface ShowRuntimeDisplay {
-  displayId: string | number;
-  bounds: Rectangle;
-  workingArea: Rectangle;
-  scaleFactor: number;
-  rotation: 0 | 90 | 180 | 270;
-}
+export type ShowRuntimeDisplay = ResolvedShowRuntimeDisplay;
 
 export interface ShowRuntimeAdapterHost
   extends Omit<G2RuntimeAdapterHost, "BrowserWindow" | "screen"> {
@@ -217,9 +224,9 @@ interface ValidatedShowInputs {
   readonly lock: ArtifactLock;
   readonly manifest: ShowManifest;
   readonly poem: Buffer;
-  readonly displayMap: ReturnType<typeof parseConfirmedRehearsalDisplayMap>;
-  readonly displayRoute: Extract<DisplayRoute, { state: "mapped" }>;
-  readonly liveDisplays: readonly ShowRuntimeDisplay[];
+  readonly displayMap: DisplayMapConfig | DisplayMapV2;
+  readonly displayRoute: Extract<ResolvedDisplayRoute, { state: "mapped" }>;
+  readonly layoutSnapshot?: FrozenRuntimeSnapshot;
   readonly startupNetworkSnapshot: NetworkSnapshotEvidence;
 }
 
@@ -276,7 +283,7 @@ export function createShowRuntimeAdapters(
   return {
     validate: async (command) => {
       const inputs = await validateShowInputs(host, command);
-      assertFrozenSnapshotUnchanged(inputs.snapshot);
+      assertValidatedShowInputsUnchanged(inputs);
     },
     createCoordinator: (command) => createCoordinator(host, command, lifecycle),
     bindEmergencyLifecycle: (listener) => lifecycle.bind(listener),
@@ -344,7 +351,7 @@ function createCoordinator(
 
   const requireInputs = (): ValidatedShowInputs => {
     if (inputs === undefined) throw new Error("show-inputs-not-validated");
-    assertFrozenSnapshotUnchanged(inputs.snapshot);
+    assertValidatedShowInputsUnchanged(inputs);
     return inputs;
   };
 
@@ -366,13 +373,14 @@ function createCoordinator(
     },
     openSecondary: async (generationId, signal) => {
       const current = requireInputs();
-      const surface = await openShowSecondary({
+      const surface = await openShowSurfaceGroup({
         host,
         command,
         generationId,
         signal,
-        display: current.displayRoute.secondary,
-        entryUrl: fixedEntryUrl(host.repositoryRoot),
+        route: current.displayRoute,
+        narrativeEntryUrl: fixedEntryUrl(host.repositoryRoot),
+        standbyEntryUrl: pathToFileURL(paths.jianshanStandby).href,
         preloadPath: resolveBelowRoot(
           host.repositoryRoot,
           "apps\\controller\\dist\\preload\\preload.cjs",
@@ -632,11 +640,30 @@ async function validateShowInputs(
   if (hash(poem) !== manifest.poemSha256) {
     throw new Error("poem-hash-mismatch");
   }
-  const displayMap = parseConfirmedRehearsalDisplayMap(
-    JSON.parse(file("display-map").toString("utf8")),
-  );
+  const displayMapBytes = file("display-map");
+  const untypedDisplayMap = JSON.parse(
+    displayMapBytes.toString("utf8"),
+  ) as unknown;
+  let displayMap: DisplayMapConfig | DisplayMapV2;
+  let layoutSnapshot: FrozenRuntimeSnapshot | undefined;
+  let layout: ReturnType<typeof parseDisplayLayout> | undefined;
+  if (
+    untypedDisplayMap !== null &&
+    typeof untypedDisplayMap === "object" &&
+    "schema" in untypedDisplayMap &&
+    untypedDisplayMap.schema === 1
+  ) {
+    displayMap = parseConfirmedRehearsalDisplayMap(untypedDisplayMap);
+  } else {
+    displayMap = parseDisplayMap(displayMapBytes);
+    layoutSnapshot = readFrozenRuntimeSnapshot({
+      readFile: host.readFile,
+      files: [{ label: "display-layout", path: paths.displayLayout }],
+    });
+    layout = parseDisplayLayout(layoutSnapshot.files[0]!.bytes);
+  }
   const liveDisplays = normalizeShowDisplays(host.source.screen.getAllDisplays());
-  const displayRoute = routeDisplays(liveDisplays, displayMap);
+  const displayRoute = resolveDisplayRoute(liveDisplays, layout, displayMap);
   if (displayRoute.state !== "mapped") {
     throw new Error(displayRoute.reason);
   }
@@ -667,9 +694,18 @@ async function validateShowInputs(
     poem,
     displayMap,
     displayRoute,
-    liveDisplays,
+    ...(layoutSnapshot === undefined ? {} : { layoutSnapshot }),
     startupNetworkSnapshot,
   };
+}
+
+function assertValidatedShowInputsUnchanged(
+  inputs: ValidatedShowInputs,
+): void {
+  assertFrozenSnapshotUnchanged(inputs.snapshot);
+  if (inputs.layoutSnapshot !== undefined) {
+    assertFrozenSnapshotUnchanged(inputs.layoutSnapshot);
+  }
 }
 
 function assertCanonicalShowBoundaries(
@@ -815,21 +851,17 @@ function buildShowEvidence(
   diagnostics: CoordinatorDiagnostics,
   logger: RuntimeLogger,
 ): ShowRunEvidenceRecord {
-  assertFrozenSnapshotUnchanged(inputs.snapshot);
+  assertValidatedShowInputsUnchanged(inputs);
   const file = (label: string) => {
     const match = inputs.snapshot.files.find((entry) => entry.label === label);
     if (match === undefined) throw new Error(`Missing frozen input: ${label}`);
     return match;
   };
-  const liveRole = (id: string): ShowRuntimeDisplay => {
-    const display = inputs.liveDisplays.find(
-      (candidate) => String(candidate.displayId) === id,
-    );
-    if (display === undefined) throw new Error("show-live-display-missing");
-    return display;
-  };
-  const primaryLive = liveRole(inputs.displayMap.primary.displayId);
-  const secondaryLive = liveRole(inputs.displayMap.secondary.displayId);
+  if (inputs.displayMap.schema !== 1) {
+    throw new Error("schema-2-show-evidence-requires-routing-record");
+  }
+  const primaryLive = requireDisplayRole(inputs.displayRoute, "SCREEN-1");
+  const secondaryLive = requireDisplayRole(inputs.displayRoute, "SCREEN-2");
   const offlineSnapshots = diagnostics.offlineSnapshots.map((snapshot) => ({
     ...snapshot,
   }));
@@ -988,6 +1020,14 @@ function showRuntimePaths(repositoryRoot: string, rehearsalRoot: string) {
     pluginLabInit: resolveBelowRoot(
       repositoryRoot,
       "runtime\\user-root\\plugin-lab\\config\\init.lua",
+    ),
+    displayLayout: resolveBelowRoot(
+      repositoryRoot,
+      "show\\display-layout.json",
+    ),
+    jianshanStandby: resolveBelowRoot(
+      repositoryRoot,
+      "show\\jianshan-standby.html",
     ),
     windowPlacementScript: resolveBelowRoot(
       repositoryRoot,
@@ -1295,23 +1335,85 @@ class EmergencyLifecycleHub {
   }
 }
 
-async function openShowSecondary(input: {
+async function openShowSurfaceGroup(input: {
   host: NormalizedShowHost;
   command: RunShowCommand;
   generationId: number;
   signal: AbortSignal;
-  display: RuntimeDisplay;
-  entryUrl: string;
+  route: Extract<ResolvedDisplayRoute, { state: "mapped" }>;
+  narrativeEntryUrl: string;
+  standbyEntryUrl: string;
   preloadPath: string;
   logger: RuntimeLogger;
   lifecycle: EmergencyLifecycleHub;
 }): Promise<ShowSecondarySurface> {
-  if (input.signal.aborted) throw new Error("secondary-open-aborted");
-  const plan = createSecondaryWindowPlan(
-    input.display.bounds,
-    input.preloadPath,
-    input.entryUrl,
+  const previewVisibility = input.route.mode === "single-display-preview";
+  const narrativeDisplay = requireDisplayRole(
+    input.route,
+    previewVisibility ? "SCREEN-1" : "SCREEN-2",
   );
+  const narrative = await openShowNarrative({
+    ...input,
+    display: narrativeDisplay,
+    entryUrl: input.narrativeEntryUrl,
+    previewVisibility,
+  });
+  let standby: ShowSurfaceGroupChild | undefined;
+  try {
+    if (input.route.mode === "production-3") {
+      standby = await openShowStandby({
+        host: input.host,
+        generationId: input.generationId,
+        signal: input.signal,
+        display: requireDisplayRole(input.route, "SCREEN-3"),
+        entryUrl: input.standbyEntryUrl,
+        lifecycle: input.lifecycle,
+      });
+    }
+    return new ShowSurfaceGroup({
+      narrative,
+      ...(standby === undefined ? {} : { standby }),
+      previewVisibility,
+    });
+  } catch (error) {
+    const children = [narrative, standby].filter(
+      (child): child is ShowSurfaceGroupChild => child !== undefined,
+    );
+    for (const child of children) {
+      try {
+        child.close();
+      } catch {
+        // Preserve the group construction or standby-open failure.
+      }
+    }
+    throw error;
+  }
+}
+
+async function openShowNarrative(input: {
+  host: NormalizedShowHost;
+  command: RunShowCommand;
+  generationId: number;
+  signal: AbortSignal;
+  display: ShowRuntimeDisplay;
+  entryUrl: string;
+  preloadPath: string;
+  logger: RuntimeLogger;
+  lifecycle: EmergencyLifecycleHub;
+  previewVisibility: boolean;
+}): Promise<ShowNarrativeSurface> {
+  if (input.signal.aborted) throw new Error("secondary-open-aborted");
+  const plan = input.previewVisibility
+    ? createFullscreenWindowPlan(input.display.bounds, input.entryUrl, {
+        preloadPath: input.preloadPath,
+        alwaysOnTop: true,
+        backgroundThrottling: false,
+      })
+    : createSecondaryWindowPlan(
+        input.display.bounds,
+        input.preloadPath,
+        input.entryUrl,
+      );
   const window = new input.host.source.BrowserWindow(
     plan.browserWindowOptions as unknown as Record<string, unknown>,
   ) as unknown as ShowBrowserWindowAdapter;
@@ -1320,16 +1422,10 @@ async function openShowSecondary(input: {
     entryUrl: input.entryUrl,
   });
   const eventListeners = new Set<(event: RendererToControllerEvent) => void>();
-  const destroyedListeners = new Set<() => void>();
+  const destruction = new LatchedDestruction();
   let intentionalClose = false;
-  let rendererLost = false;
-  const takeDestroyedListeners = (): readonly (() => void)[] => {
-    if (intentionalClose || rendererLost) return [];
-    rendererLost = true;
-    return [...destroyedListeners];
-  };
   const onRendererGone = (): void => {
-    for (const listener of takeDestroyedListeners()) listener();
+    if (!intentionalClose) destruction.observe();
   };
   window.webContents.on("render-process-gone", onRendererGone);
   const onWindowClose = (): void => {
@@ -1349,10 +1445,13 @@ async function openShowSecondary(input: {
     window.webContents,
   );
   let disposed = false;
-  const dispose = (): void => {
+  const dispose = (intentional = true): void => {
     if (disposed) return;
     disposed = true;
-    intentionalClose = true;
+    if (intentional) {
+      intentionalClose = true;
+      destruction.cancel();
+    }
     let cleanupError: unknown;
     let hasCleanupError = false;
     const cleanupActions: readonly (() => void)[] = [
@@ -1362,7 +1461,6 @@ async function openShowSecondary(input: {
       disposeGuards,
       () => {
         eventListeners.clear();
-        destroyedListeners.clear();
       },
       () => {
         if (!window.isDestroyed()) window.close();
@@ -1381,13 +1479,12 @@ async function openShowSecondary(input: {
     if (hasCleanupError) throw cleanupError;
   };
   const onClosed = (): void => {
-    const listeners = takeDestroyedListeners();
+    if (!intentionalClose) destruction.observe();
     try {
-      dispose();
+      dispose(false);
     } catch {
       // A closed surface cannot retain guards even if one host cleanup hook fails.
     }
-    for (const listener of listeners) listener();
   };
   window.once("closed", onClosed);
 
@@ -1408,7 +1505,7 @@ async function openShowSecondary(input: {
       startedAtUtc: inspectedStartedAtUtc,
     }).startedAtUtc;
     if (input.signal.aborted) throw new Error("secondary-open-aborted");
-    if (rendererLost || window.isDestroyed()) {
+    if (destruction.observed || window.isDestroyed()) {
       throw new Error("secondary-renderer-lost-during-identity-inspection");
     }
     if (window.webContents.getOSProcessId() !== rendererPid) {
@@ -1445,16 +1542,200 @@ async function openShowSecondary(input: {
       return () => eventListeners.delete(listener);
     },
     onDestroyed: (listener) => {
-      destroyedListeners.add(listener);
-      return () => destroyedListeners.delete(listener);
+      return destruction.subscribe(listener);
     },
     close: () => {
       dispose();
     },
     diagnostics: () => ({
-      listeners: eventListeners.size + destroyedListeners.size,
+      listeners: eventListeners.size + destruction.listenerCount,
     }),
+    hide: () => {
+      if (!window.isDestroyed()) window.hide();
+    },
+    show: () => {
+      if (!window.isDestroyed()) window.show();
+    },
   };
+}
+
+async function openShowStandby(input: {
+  host: NormalizedShowHost;
+  generationId: number;
+  signal: AbortSignal;
+  display: ShowRuntimeDisplay;
+  entryUrl: string;
+  lifecycle: EmergencyLifecycleHub;
+}): Promise<ShowSurfaceGroupChild> {
+  if (input.signal.aborted) throw new Error("standby-open-aborted");
+  const plan = createFullscreenWindowPlan(input.display.bounds, input.entryUrl, {
+    partition: standbyPartition(input.generationId),
+  });
+  const window = new input.host.source.BrowserWindow(
+    plan.browserWindowOptions as unknown as Record<string, unknown>,
+  ) as unknown as ShowBrowserWindowAdapter;
+  const disposeGuards = installLocalOnlyWebGuards({
+    webContents: window.webContents,
+    entryUrl: input.entryUrl,
+  });
+  const destruction = new LatchedDestruction();
+  let intentionalClose = false;
+  const onRendererGone = (): void => {
+    if (!intentionalClose) destruction.observe();
+  };
+  window.webContents.on("render-process-gone", onRendererGone);
+  const closeEvents = window as unknown as {
+    on(event: "close", listener: () => void): void;
+    removeListener(event: "close", listener: () => void): void;
+  };
+  const onWindowClose = (): void => {
+    if (!intentionalClose) input.lifecycle.notifyWindowClose();
+  };
+  closeEvents.on("close", onWindowClose);
+
+  let disposed = false;
+  const dispose = (intentional = true): void => {
+    if (disposed) return;
+    disposed = true;
+    if (intentional) {
+      intentionalClose = true;
+      destruction.cancel();
+    }
+    const result = runCleanupActions([
+      () => closeEvents.removeListener("close", onWindowClose),
+      () =>
+        window.webContents.removeListener(
+          "render-process-gone",
+          onRendererGone,
+        ),
+      disposeGuards,
+      () => {
+        if (!window.isDestroyed()) window.close();
+      },
+    ]);
+    if (result.threw) throw result.error;
+  };
+  window.once("closed", () => {
+    if (!intentionalClose) destruction.observe();
+    try {
+      dispose(false);
+    } catch {
+      // A closed standby cannot retain guards after host cleanup failure.
+    }
+  });
+
+  try {
+    await input.host.runWithDeadline(15_000, () => window.loadURL(input.entryUrl));
+    if (input.signal.aborted) throw new Error("standby-open-aborted");
+    if (destruction.observed || window.isDestroyed()) {
+      throw new Error("standby-renderer-lost-during-open");
+    }
+  } catch (error) {
+    try {
+      dispose();
+    } catch {
+      // Preserve the original standby load/abort classification.
+    }
+    if (!window.isDestroyed()) window.destroy();
+    throw error;
+  }
+
+  return {
+    onDestroyed: (listener) => destruction.subscribe(listener),
+    close: () => dispose(),
+    diagnostics: () => ({ listeners: destruction.listenerCount }),
+  };
+}
+
+class LatchedDestruction {
+  private readonly listeners = new Set<() => void>();
+  private delivered = false;
+  private deliveryQueued = false;
+  public observed = false;
+
+  public get listenerCount(): number {
+    return this.listeners.size;
+  }
+
+  public observe(): void {
+    if (this.observed || this.delivered) return;
+    this.observed = true;
+    if (this.listeners.size > 0) this.deliver();
+  }
+
+  public subscribe(listener: () => void): () => void {
+    if (this.delivered) return () => undefined;
+    if (this.listeners.size >= 8) {
+      throw new Error("Show window destruction listener limit reached");
+    }
+    this.listeners.add(listener);
+    let active = true;
+    const dispose = (): void => {
+      if (!active) return;
+      active = false;
+      this.listeners.delete(listener);
+    };
+    if (this.observed && !this.deliveryQueued) {
+      this.deliveryQueued = true;
+      queueMicrotask(() => {
+        this.deliveryQueued = false;
+        if (this.observed && !this.delivered) this.deliver();
+      });
+    }
+    return dispose;
+  }
+
+  public cancel(): void {
+    this.delivered = true;
+    this.deliveryQueued = false;
+    this.listeners.clear();
+  }
+
+  private deliver(): void {
+    if (this.delivered) return;
+    this.delivered = true;
+    const listeners = [...this.listeners];
+    this.listeners.clear();
+    const result = runCleanupActions(listeners);
+    if (result.threw) throw result.error;
+  }
+}
+
+function runCleanupActions(actions: readonly (() => void)[]): {
+  readonly threw: boolean;
+  readonly error?: unknown;
+} {
+  let threw = false;
+  let firstError: unknown;
+  for (const action of actions) {
+    try {
+      action();
+    } catch (error) {
+      if (!threw) {
+        threw = true;
+        firstError = error;
+      }
+    }
+  }
+  return threw ? { threw: true, error: firstError } : { threw: false };
+}
+
+function standbyPartition(generationId: number): string {
+  if (!Number.isSafeInteger(generationId) || generationId <= 0) {
+    throw new Error("Standby generation is invalid");
+  }
+  return `janvim-exhibition-jianshan-g${generationId}`;
+}
+
+function requireDisplayRole(
+  route: Extract<ResolvedDisplayRoute, { state: "mapped" }>,
+  softId: SoftDisplayId,
+): ShowRuntimeDisplay {
+  const display = route.roles[softId];
+  if (display === undefined) {
+    throw new Error(`Resolved display route is missing ${softId}`);
+  }
+  return display;
 }
 
 class RuntimeShowSession implements ShowRunSession {
@@ -1598,7 +1879,7 @@ class RuntimeShowSession implements ShowRunSession {
 
   public async launchJanVim(signal: AbortSignal): Promise<void> {
     const epoch = this.captureLifecycle(signal, "janvim-launch-aborted");
-    assertFrozenSnapshotUnchanged(this.options.inputs.snapshot);
+    assertValidatedShowInputsUnchanged(this.options.inputs);
     const token = this.bridgeToken;
     const port = this.bridgePort;
     if (token === undefined || port === undefined) {
@@ -1695,7 +1976,10 @@ class RuntimeShowSession implements ShowRunSession {
       helperPath: this.options.paths.windowPlacementScript,
       target: {
         pid: child.pid,
-        bounds: this.options.inputs.displayRoute.primary.bounds,
+        bounds: requireDisplayRole(
+          this.options.inputs.displayRoute,
+          "SCREEN-1",
+        ).bounds,
       },
       runHelper: async (invocation, limits) =>
         this.options.host.execFile(invocation.file, invocation.args, {
