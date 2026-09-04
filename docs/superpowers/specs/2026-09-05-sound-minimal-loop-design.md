@@ -33,6 +33,8 @@ Cursor y selects from MIDI [48,50,52,55,57,60,62,64,67,69,72]; x maps to stereo 
 
 Default mode is silent verification. Audible output needs explicit `-Listen`. Headphones device must match `Windows WASAPI : Headphones (Senary Audio)`; 48 kHz, stereo, zero input channels. Do not fall back to speakers or another endpoint. Retain the official 440 Hz example as a separate troubleshooting reference, not as a music feature.
 
+In silent mode do not instantiate an audible output Synth at all (or write hard zeros); do not rely on `NaN * 0` being silent. The final mixer also carries a DSP-side heartbeat timeout: a changing heartbeat control resets a 2 s timer, timeout latches a 1.5 s release even if sclang itself dies. Only accepted start/heartbeat updates that control; event traffic never does. This protects the last wind node from sustaining when the language service is interrupted.
+
 Default demo <=45 s, explicit finite duration <=3600 s. Startup timeout <=30 s, stop/cleanup deadline <=8 s, no unbounded waits. Supervisor tracks only its child process tree; it never kills processes by name. Quit only its SC server. A second-window stop targets a per-run supervisor control endpoint/receipt and is validated; Ctrl+C is a secondary convenience, not the sole stop path. Process interruption is tested only against newly created test children. No unattended human-volume test.
 
 ## Evidence and acceptance
