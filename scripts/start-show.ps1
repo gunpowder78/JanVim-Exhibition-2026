@@ -1376,12 +1376,13 @@ function Assert-DisplayRoutingText {
     param(
         [Parameter(Mandatory = $true)][object]$Value,
         [Parameter(Mandatory = $true)][int]$MaximumBytes,
-        [Parameter(Mandatory = $true)][string]$Reason
+        [Parameter(Mandatory = $true)][string]$Reason,
+        [switch]$AllowEmpty
     )
 
     if (
         $Value -isnot [string] -or
-        $Value.Length -eq 0 -or
+        ($Value.Length -eq 0 -and -not $AllowEmpty) -or
         [Text.Encoding]::UTF8.GetByteCount($Value) -gt $MaximumBytes -or
         $Value -match '[\x00-\x1f\x7f-\x9f]'
     ) {
@@ -1476,7 +1477,7 @@ function Assert-DisplayPhysicalV2 {
     $displayId = Get-RequiredPropertyValue -InputObject $Display -Name 'displayId' -Reason $Reason
     $label = Get-RequiredPropertyValue -InputObject $Display -Name 'label' -Reason $Reason
     Assert-DisplayRoutingText -Value $displayId -MaximumBytes 256 -Reason $Reason
-    Assert-DisplayRoutingText -Value $label -MaximumBytes 512 -Reason $Reason
+    Assert-DisplayRoutingText -Value $label -MaximumBytes 512 -Reason $Reason -AllowEmpty
     $bounds = Get-RequiredPropertyValue -InputObject $Display -Name 'bounds' -Reason $Reason
     $workingArea = Get-RequiredPropertyValue -InputObject $Display -Name 'workingArea' -Reason $Reason
     Assert-DisplayRectangleV2 -Rectangle $bounds -Reason $Reason

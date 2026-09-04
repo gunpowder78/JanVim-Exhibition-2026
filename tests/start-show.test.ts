@@ -2389,6 +2389,32 @@ describe("offline show launcher and external watchdog", () => {
     30_000,
   );
 
+  it("accepts empty labels emitted by Windows display enumeration", () => {
+    const fixture = makeLauncherFixture();
+    try {
+      const map = schema2DisplayMap(fixture.displayLayout);
+      for (const display of [...map.bindings, ...map.unassignedDisplays]) {
+        display.label = "";
+      }
+      map.topologySha256 = hashDisplayTopology([
+        ...map.bindings,
+        ...map.unassignedDisplays,
+      ]);
+      writeText(fixture.externalMap, `${JSON.stringify(map, null, 2)}\n`);
+
+      const result = runLauncher(
+        fixture,
+        launcherArguments(fixture, "ValidateOnly"),
+        { behavior: "matching-success" },
+      );
+
+      expect(result.status, output(result)).toBe(0);
+      expect(invocations(fixture)).toHaveLength(1);
+    } finally {
+      fixture.cleanup();
+    }
+  }, 30_000);
+
   it("accepts bounded current unassigned-display evidence independently of captured extras", () => {
     const fixture = makeLauncherFixture();
     try {
