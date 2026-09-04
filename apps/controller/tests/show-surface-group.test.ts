@@ -302,6 +302,22 @@ describe("ShowSurfaceGroup", () => {
     expect(standby.closeCount).toBe(1);
   });
 
+  it("re-presents the single-display start surface when ready after JanVim placement", () => {
+    const trace: string[] = [];
+    const narrative = new FakeNarrative(trace);
+    const previewSafety = new FakePreviewSafety(trace);
+    const group = new ShowSurfaceGroup({ narrative, previewSafety });
+
+    narrative.visible = false;
+    group.send(readyStatus);
+
+    expect(narrative.visible).toBe(true);
+    expect(trace).toEqual([
+      "narrative:send:run-status:ready",
+      "narrative:show",
+    ]);
+  });
+
   it("keeps Narrative hidden and orders the safety cover around preview statuses", () => {
     const trace: string[] = [];
     const narrative = new FakeNarrative(trace);
@@ -330,6 +346,7 @@ describe("ShowSurfaceGroup", () => {
 
     expect(trace).toEqual([
       "narrative:send:run-status:ready",
+      "narrative:show",
       "narrative:send:run-status:running",
       "narrative:hide",
       "narrative:send:run-status:running",
@@ -342,7 +359,7 @@ describe("ShowSurfaceGroup", () => {
       "narrative:send:run-status:shutting-down",
     ]);
     expect(narrative.hideCount).toBe(1);
-    expect(narrative.showCount).toBe(0);
+    expect(narrative.showCount).toBe(1);
     expect(narrative.visible).toBe(false);
     expect(previewSafety.hideCount).toBe(1);
     expect(previewSafety.showCount).toBe(2);

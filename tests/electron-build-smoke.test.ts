@@ -163,9 +163,9 @@ describe("compiled Electron main bundle", () => {
       .map((match) => match[1]);
     const expectedReleaseIdentity = {
       relativePath: "apps/controller/dist/main/electron-main.js",
-      bytes: 526566,
+      bytes: 526622,
       sha256:
-        "e4ee50d699c7212799760830993d6c37f9706892d4614b76e1e0f10d97f8d43a",
+        "acbe557eb15c3ffa32f936ed8e74a2a6e0d3284508a95f56c6ef71e856eb9bd0",
       runtimeImports: [
         "electron",
         "node:child_process",
@@ -198,9 +198,9 @@ describe("compiled Electron main bundle", () => {
       bytes: realBundle.byteLength,
       sha256: createHash("sha256").update(realBundle).digest("hex"),
     }).toEqual({
-      bytes: 526566,
+      bytes: 526622,
       sha256:
-        "e4ee50d699c7212799760830993d6c37f9706892d4614b76e1e0f10d97f8d43a",
+        "acbe557eb15c3ffa32f936ed8e74a2a6e0d3284508a95f56c6ef71e856eb9bd0",
     });
   });
 

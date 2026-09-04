@@ -95,6 +95,7 @@ export class ShowSurfaceGroup implements ShowSecondarySurface {
     if (!this.previewStarted) {
       if (event.state !== "running") {
         this.narrative.send(event);
+        if (event.state === "ready") this.narrative.show();
         return;
       }
       try {

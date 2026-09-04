@@ -60,8 +60,8 @@ $crashWindowMilliseconds = 600000L
 $restartDelaysMilliseconds = @(1000, 2000, 4000)
 # JANVIM_REVIEWED_ELECTRON_RELEASE_IDENTITY_BEGIN
 $reviewedElectronMainRelativePath = 'apps/controller/dist/main/electron-main.js'
-$reviewedElectronMainBytes = 526566L
-$reviewedElectronMainSha256 = 'e4ee50d699c7212799760830993d6c37f9706892d4614b76e1e0f10d97f8d43a'
+$reviewedElectronMainBytes = 526622L
+$reviewedElectronMainSha256 = 'acbe557eb15c3ffa32f936ed8e74a2a6e0d3284508a95f56c6ef71e856eb9bd0'
 $reviewedElectronMainRuntimeImports = @(
     'electron'
     'node:child_process'
@@ -2329,7 +2329,7 @@ function Read-StrictShowRunIdentityEvidence {
         }
         $selectedRoles = @($routing.selectedRoles)
         $skippedRoles = @($routing.skippedRoles)
-        $expectedSoftIds = if ($routingMode -ceq 'production-3') {
+        [string[]]$expectedSoftIds = if ($routingMode -ceq 'production-3') {
             @('SCREEN-1', 'SCREEN-2', 'SCREEN-3')
         }
         else {

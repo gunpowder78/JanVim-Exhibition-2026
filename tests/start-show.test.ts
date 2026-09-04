@@ -3833,6 +3833,42 @@ describe("offline show launcher and external watchdog", () => {
     15_000,
   );
 
+  it("accepts matching single-display-preview terminal evidence", () => {
+    const fixture = makeLauncherFixture();
+    try {
+      writeText(
+        fixture.externalMap,
+        `${JSON.stringify(
+          schema2DisplayMap(fixture.displayLayout, "single-display-preview"),
+          null,
+          2,
+        )}\n`,
+      );
+
+      const result = runLauncher(
+        fixture,
+        launcherArguments(fixture, "Soak3"),
+        { behavior: "matching-success" },
+      );
+
+      expect(result.status, output(result)).toBe(0);
+      expect(existsSync(fixture.incidentPath)).toBe(false);
+      const evidence = JSON.parse(readFileSync(fixture.evidencePath, "utf8")) as {
+        acceptanceScope: string;
+        routing: { mode: string; selectedRoles: unknown[] };
+      };
+      expect(evidence).toMatchObject({
+        acceptanceScope: "single-display-preview",
+        routing: {
+          mode: "single-display-preview",
+          selectedRoles: [{ softId: "SCREEN-1" }],
+        },
+      });
+    } finally {
+      fixture.cleanup();
+    }
+  }, 15_000);
+
   it("does not retain hidden controller stdout or stderr in the launcher or a file", () => {
     const fixture = makeLauncherFixture();
     try {

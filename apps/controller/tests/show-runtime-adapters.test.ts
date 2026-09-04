@@ -3004,6 +3004,14 @@ describe("real Task 9 show runtime adapters", () => {
     expect(narrative.isVisible()).toBe(true);
     expect(safetyCover.isVisible()).toBe(false);
     expect(narrative.operations).not.toContain("hide");
+    expect(
+      narrative.operations.filter((entry) => entry === "show"),
+    ).toHaveLength(1);
+    const readyStatus = narrative.operations.indexOf("send:run-status:ready");
+    expect(readyStatus).toBeGreaterThan(-1);
+    expect(narrative.operations.indexOf("show")).toBeGreaterThan(
+      readyStatus,
+    );
     expect(safetyCover.operations).not.toContain("hide");
     expect(harness.loadedUrls).toEqual([
       "file:///D:/show/apps/secondary-screen/dist/index.html",
@@ -3047,7 +3055,9 @@ describe("real Task 9 show runtime adapters", () => {
     );
     expect(coverShow).toBeGreaterThan(-1);
     expect(shutdownStatus).toBeGreaterThan(coverShow);
-    expect(narrative.operations).not.toContain("show");
+    expect(
+      narrative.operations.filter((entry) => entry === "show"),
+    ).toHaveLength(1);
     expect(safetyCover.operations.filter((entry) => entry === "show")).toHaveLength(1);
     expect(narrative.isDestroyed()).toBe(true);
     expect(safetyCover.isDestroyed()).toBe(true);
