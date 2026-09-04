@@ -29,22 +29,22 @@
 
 SC messages are `[path, session, seq, sentAt, ...features]`. Action types are `start`, `pluck` (midi, motion, pan), `wind` (energy, pan), `stop` (reason). State begins idle; explicit start enters running; stop/timeout enters stopped terminal. Use exact lengths, type and finite checks before mutation. MIDI mapping/pan and timing constants are specified in the design. Rate-limited packets may advance valid sequence but must not refresh heartbeat. Snapshot includes state, lastSeq, acceptedPlucks, acceptedFlocks, rejected, rateDropped; counters saturate at int32 max. No history arrays or synthesis in policy.
 
-- [ ] Write failing packet tests with manually encoded bytes, not round-trip-only comparisons:
+- [x] Write failing packet tests with manually encoded bytes, not round-trip-only comparisons:
   ```js
   assert.equal(encodeMessage('/janvim/sound/v1/stop', []).subarray(-4).toString('hex'), '2c000000');
   assert.throws(() => encodeMessage('/other', []));
   assert.throws(() => encodeMessage('/janvim/sound/v1/stop', [{type:'f', value:NaN}]));
   ```
   Add alignment/int bounds/float64/oversize cases and a localhost datagram receipt test.
-- [ ] Write SC behavior tests first. Example expected lifecycle:
+- [x] Write SC behavior tests first. Example expected lifecycle:
   ```supercollider
   p = factory.value("0123456789abcdef0123456789abcdef");
   a = p.at(\handle).value(["/janvim/sound/v1/start", session, 1, 10.0], 10.0);
   // Assert a.at(\type) == \start; then tick(12.0) returns stop; start at 13 remains nil.
   ```
   Cover no start, invalid shapes/types/numbers, stale/future/duplicate/out-of-order, heartbeat-only lease, late heartbeat, rate boundaries, clamp/MIDI endpoints, idempotent stop and 10-hour fake-clock activity. Assertions throw on failure and exit nonzero, runner has 30s bound, no boot/audio server.
-- [ ] Run RED via `node --test sound/tests/osc.check.mjs` and `pwsh -NoProfile -File sound/tests/run-policy.ps1`. Record actual expected missing-feature failures.
-- [ ] Implement only the factory/encoder needed, run GREEN, independently review and local commit.
+- [x] Run RED via `node --test sound/tests/osc.check.mjs` and `pwsh -NoProfile -File sound/tests/run-policy.ps1`. Record actual expected missing-feature failures.
+- [x] Implement only the factory/encoder needed, run GREEN, independently review and local commit. Evidence: `0438c67`, fix `5bb152a`; task review and scoped fix review clean. Additional isolated startup, output/exit bound, snapshot, and saturation tests passed.
 
 ## Task 2: SC synthesis service and silent DSP evidence
 
@@ -60,6 +60,7 @@ Service CLI `sclang -u 57140 -D sound/service.scd SESSION MODE DURATION CAPTURE_
 - [ ] Implement mixer DSP lease with changing heartbeat control, a 2 s timer and latched 1.5 s envelope release; accepted heartbeat updates it. Test missing DSP heartbeat independently in NRT, so language-process death cannot leave the wind audible. Silent service must omit audible output Synth rather than multiply a potentially invalid signal by zero.
 - [ ] Integrate policy `handle`/`tick` in OSCdef (loopback only); 50ms timeout checker. Bound startup <=30s, cleanup <=8s, duration <=3600s. Fail closed to silence on SC /fail or server exit; no unbounded recovery. Quit only this own server. Write capture then free nodes/buffers after bounded fade. No raw OSC passthrough.
 - [ ] Include the newly booted `server.pid` as `serverPid` in READY; the supervisor validates and pins live identity/ancestry in memory before language-only interruption or orphan cleanup. Never authorize process termination from a disk receipt alone.
+- [ ] Avoid the stock `Server.boot` auto-reclaim branch (`prPingApp` can call quit on an existing responder). Use a minimal owned-process startup path and an occupied-responder regression fixture; never rely on a released preflight bind to authorize later automatic reclamation.
 - [ ] Run silent NRT checks and language compile/policy checks; report tests. Local commit/review.
 
 ## Task 3: Supervisor, simulated rehearsal and operator controls
@@ -78,7 +79,7 @@ Service CLI `sclang -u 57140 -D sound/service.scd SESSION MODE DURATION CAPTURE_
 
 **Files:** Create `sound/README.md`, `docs/operations/2026-09-05-sound-minimal-loop-handoff.md`, update this plan's checkboxes with evidence references. External receipts only for generated logs/WAV.
 
-- [ ] Inspect actual sources without mutation: `nvim/lua/janvim_exhibition/actions.lua`, `init.lua`, controller show coordinator and `show/jianshan-standby.html`; write exact future observation/control points and missing Jianshan exporter. Do not add real integration or treat command ACK as motion.
+- [x] Inspect actual sources without mutation: `nvim/lua/janvim_exhibition/actions.lua`, `init.lua`, controller show coordinator and `show/jianshan-standby.html`; write exact future observation/control points and missing Jianshan exporter. Do not add real integration or treat command ACK as motion. Summary recorded in the operations handoff; Jianshan and Jianshan02 inspection commits pinned there.
 - [ ] Run the required gates in the candidate: `npm ci`, `npm run typecheck`, `npm test`, `npm run build`, `npm run lint`; run Lua/runtime verification. Use direct vitest CLI for focused tests because this installed npm wrapper mishandles forwarded flags. Compare core/lock/content/config and Electron hash to baseline; no changes permitted outside sound/docs.
 - [ ] Record Node/SC/ports/device, commits, honest test outcomes, resource duration/node/memory stats, audio sample metrics/hashes and any limitations in an external JSON receipt and concise tracked handoff. Distinguish automatic signal checks, real-time silent transport, simulated input, and still-pending human hearing.
 - [ ] README: one absolute launch command (`-Listen` only for user), second-terminal stop command, fresh paths, failure/no-audio procedure referencing known-good official tone, no IDE required, no system volume manipulation. Preserve listen examples and stops together.
