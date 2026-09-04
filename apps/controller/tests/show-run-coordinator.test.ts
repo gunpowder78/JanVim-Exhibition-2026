@@ -20,6 +20,7 @@ import {
   type ResourceSamplerTimerHandle,
 } from "../src/resource-sampler.ts";
 import { RunTelemetry } from "../src/run-telemetry.ts";
+import type { ShowValidationOutcome } from "../src/show-electron-command.ts";
 import type { EvidenceAcceptance } from "../src/show-run-evidence.ts";
 import {
   ShowRunCoordinator,
@@ -734,7 +735,10 @@ interface HarnessOptions {
   networkOfflineSequence?: readonly boolean[];
   resourceIncompleteLoops?: readonly number[];
   runtimeCountGrowthLoop?: number;
+  validationOutcome?: ShowValidationOutcome;
   validationFailure?: boolean;
+  topologyGuard?: boolean;
+  topologyGuardStartFailure?: boolean;
   surfaceRegistrationFailures?: readonly (
     | Extract<
         ListenerRegistrationFailure,
@@ -770,6 +774,10 @@ function createHarness(options: HarnessOptions = {}) {
   const evidenceSignals: AbortSignal[] = [];
   const terminalMarkerSignals: AbortSignal[] = [];
   let networkSamples = 0;
+  let topologyChanged:
+    | ((reason: "display-topology-changed") => void)
+    | undefined;
+  let topologyGuardDisposed = false;
   let firstHeldCleanupBlocked = false;
   let replacementHeldCleanupBlocked = false;
   const traceLoopConstruction =
@@ -793,6 +801,24 @@ function createHarness(options: HarnessOptions = {}) {
       if (options.validationFailure === true) {
         throw new Error("injected validation failure");
       }
+      return options.validationOutcome ?? { outcome: "validated" as const };
+    },
+    createTopologyGuard: (onTopologyChanged) => {
+      if (options.topologyGuard !== true) return undefined;
+      topologyChanged = onTopologyChanged;
+      return {
+        start: () => {
+          trace.push("topology-guard-start");
+          if (options.topologyGuardStartFailure === true) {
+            throw new Error("injected topology guard start failure");
+          }
+        },
+        dispose: () => {
+          if (topologyGuardDisposed) return;
+          topologyGuardDisposed = true;
+          trace.push("topology-guard-dispose");
+        },
+      };
     },
     openSecondary: async (generationId, signal) => {
       trace.push(`open-secondary:${generationId}`);
@@ -1143,6 +1169,15 @@ function createHarness(options: HarnessOptions = {}) {
     terminalMarkers,
     evidenceSignals,
     terminalMarkerSignals,
+    triggerTopologyChange: () => {
+      if (topologyChanged === undefined) {
+        throw new Error("topology guard callback unavailable");
+      }
+      topologyChanged("display-topology-changed");
+    },
+    get topologyGuardDisposed() {
+      return topologyGuardDisposed;
+    },
     get networkSamples() {
       return networkSamples;
     },
@@ -1419,6 +1454,110 @@ async function runLoggerSafetyScenario(
 }
 
 describe("show run coordinator", () => {
+  it("stops directly on configuration-required validation without runtime side effects", async () => {
+    const harness = createHarness({
+      mode: "Show",
+      validationOutcome: {
+        outcome: "configuration-required",
+        reason: "display-geometry-mismatch",
+      },
+    });
+
+    await expect(harness.coordinator.boot()).resolves.toEqual({
+      ready: false,
+      outcome: "configuration-required",
+      reason: "display-geometry-mismatch",
+    });
+    await expect(harness.coordinator.completion).resolves.toEqual({
+      ok: false,
+      reason: "display-configuration-required",
+    });
+
+    expect(harness.trace).toEqual(["validate"]);
+    expect(harness.networkSamples).toBe(0);
+    expect(harness.surfaces).toHaveLength(0);
+    expect(harness.sessions).toHaveLength(0);
+    expect(harness.evidence).toHaveLength(0);
+    expect(harness.terminalMarkers).toHaveLength(0);
+    expect(harness.coordinator.terminalShutdownStarted()).toBe(true);
+    expect(harness.coordinator.diagnostics()).toMatchObject({
+      state: "stopped",
+      reason: "display-configuration-required",
+      transitions: [
+        {
+          from: "booting",
+          to: "stopped",
+          reason: "display-configuration-required",
+        },
+      ],
+    });
+  });
+
+  it("starts the topology guard before network and disposes it before topology shutdown", async () => {
+    const harness = createHarness({
+      mode: "Show",
+      topologyGuard: true,
+      traceBoundaryPhaseStarts: true,
+    });
+    await bootReady(harness);
+
+    expect(harness.trace.indexOf("topology-guard-start")).toBeGreaterThan(
+      harness.trace.indexOf("validate"),
+    );
+    expect(harness.trace.indexOf("topology-guard-start")).toBeLessThan(
+      harness.trace.indexOf("network-sample-call:1"),
+    );
+
+    harness.triggerTopologyChange();
+    await expect(harness.coordinator.completion).resolves.toEqual({
+      ok: false,
+      reason: "emergency-display-topology-changed",
+    });
+    expect(harness.topologyGuardDisposed).toBe(true);
+    expect(harness.trace.indexOf("topology-guard-dispose")).toBeLessThan(
+      harness.trace.indexOf("shutdown-phase:disarm-operator"),
+    );
+    expect(harness.coordinator.diagnostics().recoveries).toHaveLength(0);
+  });
+
+  it("keeps the topology guard alive in safe-ready until terminal shutdown", async () => {
+    const harness = createHarness({
+      mode: "Show",
+      topologyGuard: true,
+      prepareHash: WRONG_POEM_SHA256,
+    });
+
+    await expect(harness.coordinator.boot()).resolves.toEqual({
+      ready: false,
+      reason: "original-poem-hash-mismatch",
+    });
+    expect(harness.coordinator.diagnostics().state).toBe("safe-ready");
+    expect(harness.topologyGuardDisposed).toBe(false);
+
+    await harness.coordinator.requestEmergencyStop("sigint");
+    expect(harness.topologyGuardDisposed).toBe(true);
+  });
+
+  it("rolls back a topology guard that fails to start before network startup", async () => {
+    const harness = createHarness({
+      mode: "Show",
+      topologyGuard: true,
+      topologyGuardStartFailure: true,
+    });
+
+    await expect(harness.coordinator.boot()).resolves.toEqual({
+      ready: false,
+      reason: "startup-failed",
+    });
+    expect(harness.networkSamples).toBe(0);
+    expect(harness.topologyGuardDisposed).toBe(true);
+    expect(harness.trace).toEqual([
+      "validate",
+      "topology-guard-start",
+      "topology-guard-dispose",
+    ]);
+  });
+
   it("rolls back a surface listener when the second registration throws", () => {
     const harness = createHarness();
     const surface = new FakeSurface(harness.trace);

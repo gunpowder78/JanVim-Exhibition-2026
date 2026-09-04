@@ -31,6 +31,7 @@ import type {
   LoopTelemetrySummary,
   RunTelemetry,
 } from "./run-telemetry.js";
+import type { DisplayConfigurationReason } from "./display-router.js";
 import { RestartBudget } from "./supervisor.js";
 
 const SHOW_LOOP_DURATION_MS = 90_000;
@@ -72,6 +73,22 @@ export type ShowRunResult =
   | { ok: true; reason: "soak-complete" | "operator-stop" }
   | { ok: false; reason: string };
 
+export type ShowValidationOutcome =
+  | { outcome: "validated" }
+  | {
+      outcome: "configuration-required";
+      reason: DisplayConfigurationReason;
+    };
+
+export type ShowBootOutcome =
+  | { ready: true }
+  | { ready: false; reason: string; outcome?: undefined }
+  | {
+      ready: false;
+      outcome: "configuration-required";
+      reason: DisplayConfigurationReason;
+    };
+
 export type PrimaryCueCompletionEvent = CueCorrelation & {
   bufferSha256: string;
 };
@@ -92,6 +109,11 @@ export interface ShowSecondarySurface {
   onDestroyed(listener: () => void): () => void;
   close(): void;
   diagnostics(): { listeners: number };
+}
+
+export interface ShowDisplayTopologyGuard {
+  start(): void;
+  dispose(): void;
 }
 
 export interface ShowRunSession {
@@ -140,7 +162,10 @@ export interface ShowRunSession {
 export interface ShowRunCoordinatorDependencies {
   mode: "Soak3" | "Show";
   originalPoemSha256: string;
-  validate(): Promise<void>;
+  validate(): Promise<ShowValidationOutcome>;
+  createTopologyGuard(
+    onTopologyChanged: (reason: "display-topology-changed") => void,
+  ): ShowDisplayTopologyGuard | undefined;
   openSecondary(
     generationId: number,
     signal: AbortSignal,
@@ -236,7 +261,7 @@ export type CoordinatorDiagnostics = {
 const ALLOWED_TRANSITIONS: Readonly<
   Record<ShowCoordinatorState, ReadonlySet<ShowCoordinatorState>>
 > = {
-  booting: new Set(["ready", "safe-ready", "shutting-down"]),
+  booting: new Set(["ready", "safe-ready", "shutting-down", "stopped"]),
   ready: new Set(["running", "black-recovering", "shutting-down"]),
   running: new Set([
     "safe-cruise",
@@ -341,6 +366,7 @@ export class ShowRunCoordinator {
   private heldCleanupSequence: HeldCleanupSequence | undefined;
   private readonly surfaceDisposers = new Set<() => void>();
   private readonly sessionDisposers = new Set<() => void>();
+  private topologyGuard: ShowDisplayTopologyGuard | undefined;
   private readonly ignoredReasonBuckets = new Set<string>();
   private readonly transitions: CoordinatorTransition[] = [];
   private readonly loops: CoordinatorLoopSummary[] = [];
@@ -382,9 +408,7 @@ export class ShowRunCoordinator {
     });
   }
 
-  public async boot(): Promise<
-    { ready: true } | { ready: false; reason: string }
-  > {
+  public async boot(): Promise<ShowBootOutcome> {
     if (this.bootAttempted) {
       return { ready: false, reason: "controller-already-booted" };
     }
@@ -392,9 +416,26 @@ export class ShowRunCoordinator {
     const capturedGeneration = this.generationId;
 
     try {
-      await this.runStartupOperation("validation", () =>
+      const validation = await this.runStartupOperation("validation", () =>
         this.dependencies.validate(),
       );
+      if (validation.outcome === "configuration-required") {
+        const result: ShowRunResult = {
+          ok: false,
+          reason: "display-configuration-required",
+        };
+        this.transition("stopped", result.reason);
+        this.resolveCompletion(result);
+        return {
+          ready: false,
+          outcome: "configuration-required",
+          reason: validation.reason,
+        };
+      }
+      if (!this.isBootGeneration(capturedGeneration)) {
+        return { ready: false, reason: "controller-stopping" };
+      }
+      this.startTopologyGuard();
       if (!this.isBootGeneration(capturedGeneration)) {
         return { ready: false, reason: "controller-stopping" };
       }
@@ -490,10 +531,18 @@ export class ShowRunCoordinator {
   }
 
   public requestEmergencyStop(
-    reason: "sigint" | "window-close" | "electron-quit",
+    reason:
+      | "sigint"
+      | "window-close"
+      | "display-topology-changed"
+      | "electron-quit",
   ): Promise<void> {
     if (this.state === "stopped") return Promise.resolve();
     return this.beginShutdown({ ok: false, reason: `emergency-${reason}` });
+  }
+
+  public terminalShutdownStarted(): boolean {
+    return this.state === "shutting-down" || this.state === "stopped";
   }
 
   public diagnostics(): CoordinatorDiagnostics {
@@ -521,6 +570,25 @@ export class ShowRunCoordinator {
 
   private isBootGeneration(generationId: number): boolean {
     return this.state === "booting" && this.generationId === generationId;
+  }
+
+  private startTopologyGuard(): void {
+    const guard = this.dependencies.createTopologyGuard((reason) => {
+      void this.requestEmergencyStop(reason).catch(() => undefined);
+    });
+    if (guard === undefined) return;
+    this.topologyGuard = guard;
+    try {
+      guard.start();
+    } catch (error) {
+      if (this.topologyGuard === guard) this.topologyGuard = undefined;
+      try {
+        guard.dispose();
+      } catch {
+        // Preserve the guard start failure after attempting rollback.
+      }
+      throw error;
+    }
   }
 
   private async runStartupOperation<T>(
@@ -2384,6 +2452,7 @@ export class ShowRunCoordinator {
     if (this.shutdownPromise !== undefined) return this.shutdownPromise;
     if (this.state === "stopped") return Promise.resolve();
 
+    this.disposeTopologyGuard();
     this.transition("shutting-down", result.reason);
     this.shutdownDiagnostics.requestedReason = result.reason;
     const startupOperation = this.startupOperation;
@@ -2571,6 +2640,17 @@ export class ShowRunCoordinator {
       this.resolveCompletion(finalResult);
     });
     return this.shutdownPromise;
+  }
+
+  private disposeTopologyGuard(): void {
+    const guard = this.topologyGuard;
+    this.topologyGuard = undefined;
+    if (guard === undefined) return;
+    try {
+      guard.dispose();
+    } catch {
+      this.recordShutdownFailure("topology-guard-dispose-failed");
+    }
   }
 
   private async runShutdownPhase<T>(

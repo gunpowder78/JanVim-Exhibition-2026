@@ -520,6 +520,7 @@ function createValidationHarness(options: {
   realpathOverrides?: Readonly<Record<string, string>>;
   artifactLockBytes?: Buffer;
   displayMapBytes?: Buffer;
+  liveDisplays?: readonly unknown[];
 } = {}) {
   const trace: string[] = [];
   const files = new Map<string, Buffer>([
@@ -528,6 +529,7 @@ function createValidationHarness(options: {
       options.artifactLockBytes ?? artifactLock,
     ],
     [win32.join(repositoryRoot, "show", "janvim-show.toml"), showConfig],
+    [win32.join(repositoryRoot, "show", "display-layout.json"), displayLayout],
     [
       win32.join(repositoryRoot, "content", "fixture", "show.manifest.json"),
       manifest,
@@ -575,7 +577,7 @@ function createValidationHarness(options: {
     screen: {
       getAllDisplays: () => {
         trace.push("display-snapshot");
-        return displays;
+        return options.liveDisplays ?? displays;
       },
     },
     controllerProcess: {
@@ -809,6 +811,13 @@ function createStartupHarness(options: {
   ]);
   const logStorage = options.logStorage ?? new MemoryLogStorage();
   const timers = new ManualTimers();
+  let currentLiveDisplays = options.liveDisplays ?? displays;
+  const screen = Object.assign(new EventEmitter(), {
+    getAllDisplays: () => {
+      trace.push("display-snapshot");
+      return currentLiveDisplays;
+    },
+  });
   let childKilled = false;
   let releaseLaunchArtifactVerification!: () => void;
   const launchArtifactVerificationGate = new Promise<void>((resolve) => {
@@ -1246,12 +1255,7 @@ function createStartupHarness(options: {
         ipcListeners.delete(channel);
       },
     },
-    screen: {
-      getAllDisplays: () => {
-        trace.push("display-snapshot");
-        return options.liveDisplays ?? displays;
-      },
-    },
+    screen,
     controllerProcess: {
       pid: 8001,
       startedAtUtc: "2026-08-30T00:00:00.000Z",
@@ -1719,6 +1723,17 @@ function createStartupHarness(options: {
     emitWindowClose: () => {
       lastWindow?.emit("close");
     },
+    setLiveDisplays: (value: readonly unknown[]) => {
+      currentLiveDisplays = value;
+    },
+    emitDisplayEvent: (
+      event: "display-added" | "display-removed" | "display-metrics-changed",
+    ) => {
+      screen.emit(event);
+    },
+    displayListenerCount: (
+      event: "display-added" | "display-removed" | "display-metrics-changed",
+    ) => screen.listenerCount(event),
     destroySecondary: () => {
       lastWindow?.destroy();
     },
@@ -2338,7 +2353,9 @@ describe("real Task 9 show runtime adapters", () => {
   it("validates frozen show inputs, the exact artifact, live routing, and offline state headlessly", async () => {
     const harness = createValidationHarness();
 
-    await expect(harness.adapters.validate(showCommand())).resolves.toBeUndefined();
+    await expect(harness.adapters.validate(showCommand())).resolves.toEqual({
+      outcome: "validated",
+    });
 
     expect(harness.trace).toEqual([
       "verify-runtime",
@@ -2366,6 +2383,71 @@ describe("real Task 9 show runtime adapters", () => {
     );
     expect(harness.processListeners).toHaveLength(0);
     expect(harness.appListeners).toHaveLength(0);
+  });
+
+  it("classifies a schema-2 mapping mismatch before artifact or network startup", async () => {
+    const changedDisplays = g4Displays.map((display) =>
+      display.id === "display-B"
+        ? { ...display, scaleFactor: 1.5 }
+        : display,
+    );
+    const harness = createValidationHarness({
+      displayMapBytes: Buffer.from(
+        `${JSON.stringify(g4ProductionMap())}\n`,
+        "utf8",
+      ),
+      liveDisplays: changedDisplays,
+    });
+
+    await expect(harness.adapters.validate(showCommand())).resolves.toEqual({
+      outcome: "configuration-required",
+      reason: "display-geometry-mismatch",
+    });
+
+    expect(harness.trace).toContain("display-snapshot");
+    expect(harness.trace).not.toContain("network-snapshot");
+    expect(
+      harness.trace.some((event) => event.startsWith("verify-artifact:")),
+    ).toBe(false);
+    expect(harness.trace).not.toContain("browser-window");
+    expect(harness.trace).not.toContain("spawn");
+    expect(harness.trace).not.toContain("bridge");
+  });
+
+  it("settles a schema-2 Show configuration outcome without runtime or evidence state", async () => {
+    const harness = createStartupHarness({
+      displayMapBytes: Buffer.from(`${JSON.stringify(g4ProductionMap())}\n`),
+      liveDisplays: [
+        g4Displays[0],
+        { ...g4Displays[1], rotation: 0 },
+        g4Displays[2],
+      ],
+    });
+    const coordinator = harness.adapters.createCoordinator(showCommand("Show"));
+
+    await expect(coordinator.boot()).resolves.toEqual({
+      ready: false,
+      outcome: "configuration-required",
+      reason: "display-geometry-mismatch",
+    });
+    await expect(coordinator.completion).resolves.toEqual({
+      ok: false,
+      reason: "display-configuration-required",
+    });
+
+    expect(harness.trace).not.toContain("network-snapshot");
+    expect(harness.browserWindows).toHaveLength(0);
+    expect(harness.spawnInvocationCount()).toBe(0);
+    expect(harness.leases).toHaveLength(0);
+    expect(harness.evidenceWrites).toHaveLength(0);
+    expect(harness.terminalWrites).toHaveLength(0);
+    for (const event of [
+      "display-added",
+      "display-removed",
+      "display-metrics-changed",
+    ] as const) {
+      expect(harness.displayListenerCount(event)).toBe(0);
+    }
   });
 
   it("rejects an oversized schema-2 map before its invalid JSON can be parsed", async () => {
@@ -2643,6 +2725,92 @@ describe("real Task 9 show runtime adapters", () => {
     await coordinator.requestEmergencyStop("sigint");
     expect(narrative?.isDestroyed()).toBe(true);
     expect(standby?.isDestroyed()).toBe(true);
+  });
+
+  it("ignores unassigned display changes but stops once on an assigned topology change", async () => {
+    const operator = {
+      id: "display-Z",
+      bounds: { x: 5760, y: 0, width: 1280, height: 720 },
+      workArea: { x: 5760, y: 0, width: 1280, height: 680 },
+      scaleFactor: 1.5,
+      rotation: 270,
+    } as const;
+    const harness = createStartupHarness({
+      displayMapBytes: Buffer.from(`${JSON.stringify(g4ProductionMap())}\n`),
+      liveDisplays: [...g4Displays, operator],
+    });
+    const coordinator = harness.adapters.createCoordinator(showCommand("Show"));
+
+    await expect(coordinator.boot()).resolves.toEqual({ ready: true });
+    const displaySnapshotIndexes = harness.trace
+      .map((event, index) => (event === "display-snapshot" ? index : -1))
+      .filter((index) => index >= 0);
+    expect(displaySnapshotIndexes).toHaveLength(2);
+    expect(displaySnapshotIndexes[1]).toBeLessThan(
+      harness.trace.indexOf("network-snapshot"),
+    );
+    for (const event of [
+      "display-added",
+      "display-removed",
+      "display-metrics-changed",
+    ] as const) {
+      expect(harness.displayListenerCount(event)).toBe(1);
+    }
+    const readsBeforeTopologyEvent = harness.trace.filter((event) =>
+      event.startsWith("read:"),
+    ).length;
+
+    harness.setLiveDisplays([
+      ...g4Displays,
+      { ...operator, bounds: { ...operator.bounds, x: 6000 } },
+    ]);
+    harness.emitDisplayEvent("display-metrics-changed");
+    await harness.timers.fireTimeout(500);
+    expect(coordinator.diagnostics().state).toBe("ready");
+    expect(harness.spawnInvocationCount()).toBe(1);
+    expect(
+      harness.trace.filter((event) => event.startsWith("read:")).length,
+    ).toBe(readsBeforeTopologyEvent);
+
+    harness.setLiveDisplays([
+      g4Displays[0],
+      { ...g4Displays[1], scaleFactor: 1.5 },
+      g4Displays[2],
+    ]);
+    harness.emitDisplayEvent("display-metrics-changed");
+    await harness.timers.fireTimeout(500);
+
+    await expect(coordinator.completion).resolves.toEqual({
+      ok: false,
+      reason: "emergency-display-topology-changed",
+    });
+    for (const event of [
+      "display-added",
+      "display-removed",
+      "display-metrics-changed",
+    ] as const) {
+      expect(harness.displayListenerCount(event)).toBe(0);
+      harness.emitDisplayEvent(event);
+    }
+    expect(harness.spawnInvocationCount()).toBe(1);
+    expect(harness.browserWindows).toHaveLength(2);
+    expect(harness.terminalWrites).toHaveLength(1);
+  });
+
+  it("does not install the G4 topology guard for a legacy schema-1 show", async () => {
+    const harness = createStartupHarness();
+    const coordinator = harness.adapters.createCoordinator(showCommand("Show"));
+
+    await expect(coordinator.boot()).resolves.toEqual({ ready: true });
+    for (const event of [
+      "display-added",
+      "display-removed",
+      "display-metrics-changed",
+    ] as const) {
+      expect(harness.displayListenerCount(event)).toBe(0);
+    }
+
+    await coordinator.requestEmergencyStop("sigint");
   });
 
   it("keeps the one-display Start surface above SCREEN-1 until accepted running", async () => {
@@ -3571,7 +3739,7 @@ describe("real Task 9 show runtime adapters", () => {
       if (blocked) {
         await expect(validation).rejects.toThrow(/offline|required|network/i);
       } else {
-        await expect(validation).resolves.toBeUndefined();
+        await expect(validation).resolves.toEqual({ outcome: "validated" });
       }
     },
   );
@@ -3685,7 +3853,7 @@ describe("real Task 9 show runtime adapters", () => {
         ...showCommand(),
         networkPolicy: "DiagnosticConnected",
       }),
-    ).resolves.toBeUndefined();
+    ).resolves.toEqual({ outcome: "validated" });
   });
 
   it("keeps DiagnosticConnected evidence explicitly non-accepting", async () => {

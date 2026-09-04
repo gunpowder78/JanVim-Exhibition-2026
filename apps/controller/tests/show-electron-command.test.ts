@@ -3,10 +3,15 @@ import { describe, expect, it, vi } from "vitest";
 import type { ShowCommand } from "../src/show-command.ts";
 import {
   runShowElectronCommand,
+  type EmergencyStopReason,
   type RunShowCommand,
   type ShowElectronCommandAdapters,
+  type ShowValidationOutcome,
 } from "../src/show-electron-command.ts";
-import type { ShowRunResult } from "../src/show-run-coordinator.ts";
+import type {
+  ShowBootOutcome,
+  ShowRunResult,
+} from "../src/show-run-coordinator.ts";
 
 function command(mode: ShowCommand["mode"]): ShowCommand {
   return {
@@ -32,15 +37,17 @@ function deferred<T>() {
 
 function createHarness(options: {
   validationFailure?: boolean;
-  boot?: { ready: true } | { ready: false; reason: string };
+  validation?: ShowValidationOutcome;
+  boot?: ShowBootOutcome;
   bootFailure?: boolean;
   completion?: ShowRunResult;
   deferredCompletion?: boolean;
+  terminalShutdownStarted?: boolean;
 } = {}) {
   const pendingCompletion = deferred<ShowRunResult>();
-  const lifecycleReasons: Array<"sigint" | "window-close" | "electron-quit"> = [];
+  const lifecycleReasons: EmergencyStopReason[] = [];
   let lifecycleListener:
-    | ((reason: "sigint" | "window-close" | "electron-quit") => void)
+    | ((reason: EmergencyStopReason) => void)
     | undefined;
   let validateCount = 0;
   let factoryCount = 0;
@@ -59,15 +66,19 @@ function createHarness(options: {
     }),
     completion,
     requestEmergencyStop: vi.fn(
-      async (reason: "sigint" | "window-close" | "electron-quit") => {
+      async (reason: EmergencyStopReason) => {
         lifecycleReasons.push(reason);
       },
+    ),
+    terminalShutdownStarted: vi.fn(
+      () => options.terminalShutdownStarted ?? false,
     ),
   };
   const adapters: ShowElectronCommandAdapters = {
     validate: async () => {
       validateCount += 1;
       if (options.validationFailure === true) throw new Error("validation-failed");
+      return options.validation ?? { outcome: "validated" as const };
     },
     createCoordinator: (runCommand) => {
       factoryCount += 1;
@@ -90,7 +101,7 @@ function createHarness(options: {
     adapters,
     coordinator,
     lifecycleReasons,
-    emitLifecycle: (reason: "sigint" | "window-close" | "electron-quit") => {
+    emitLifecycle: (reason: EmergencyStopReason) => {
       if (lifecycleListener === undefined) throw new Error("lifecycle not bound");
       lifecycleListener(reason);
     },
@@ -137,6 +148,23 @@ describe("Task 9 Electron command dispatcher", () => {
     await expect(
       runShowElectronCommand(command("ValidateOnly"), harness.adapters),
     ).resolves.toBe(1);
+
+    expect(harness.validateCount).toBe(1);
+    expect(harness.factoryCount).toBe(0);
+    expect(harness.bindCount).toBe(0);
+  });
+
+  it("returns exit 2 only for the owned ValidateOnly configuration outcome", async () => {
+    const harness = createHarness({
+      validation: {
+        outcome: "configuration-required",
+        reason: "display-id-mismatch",
+      },
+    });
+
+    await expect(
+      runShowElectronCommand(command("ValidateOnly"), harness.adapters),
+    ).resolves.toBe(2);
 
     expect(harness.validateCount).toBe(1);
     expect(harness.factoryCount).toBe(0);
@@ -219,6 +247,58 @@ describe("Task 9 Electron command dispatcher", () => {
     await expect(pending).resolves.toBe(1);
     expect(harness.disposeCount).toBe(1);
     expect(harness.coordinator.requestEmergencyStop).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns exit 2 for the owned Show configuration outcome without emergency cleanup", async () => {
+    const harness = createHarness({
+      boot: {
+        ready: false,
+        outcome: "configuration-required",
+        reason: "display-geometry-mismatch",
+      },
+      completion: { ok: false, reason: "display-configuration-required" },
+      terminalShutdownStarted: true,
+    });
+
+    await expect(
+      runShowElectronCommand(command("Show"), harness.adapters),
+    ).resolves.toBe(2);
+
+    expect(harness.coordinator.requestEmergencyStop).not.toHaveBeenCalled();
+    expect(harness.lifecycleReasons).toEqual([]);
+    expect(harness.disposeCount).toBe(1);
+  });
+
+  it("does not parse a generic boot reason into exit 2", async () => {
+    const harness = createHarness({
+      boot: { ready: false, reason: "display-configuration-required" },
+      deferredCompletion: true,
+    });
+    const pending = runShowElectronCommand(command("Show"), harness.adapters);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(harness.lifecycleReasons).toEqual(["electron-quit"]);
+    harness.resolveCompletion({ ok: false, reason: "emergency-electron-quit" });
+    await expect(pending).resolves.toBe(1);
+  });
+
+  it("does not append electron-quit after topology shutdown already owns completion", async () => {
+    const harness = createHarness({
+      completion: {
+        ok: false,
+        reason: "emergency-display-topology-changed",
+      },
+      terminalShutdownStarted: true,
+    });
+
+    await expect(
+      runShowElectronCommand(command("Show"), harness.adapters),
+    ).resolves.toBe(1);
+
+    expect(harness.coordinator.requestEmergencyStop).not.toHaveBeenCalled();
+    expect(harness.lifecycleReasons).toEqual([]);
+    expect(harness.disposeCount).toBe(1);
   });
 
   it("cleans up after boot or completion rejection and returns nonzero", async () => {

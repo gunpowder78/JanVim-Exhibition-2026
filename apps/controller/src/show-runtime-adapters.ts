@@ -42,6 +42,7 @@ import {
   createFullscreenWindowPlan,
   createSecondaryWindowPlan,
   resolveDisplayRoute,
+  type DisplayConfigurationReason,
   type DisplayMapConfig,
   type Rectangle,
   type ResolvedDisplayRoute,
@@ -50,10 +51,15 @@ import {
   assertDisplayMapBytesWithinLimit,
   parseDisplayLayout,
   parseDisplayMap,
+  type DisplayLayout,
   type DisplayMapV2,
   type ShowRuntimeDisplay as ResolvedShowRuntimeDisplay,
   type SoftDisplayId,
 } from "./display-routing-contract.js";
+import {
+  DisplayTopologyGuard,
+  type DisplayTopologyEventName,
+} from "./display-topology-guard.js";
 import type {
   G2BrowserWindowConstructor,
   G2BrowserWindowAdapter,
@@ -189,7 +195,17 @@ export type ShowRuntimeDisplay = ResolvedShowRuntimeDisplay;
 export interface ShowRuntimeAdapterHost
   extends Omit<G2RuntimeAdapterHost, "BrowserWindow" | "screen"> {
   BrowserWindow: G2BrowserWindowConstructor;
-  screen: { getAllDisplays(): readonly unknown[] };
+  screen: {
+    getAllDisplays(): readonly unknown[];
+    on?(
+      event: DisplayTopologyEventName,
+      listener: (...arguments_: readonly unknown[]) => void,
+    ): unknown;
+    removeListener?(
+      event: DisplayTopologyEventName,
+      listener: (...arguments_: readonly unknown[]) => void,
+    ): unknown;
+  };
   controllerProcess: ShowControllerProcessAdapter;
   electronApp: ShowElectronAppAdapter;
   sampleProcess?(pid: number): Promise<{ rssBytes: number; handleCount: number }>;
@@ -221,6 +237,7 @@ export interface ShowRuntimeAdapterHost
 type ArtifactLock = z.infer<typeof artifactLockSchema>;
 
 interface ValidatedShowInputs {
+  readonly outcome: "validated";
   readonly command: ShowCommand;
   readonly snapshot: FrozenRuntimeSnapshot;
   readonly lock: ArtifactLock;
@@ -228,9 +245,16 @@ interface ValidatedShowInputs {
   readonly poem: Buffer;
   readonly displayMap: DisplayMapConfig | DisplayMapV2;
   readonly displayRoute: Extract<ResolvedDisplayRoute, { state: "mapped" }>;
+  readonly displayLayout?: DisplayLayout;
   readonly layoutSnapshot?: FrozenRuntimeSnapshot;
-  readonly startupNetworkSnapshot: NetworkSnapshotEvidence;
 }
+
+type ShowInputValidation =
+  | ValidatedShowInputs
+  | {
+      readonly outcome: "configuration-required";
+      readonly reason: DisplayConfigurationReason;
+    };
 
 interface NormalizedShowHost {
   readonly source: ShowRuntimeAdapterHost;
@@ -284,8 +308,11 @@ export function createShowRuntimeAdapters(
 
   return {
     validate: async (command) => {
-      const inputs = await validateShowInputs(host, command);
-      assertValidatedShowInputsUnchanged(inputs);
+      const validation = await validateShowInputs(host, command);
+      if (validation.outcome === "configuration-required") return validation;
+      await sampleRequiredNetwork(host, command);
+      assertValidatedShowInputsUnchanged(validation);
+      return { outcome: "validated" };
     },
     createCoordinator: (command) => createCoordinator(host, command, lifecycle),
     bindEmergencyLifecycle: (listener) => lifecycle.bind(listener),
@@ -347,7 +374,6 @@ function createCoordinator(
     showLogSecrets(host.repositoryRoot),
   );
   let inputs: ValidatedShowInputs | undefined;
-  let startupNetworkPending = false;
   let activeRendererPid: number | undefined;
   let activeJanVimPid: number | undefined;
 
@@ -361,8 +387,9 @@ function createCoordinator(
     mode: command.mode,
     originalPoemSha256: "b699de273f5bbaedb08241495f52ce863d3e8e1851275ce3b6251484d75190a8",
     validate: async () => {
-      inputs = await validateShowInputs(host, command);
-      startupNetworkPending = true;
+      const validation = await validateShowInputs(host, command);
+      if (validation.outcome === "configuration-required") return validation;
+      inputs = validation;
       for (const feature of ["formula", "image", "matrix"] as const) {
         if (!inputs.manifest.cues.some((cue) => cue.kind === feature)) {
           logger.writeJson("controller", {
@@ -372,6 +399,51 @@ function createCoordinator(
           });
         }
       }
+      return { outcome: "validated" };
+    },
+    createTopologyGuard: (onTopologyChanged) => {
+      const current = requireInputs();
+      if (current.displayMap.schema === 1) return undefined;
+      if (current.displayLayout === undefined) {
+        throw new Error("show-display-layout-unavailable");
+      }
+      const on = host.source.screen.on;
+      const removeListener = host.source.screen.removeListener;
+      if (on === undefined || removeListener === undefined) {
+        throw new Error("display-topology-source-unavailable");
+      }
+      const layout = current.displayLayout;
+      const map = current.displayMap;
+      return new DisplayTopologyGuard({
+        source: {
+          on: (event, listener) => {
+            on.call(host.source.screen, event, listener);
+          },
+          removeListener: (event, listener) => {
+            removeListener.call(host.source.screen, event, listener);
+          },
+        },
+        timers: host.timers,
+        expectedRoute: current.displayRoute,
+        resolveCurrentRoute: () =>
+          resolveDisplayRoute(
+            normalizeShowDisplays(host.source.screen.getAllDisplays()),
+            layout,
+            map,
+          ),
+        onTopologyChanged,
+        onTopologyStable: () => {
+          try {
+            logger.writeJson("controller", {
+              type: "display-topology-stable",
+              runId: command.runId,
+              controllerRunId: command.controllerRunId,
+            });
+          } catch {
+            // Diagnostic logging cannot change topology safety behavior.
+          }
+        },
+      });
     },
     openSecondary: async (generationId, signal) => {
       const current = requireInputs();
@@ -432,12 +504,8 @@ function createCoordinator(
       return sampler;
     },
     sampleNetwork: async () => {
-      const current = requireInputs();
-      if (startupNetworkPending) {
-        startupNetworkPending = false;
-        return { ...current.startupNetworkSnapshot };
-      }
-      return sampleNetwork(host);
+      requireInputs();
+      return sampleRequiredNetwork(host, command);
     },
     finalizeEvidence: async (result, diagnostics, signal) => {
       if (
@@ -569,7 +637,7 @@ function normalizeShowHost(source: ShowRuntimeAdapterHost): NormalizedShowHost {
 async function validateShowInputs(
   host: NormalizedShowHost,
   command: ShowCommand,
-): Promise<ValidatedShowInputs> {
+): Promise<ShowInputValidation> {
   assertCanonicalShowBoundaries(host, command);
   const paths = showRuntimePaths(host.repositoryRoot, command.rehearsalRoot);
   if (!pathsEqual(command.displayMapPath, paths.displayMap)) {
@@ -669,7 +737,10 @@ async function validateShowInputs(
   const liveDisplays = normalizeShowDisplays(host.source.screen.getAllDisplays());
   const displayRoute = resolveDisplayRoute(liveDisplays, layout, displayMap);
   if (displayRoute.state !== "mapped") {
-    throw new Error(displayRoute.reason);
+    return {
+      outcome: "configuration-required",
+      reason: displayRoute.reason,
+    };
   }
 
   const artifactVerification = await host.verifyArtifact(
@@ -682,15 +753,8 @@ async function validateShowInputs(
     );
   }
 
-  const startupNetworkSnapshot = await sampleNetwork(host);
-  if (
-    command.networkPolicy === "OfflineRequired" &&
-    !startupNetworkSnapshot.offline
-  ) {
-    throw new Error("offline-required-network-active");
-  }
-
   return {
+    outcome: "validated",
     command,
     snapshot,
     lock,
@@ -698,8 +762,8 @@ async function validateShowInputs(
     poem,
     displayMap,
     displayRoute,
+    ...(layout === undefined ? {} : { displayLayout: layout }),
     ...(layoutSnapshot === undefined ? {} : { layoutSnapshot }),
-    startupNetworkSnapshot,
   };
 }
 
@@ -846,6 +910,17 @@ async function sampleNetwork(
       parsed.activeExternalDefaultRoutes === 0 &&
       parsed.connectedExternalProfiles === 0,
   };
+}
+
+async function sampleRequiredNetwork(
+  host: NormalizedShowHost,
+  command: ShowCommand,
+): Promise<NetworkSnapshotEvidence> {
+  const snapshot = await sampleNetwork(host);
+  if (command.networkPolicy === "OfflineRequired" && !snapshot.offline) {
+    throw new Error("offline-required-network-active");
+  }
+  return snapshot;
 }
 
 function buildShowEvidence(

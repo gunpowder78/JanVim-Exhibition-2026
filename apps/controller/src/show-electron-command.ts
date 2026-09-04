@@ -1,31 +1,40 @@
 import type { ShowCommand } from "./show-command.js";
 import type {
+  ShowBootOutcome,
   ShowRunCoordinator,
   ShowRunResult,
+  ShowValidationOutcome,
 } from "./show-run-coordinator.js";
 
 export type EmergencyStopReason =
   | "sigint"
   | "window-close"
+  | "display-topology-changed"
   | "electron-quit";
+
+export type { ShowValidationOutcome } from "./show-run-coordinator.js";
 
 export type RunShowCommand = Omit<ShowCommand, "mode"> & {
   mode: "Soak3" | "Show";
 };
 
 export interface ShowCoordinatorAdapter {
-  boot(): Promise<{ ready: true } | { ready: false; reason: string }>;
+  boot(): Promise<ShowBootOutcome>;
   readonly completion: Promise<ShowRunResult>;
   requestEmergencyStop(reason: EmergencyStopReason): Promise<void>;
+  terminalShutdownStarted(): boolean;
 }
 
 export interface ShowElectronCommandAdapters {
-  validate(command: ShowCommand): Promise<void>;
+  validate(command: ShowCommand): Promise<ShowValidationOutcome>;
   createCoordinator(
     command: RunShowCommand,
   ): Pick<
     ShowRunCoordinator,
-    "boot" | "completion" | "requestEmergencyStop"
+    | "boot"
+    | "completion"
+    | "requestEmergencyStop"
+    | "terminalShutdownStarted"
   >;
   bindEmergencyLifecycle(
     listener: (reason: EmergencyStopReason) => void,
@@ -38,8 +47,8 @@ export async function runShowElectronCommand(
 ): Promise<number> {
   if (command.mode === "ValidateOnly") {
     try {
-      await adapters.validate(command);
-      return 0;
+      const validation = await adapters.validate(command);
+      return validation.outcome === "configuration-required" ? 2 : 0;
     } catch {
       return 1;
     }
@@ -58,16 +67,20 @@ export async function runShowElectronCommand(
       void coordinator.requestEmergencyStop(reason).catch(() => undefined);
     });
     const boot = await coordinator.boot();
-    if (!boot.ready) return 1;
+    if (!boot.ready) {
+      return boot.outcome === "configuration-required" ? 2 : 1;
+    }
     const result = await coordinator.completion;
     return result.ok ? 0 : 1;
   } catch {
     return 1;
   } finally {
-    try {
-      await coordinator.requestEmergencyStop("electron-quit");
-    } catch {
-      // Coordinator shutdown remains bounded and completion is still observed below.
+    if (!coordinator.terminalShutdownStarted()) {
+      try {
+        await coordinator.requestEmergencyStop("electron-quit");
+      } catch {
+        // Coordinator shutdown remains bounded and completion is still observed below.
+      }
     }
     try {
       await coordinator.completion;
