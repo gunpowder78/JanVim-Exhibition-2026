@@ -93,10 +93,18 @@ export class ShowSurfaceGroup implements ShowSecondarySurface {
     }
 
     if (!this.previewStarted) {
-      this.narrative.send(event);
-      if (event.state !== "running") return;
-      this.narrative.hide();
-      this.previewStarted = true;
+      if (event.state !== "running") {
+        this.narrative.send(event);
+        return;
+      }
+      try {
+        this.narrative.send(event);
+        this.narrative.hide();
+        this.previewStarted = true;
+      } catch (error) {
+        this.enterPreviewSafetyFallback();
+        throw error;
+      }
       return;
     }
 
@@ -113,6 +121,18 @@ export class ShowSurfaceGroup implements ShowSecondarySurface {
       this.previewSafetyVisible = true;
     }
     this.narrative.send(event);
+  }
+
+  private enterPreviewSafetyFallback(): void {
+    this.previewStarted = true;
+    runAll([
+      () => this.narrative.hide(),
+      () => {
+        if (this.previewSafetyVisible) return;
+        this.previewSafety!.show();
+        this.previewSafetyVisible = true;
+      },
+    ]);
   }
 
   public onEvent(

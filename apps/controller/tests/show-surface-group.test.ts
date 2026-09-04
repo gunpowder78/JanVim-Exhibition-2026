@@ -381,6 +381,33 @@ describe("ShowSurfaceGroup", () => {
     expect(narrative.showCount).toBe(0);
   });
 
+  it("leaves a safe preview visible when the first running status send fails", () => {
+    const trace: string[] = [];
+    const narrative = new FakeNarrative(trace, undefined, "running");
+    const previewSafety = new FakePreviewSafety(trace);
+    const group = new ShowSurfaceGroup({ narrative, previewSafety });
+    const status = (state: RunStatusEvent["state"]): RunStatusEvent => ({
+      schema: 1,
+      type: "run-status",
+      generationId: 1,
+      state,
+    });
+
+    expect(() => group.send(status("running"))).toThrow(
+      "narrative send failed for running",
+    );
+    expect(() => group.send(status("safe-ready"))).not.toThrow();
+
+    expect(trace).toEqual([
+      "narrative:send:run-status:running",
+      "narrative:hide",
+      "preview-safety:show",
+      "narrative:send:run-status:safe-ready",
+    ]);
+    expect(narrative.visible).toBe(false);
+    expect(previewSafety.visible).toBe(true);
+  });
+
   it("treats preview safety loss as one grouped destruction", async () => {
     const narrative = new FakeNarrative([]);
     const previewSafety = new FakePreviewSafety([]);
