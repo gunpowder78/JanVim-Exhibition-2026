@@ -79,8 +79,13 @@ export class DisplayTopologyGuard {
     if (this.disposed) return;
     this.disposed = true;
     if (this.timer !== undefined) {
-      this.options.timers.clearTimeout(this.timer);
+      const timer = this.timer;
       this.timer = undefined;
+      try {
+        this.options.timers.clearTimeout(timer);
+      } catch {
+        // Listener cleanup must continue even if timer cancellation fails.
+      }
     }
     for (const event of this.registeredEvents.splice(0).reverse()) {
       try {

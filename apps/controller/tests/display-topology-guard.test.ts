@@ -97,6 +97,7 @@ class FakeTopologyTimers implements DisplayTopologyGuardTimers {
   private readonly pending = new Map<number, () => void>();
   public readonly delays: number[] = [];
   public failSet = false;
+  public failClear = false;
 
   public setTimeout(callback: () => void, delayMs: number): number {
     if (this.failSet) throw new Error("injected topology timer failure");
@@ -107,6 +108,7 @@ class FakeTopologyTimers implements DisplayTopologyGuardTimers {
   }
 
   public clearTimeout(handle: number | object): void {
+    if (this.failClear) throw new Error("injected topology clear failure");
     if (typeof handle === "number") this.pending.delete(handle);
   }
 
@@ -317,6 +319,22 @@ describe("DisplayTopologyGuard", () => {
     for (const event of topologyEvents) {
       expect(harness.source.listenerCount(event)).toBe(0);
     }
+  });
+
+  it("still removes every listener when clearing a pending timer throws", () => {
+    const harness = createHarness();
+    harness.guard.start();
+    harness.source.emit("display-added");
+    harness.timers.failClear = true;
+
+    expect(() => harness.guard.dispose()).not.toThrow();
+
+    for (const event of topologyEvents) {
+      expect(harness.source.listenerCount(event)).toBe(0);
+    }
+    harness.timers.fireOnly();
+    expect(harness.resolver).toHaveBeenCalledOnce();
+    expect(harness.onTopologyChanged).not.toHaveBeenCalled();
   });
 
   it.each(["display-removed", "display-metrics-changed"] as const)(
