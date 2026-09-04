@@ -183,9 +183,13 @@ export async function mountDisplayConfigurator(
   listen(mode, "change", update);
   for (const select of roleSelectors.values()) listen(select, "change", update);
   listen(identify, "click", () => {
+    if (identify.disabled) return;
+    identify.disabled = true;
     void runAction(status, async () => {
       await api.identifyDisplays(snapshot.topologySha256);
       return "Identification cards opened for 12 seconds.";
+    }).finally(() => {
+      identify.disabled = false;
     });
   });
   listen(closeIdentify, "click", () => {

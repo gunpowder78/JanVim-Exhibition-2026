@@ -92,6 +92,33 @@ function Assert-PlainPath {
     }
 }
 
+function Assert-NoDisplayConfigReparseTraversal {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Reason
+    )
+
+    $currentPath = Resolve-DisplayConfigPath -Path $Path -Label 'reparse-traversal-path'
+    while (-not (Test-Path -LiteralPath $currentPath)) {
+        $parentPath = [IO.Path]::GetDirectoryName($currentPath)
+        if ([string]::IsNullOrWhiteSpace($parentPath) -or (Test-DisplayConfigPathEqual -Left $parentPath -Right $currentPath)) {
+            throw $Reason
+        }
+        $currentPath = $parentPath
+    }
+    while ($null -ne $currentPath) {
+        $item = Get-Item -LiteralPath $currentPath -Force
+        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw $Reason
+        }
+        $parentPath = [IO.Path]::GetDirectoryName($currentPath)
+        if ([string]::IsNullOrWhiteSpace($parentPath) -or (Test-DisplayConfigPathEqual -Left $parentPath -Right $currentPath)) {
+            break
+        }
+        $currentPath = $parentPath
+    }
+}
+
 $repositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..')).TrimEnd('\', '/')
 $agentsPath = Join-Path $repositoryRoot 'AGENTS.md'
 if (-not (Test-Path -LiteralPath $agentsPath -PathType Leaf)) {
@@ -150,13 +177,48 @@ foreach ($requiredFile in $requiredFiles) {
     }
 }
 
+Assert-NoDisplayConfigReparseTraversal -Path $resolvedParent -Reason 'rehearsal-parent-reparse-rejected'
 Assert-PlainPath -Path $resolvedParent -Kind Container -Reason 'rehearsal-parent-invalid'
 if (-not (Test-Path -LiteralPath $resolvedRehearsalRoot)) {
     [void](New-Item -ItemType Directory -Path $resolvedRehearsalRoot)
 }
+Assert-NoDisplayConfigReparseTraversal -Path $resolvedRehearsalRoot -Reason 'rehearsal-root-reparse-rejected'
 Assert-PlainPath -Path $resolvedRehearsalRoot -Kind Container -Reason 'rehearsal-root-invalid'
+Assert-NoDisplayConfigReparseTraversal -Path $resolvedDisplayMapPath -Reason 'display-map-reparse-rejected'
 if (Test-Path -LiteralPath $resolvedDisplayMapPath) {
     Assert-PlainPath -Path $resolvedDisplayMapPath -Kind Leaf -Reason 'display-map-invalid'
+}
+
+$canonicalParent = (Get-Item -LiteralPath $resolvedParent -Force).FullName.TrimEnd([char[]]@('\', '/'))
+$canonicalRoot = (Get-Item -LiteralPath $resolvedRehearsalRoot -Force).FullName.TrimEnd([char[]]@('\', '/'))
+if (
+    -not (Test-DisplayConfigPathEqual -Left $canonicalParent -Right $resolvedParent) -or
+    -not (Test-DisplayConfigPathEqual -Left ([IO.Path]::GetDirectoryName($canonicalRoot)) -Right $canonicalParent)
+) {
+    throw 'canonical-rehearsal-boundary-invalid'
+}
+$canonicalMap = if (Test-Path -LiteralPath $resolvedDisplayMapPath) {
+    (Get-Item -LiteralPath $resolvedDisplayMapPath -Force).FullName
+}
+else {
+    Join-Path $canonicalRoot 'display-map.json'
+}
+if (-not (Test-DisplayConfigPathEqual -Left ([IO.Path]::GetDirectoryName($canonicalMap)) -Right $canonicalRoot)) {
+    throw 'canonical-display-map-boundary-invalid'
+}
+foreach ($candidate in @($canonicalRoot, $canonicalMap)) {
+    foreach ($protectedRoot in $protectedRoots) {
+        if (Test-DisplayConfigAtOrBelow -Candidate $candidate -Root $protectedRoot) {
+            throw 'canonical-protected-path-rejected'
+        }
+    }
+    if (
+        (Test-DisplayConfigAtOrBelow -Candidate $candidate -Root $repositoryRoot) -or
+        (Test-DisplayConfigAtOrBelow -Candidate $candidate -Root $janVimProductRoot) -or
+        $candidate -match '\\AppData\\Local\\nvim(?:\\|$)'
+    ) {
+        throw 'canonical-source-or-user-path-rejected'
+    }
 }
 
 $electronArguments = @(

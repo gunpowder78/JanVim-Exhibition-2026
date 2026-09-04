@@ -135,6 +135,27 @@ function validArguments(fixture: LauncherFixture): string[] {
 }
 
 describe("public manual display configurator launcher", () => {
+  it("walks every existing target ancestor before creating or invoking", () => {
+    const source = readFileSync(productionScript, "utf8");
+    expect(source).toContain("function Assert-NoDisplayConfigReparseTraversal");
+    expect(source).toMatch(
+      /Assert-NoDisplayConfigReparseTraversal\s+-Path\s+\$resolvedParent/u,
+    );
+    expect(source).toMatch(
+      /Assert-NoDisplayConfigReparseTraversal\s+-Path\s+\$resolvedRehearsalRoot/gu,
+    );
+    expect(source).toMatch(
+      /Assert-NoDisplayConfigReparseTraversal\s+-Path\s+\$resolvedDisplayMapPath/gu,
+    );
+    const traversal = source.indexOf(
+      "Assert-NoDisplayConfigReparseTraversal -Path $resolvedParent",
+    );
+    const creation = source.indexOf("New-Item -ItemType Directory");
+    expect(traversal).toBeGreaterThan(-1);
+    expect(creation).toBeGreaterThan(traversal);
+    expect(source).toMatch(/GetDirectoryName\(\$currentPath\)/u);
+  });
+
   it("creates only the fresh rehearsal root and invokes one closed command", () => {
     const fixture = makeFixture();
     try {

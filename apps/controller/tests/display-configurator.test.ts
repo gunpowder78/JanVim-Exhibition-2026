@@ -19,6 +19,7 @@ import {
   SNAPSHOT_CHANNEL,
   buildDisplayMapBytes,
   captureConfigurationSnapshot,
+  assertNoDisplayConfigReparseTraversal,
   runDisplayConfigurator,
   writeDisplayMapAtomic,
   type DisplayConfigBrowserWindowAdapter,
@@ -71,20 +72,26 @@ class MemoryAtomicFileSystem implements DisplayMapAtomicFileSystem {
   public readonly calls: string[] = [];
   public failRename = false;
   private nextDescriptor = 1;
+  private nextIdentity = 1;
+  private readonly pathIdentities = new Map<string, string>();
+  private readonly reparsePaths = new Set<string>();
   private readonly descriptors = new Map<
     number,
-    { path: string; bytes: Buffer; closed: boolean }
+    { path: string; bytes: Buffer; closed: boolean; identity: string }
   >();
 
   public openExclusive(path: string): number {
     this.calls.push(`open:wx:${path}`);
     if (this.files.has(path)) throw new Error("EEXIST");
     const descriptor = this.nextDescriptor++;
+    const identity = `memory-file-${this.nextIdentity++}`;
     this.descriptors.set(descriptor, {
       path,
       bytes: Buffer.alloc(0),
       closed: false,
+      identity,
     });
+    this.pathIdentities.set(path, identity);
     this.files.set(path, Buffer.alloc(0));
     return descriptor;
   }
@@ -101,6 +108,39 @@ class MemoryAtomicFileSystem implements DisplayMapAtomicFileSystem {
     this.calls.push("flush");
   }
 
+  public inspectDescriptor(descriptor: number) {
+    const open = this.requireDescriptor(descriptor);
+    this.calls.push("inspect-descriptor");
+    return {
+      device: "memory",
+      file: open.identity,
+      byteLength: open.bytes.length,
+      regularFile: true,
+      reparsePoint: false,
+    };
+  }
+
+  public inspectPath(path: string) {
+    this.calls.push("inspect-path");
+    const identity = this.pathIdentities.get(path);
+    const bytes = this.files.get(path);
+    if (identity === undefined || bytes === undefined) throw new Error("ENOENT");
+    return {
+      device: "memory",
+      file: identity,
+      byteLength: bytes.length,
+      regularFile: true,
+      reparsePoint: this.reparsePaths.has(path),
+    };
+  }
+
+  public readDescriptor(descriptor: number, maximumBytes: number): Buffer {
+    const open = this.requireDescriptor(descriptor);
+    this.calls.push("read-descriptor");
+    if (open.bytes.length > maximumBytes) throw new Error("bounded read exceeded");
+    return Buffer.from(open.bytes);
+  }
+
   public close(descriptor: number): void {
     const open = this.requireDescriptor(descriptor);
     if (open.closed) return;
@@ -115,17 +155,54 @@ class MemoryAtomicFileSystem implements DisplayMapAtomicFileSystem {
     if (bytes === undefined) throw new Error("source missing");
     this.files.set(target, bytes);
     this.files.delete(source);
+    this.pathIdentities.delete(source);
+    this.reparsePaths.delete(source);
   }
 
   public remove(path: string): void {
     this.calls.push(`remove:${path}`);
     this.files.delete(path);
+    this.pathIdentities.delete(path);
+    this.reparsePaths.delete(path);
+  }
+
+  public substituteTemporary(bytes: Buffer): void {
+    const open = this.lastDescriptor();
+    this.files.set(open.path, Buffer.from(bytes));
+    this.pathIdentities.set(open.path, `substitute-${this.nextIdentity++}`);
+  }
+
+  public markTemporaryReparse(): void {
+    this.reparsePaths.add(this.lastDescriptor().path);
+  }
+
+  public mutateTemporaryBytes(bytes: Buffer): void {
+    const open = this.lastDescriptor();
+    open.bytes = Buffer.from(bytes);
+    if (this.pathIdentities.get(open.path) === open.identity) {
+      this.files.set(open.path, Buffer.from(bytes));
+    }
   }
 
   private requireDescriptor(descriptor: number) {
     const open = this.descriptors.get(descriptor);
     if (open === undefined) throw new Error("bad descriptor");
     return open;
+  }
+
+  private lastDescriptor() {
+    const open = [...this.descriptors.values()].at(-1);
+    if (open === undefined) throw new Error("no temporary descriptor");
+    return open;
+  }
+}
+
+async function captureError(operation: () => unknown): Promise<unknown> {
+  try {
+    await operation();
+    return undefined;
+  } catch (error) {
+    return error;
   }
 }
 
@@ -398,6 +475,28 @@ function productionRequest(topologySha256 = SNAPSHOT_TOKEN) {
 }
 
 describe("display topology snapshot and map publication", () => {
+  it("rejects a reparse point in any existing target ancestor", () => {
+    const inspected: string[] = [];
+    const reparseAncestor = "D:\\VirtualData";
+
+    expect(() =>
+      assertNoDisplayConfigReparseTraversal(
+        "D:\\VirtualData\\JanVim-Exhibition-Rehearsals\\g4-config\\display-map.json",
+        (path) => {
+          inspected.push(path);
+          return {
+            exists: true,
+            reparsePoint: path.toLowerCase() === reparseAncestor.toLowerCase(),
+          };
+        },
+      ),
+    ).toThrow(/reparse/i);
+    expect(inspected).toContain(reparseAncestor);
+    expect(inspected).toContain(
+      "D:\\VirtualData\\JanVim-Exhibition-Rehearsals\\g4-config\\display-map.json",
+    );
+  });
+
   it("sorts and numbers by top, left, then ID without assigning a role", () => {
     const snapshot = captureConfigurationSnapshot([
       rawDisplay("C", "C projector", 3840, 1, 180),
@@ -479,7 +578,7 @@ describe("display topology snapshot and map publication", () => {
     ).toThrow(/bindings|roles/i);
   });
 
-  it("uses same-directory exclusive temp, flushes before commit, and preserves old map", async () => {
+  it("keeps the exclusive temp open through synchronous validation and rename", async () => {
     const fileSystem = new MemoryAtomicFileSystem();
     fileSystem.files.set(displayMapPath, Buffer.from("old map\n"));
     const layout = parseDisplayLayout(
@@ -493,29 +592,36 @@ describe("display topology snapshot and map publication", () => {
     );
     const beforeCommit: string[] = [];
 
-    await writeDisplayMapAtomic(
+    const result = writeDisplayMapAtomic(
       displayMapPath,
       bytes,
-      () => beforeCommit.push("checked"),
+      () => {
+        beforeCommit.push("checked");
+        fileSystem.calls.push("precommit");
+      },
       fileSystem,
       "fixture",
     );
 
+    expect(result).toBeUndefined();
     expect(beforeCommit).toEqual(["checked"]);
-    expect(fileSystem.calls.slice(0, 4)).toEqual([
+    expect(fileSystem.calls).toEqual([
       `open:wx:${rehearsalRoot}\\.display-map-fixture.tmp`,
       "write",
       "flush",
+      "inspect-descriptor",
+      "precommit",
+      "inspect-descriptor",
+      "inspect-path",
+      "read-descriptor",
+      `rename:${rehearsalRoot}\\.display-map-fixture.tmp:${displayMapPath}`,
       "close",
     ]);
-    expect(fileSystem.calls[4]).toBe(
-      `rename:${rehearsalRoot}\\.display-map-fixture.tmp:${displayMapPath}`,
-    );
     expect(parseDisplayMap(fileSystem.files.get(displayMapPath)!)).toBeTruthy();
 
     fileSystem.files.set(displayMapPath, Buffer.from("known good old map\n"));
     fileSystem.failRename = true;
-    await expect(
+    const renameError = await captureError(() =>
       writeDisplayMapAtomic(
         displayMapPath,
         bytes,
@@ -523,7 +629,89 @@ describe("display topology snapshot and map publication", () => {
         fileSystem,
         "second",
       ),
-    ).rejects.toThrow(/rename failed/i);
+    );
+    expect(String(renameError)).toMatch(/rename failed/i);
+    expect(fileSystem.files.get(displayMapPath)?.toString("utf8")).toBe(
+      "known good old map\n",
+    );
+    expect(
+      [...fileSystem.files.keys()].some((path) => path.endsWith(".tmp")),
+    ).toBe(false);
+  });
+
+  it.each([
+    {
+      name: "path substitution",
+      mutate: (fileSystem: MemoryAtomicFileSystem, bytes: Buffer) =>
+        fileSystem.substituteTemporary(bytes),
+    },
+    {
+      name: "reparse substitution",
+      mutate: (fileSystem: MemoryAtomicFileSystem) =>
+        fileSystem.markTemporaryReparse(),
+    },
+    {
+      name: "descriptor byte change",
+      mutate: (fileSystem: MemoryAtomicFileSystem) =>
+        fileSystem.mutateTemporaryBytes(Buffer.from("changed\n")),
+    },
+  ])("rejects temporary $name without replacing the old map", async ({ mutate }) => {
+    const fileSystem = new MemoryAtomicFileSystem();
+    fileSystem.files.set(displayMapPath, Buffer.from("known good old map\n"));
+    const layout = parseDisplayLayout(
+      readFileSync(join(repositoryRoot, "show", "display-layout.json")),
+    );
+    const bytes = buildDisplayMapBytes(
+      layout,
+      captureConfigurationSnapshot(RAW_DISPLAYS),
+      productionRequest(),
+      "2026-09-04T01:02:03.004Z",
+    );
+
+    const error = await captureError(() =>
+      writeDisplayMapAtomic(
+        displayMapPath,
+        bytes,
+        () => mutate(fileSystem, bytes),
+        fileSystem,
+        "tamper",
+      ),
+    );
+
+    expect(String(error)).toMatch(/temporary|identity|reparse|bytes/i);
+    expect(fileSystem.files.get(displayMapPath)?.toString("utf8")).toBe(
+      "known good old map\n",
+    );
+    expect(
+      [...fileSystem.files.keys()].some((path) => path.endsWith(".tmp")),
+    ).toBe(false);
+  });
+
+  it("rejects an accidentally asynchronous precommit callback", async () => {
+    const fileSystem = new MemoryAtomicFileSystem();
+    fileSystem.files.set(displayMapPath, Buffer.from("known good old map\n"));
+    const layout = parseDisplayLayout(
+      readFileSync(join(repositoryRoot, "show", "display-layout.json")),
+    );
+    const bytes = buildDisplayMapBytes(
+      layout,
+      captureConfigurationSnapshot(RAW_DISPLAYS),
+      productionRequest(),
+      "2026-09-04T01:02:03.004Z",
+    );
+    const asynchronous = (() => Promise.resolve()) as unknown as () => void;
+
+    const error = await captureError(() =>
+      writeDisplayMapAtomic(
+        displayMapPath,
+        bytes,
+        asynchronous,
+        fileSystem,
+        "async-precommit",
+      ),
+    );
+
+    expect(String(error)).toMatch(/precommit.*synchronous/i);
     expect(fileSystem.files.get(displayMapPath)?.toString("utf8")).toBe(
       "known good old map\n",
     );
@@ -723,6 +911,44 @@ describe("least-privilege display configurator runtime", () => {
     await pending;
   });
 
+  it("rejects overlapping identify requests and permits a later settled request", async () => {
+    const windowOptions = { hangIdentifyLoads: true };
+    const harness = createRuntimeHarness(RAW_DISPLAYS, windowOptions);
+    const { pending, mainWindow, event } = await startHarness(harness);
+    const first = harness.ipcMain.invoke(IDENTIFY_CHANNEL, event, {
+      topologySha256: SNAPSHOT_TOKEN,
+    });
+    await Promise.resolve();
+    const second = harness.ipcMain.invoke(IDENTIFY_CHANNEL, event, {
+      topologySha256: SNAPSHOT_TOKEN,
+    });
+
+    try {
+      await Promise.resolve();
+      expect(harness.windows).toHaveLength(2);
+      expect(harness.windows[1]?.closed).toBe(false);
+      await expect(second).rejects.toThrow(/identify.*in progress/i);
+
+      windowOptions.hangIdentifyLoads = false;
+      harness.timers.fireOnly();
+      await expect(first).rejects.toThrow(/closed during load/i);
+      await expect(
+        harness.ipcMain.invoke(IDENTIFY_CHANNEL, event, {
+          topologySha256: SNAPSHOT_TOKEN,
+        }),
+      ).resolves.toEqual({ closedAfterMs: 12_000 });
+      expect(harness.windows.slice(-3).every((window) => !window.closed)).toBe(
+        true,
+      );
+      expect(harness.timers.pending.size).toBe(1);
+    } finally {
+      windowOptions.hangIdentifyLoads = false;
+      if (harness.timers.pending.size === 1) harness.timers.fireOnly();
+      mainWindow.emitClosed();
+      await Promise.allSettled([pending, first, second]);
+    }
+  });
+
   it("rechecks the live topology token before closing identify cards", async () => {
     const harness = createRuntimeHarness();
     const { pending, mainWindow, event } = await startHarness(harness);
@@ -747,6 +973,32 @@ describe("least-privilege display configurator runtime", () => {
       }),
     ).rejects.toThrow(/topology changed/i);
     expect(cards.every((window) => !window.closed)).toBe(true);
+
+    harness.timers.fireOnly();
+    mainWindow.emitClosed();
+    await pending;
+  });
+
+  it("validates a snapshot refresh before closing the active identify generation", async () => {
+    const harness = createRuntimeHarness();
+    const { pending, mainWindow, event } = await startHarness(harness);
+    await harness.ipcMain.invoke(IDENTIFY_CHANNEL, event, {
+      topologySha256: SNAPSHOT_TOKEN,
+    });
+    const cards = harness.windows.slice(1);
+
+    harness.setDisplays([
+      RAW_DISPLAYS[0],
+      { ...RAW_DISPLAYS[1], scaleFactor: 1.5 },
+      RAW_DISPLAYS[2],
+    ]);
+    await expect(
+      harness.ipcMain.invoke(SNAPSHOT_CHANNEL, event, {
+        topologySha256: SNAPSHOT_TOKEN,
+      }),
+    ).rejects.toThrow(/topology changed/i);
+    expect(cards.every((window) => !window.closed)).toBe(true);
+    expect(harness.timers.pending.size).toBe(1);
 
     harness.timers.fireOnly();
     mainWindow.emitClosed();

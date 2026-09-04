@@ -1,12 +1,14 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   closeSync,
   existsSync,
+  fstatSync,
   fsyncSync,
   lstatSync,
   mkdirSync,
   openSync,
   readFileSync,
+  readSync,
   realpathSync,
   renameSync,
   rmSync,
@@ -29,6 +31,10 @@ import {
   type SaveDisplayMapRequest,
 } from "./display-config-ipc-contract.js";
 import type { DisplayConfigCommand } from "./display-config-command.js";
+import {
+  G2_PROTECTED_ROOTS,
+  G2_REHEARSAL_PARENT,
+} from "./g2-command.js";
 import {
   hashDisplayGeometryV2,
   hashDisplayTopology,
@@ -122,9 +128,20 @@ export interface DisplayMapAtomicFileSystem {
   openExclusive(path: string): number;
   write(descriptor: number, bytes: Uint8Array): void;
   flush(descriptor: number): void;
+  inspectDescriptor(descriptor: number): DisplayMapFileIdentity;
+  inspectPath(path: string): DisplayMapFileIdentity;
+  readDescriptor(descriptor: number, maximumBytes: number): Buffer;
   close(descriptor: number): void;
   rename(source: string, target: string): void;
   remove(path: string): void;
+}
+
+export interface DisplayMapFileIdentity {
+  readonly device: string;
+  readonly file: string;
+  readonly byteLength: number;
+  readonly regularFile: boolean;
+  readonly reparsePoint: boolean;
 }
 
 export interface DisplayConfiguratorHost {
@@ -145,6 +162,7 @@ export interface DisplayConfiguratorHost {
 const MAX_DISPLAYS = 16;
 const IDENTIFY_DURATION_MS = 12_000;
 const SESSION_PARTITION = "janvim-display-configurator";
+const JANVIM_PRODUCT_ROOT = "D:\\github\\JanVim";
 const REMOTE_REQUEST_FILTER = {
   urls: ["http://*/*", "https://*/*", "ws://*/*", "wss://*/*"],
 };
@@ -266,13 +284,13 @@ export function buildDisplayMapBytes(
   return bytes;
 }
 
-export async function writeDisplayMapAtomic(
+export function writeDisplayMapAtomic(
   targetPath: string,
   bytes: Uint8Array,
-  beforeCommit: () => void | Promise<void>,
+  beforeCommit: () => void,
   fileSystem: DisplayMapAtomicFileSystem = realAtomicFileSystem,
   suffix: string = randomUUID(),
-): Promise<void> {
+): void {
   parseDisplayMap(bytes);
   if (!/^[A-Za-z0-9-]{1,64}$/u.test(suffix)) {
     throw new Error("Display map temporary suffix is invalid");
@@ -288,9 +306,32 @@ export async function writeDisplayMapAtomic(
     ownsTemporary = true;
     fileSystem.write(descriptor, bytes);
     fileSystem.flush(descriptor);
-    fileSystem.close(descriptor);
-    descriptor = undefined;
-    await beforeCommit();
+    const openedIdentity = fileSystem.inspectDescriptor(descriptor);
+    assertTemporaryIdentity(openedIdentity, openedIdentity, bytes.byteLength);
+    const precommitResult: unknown = beforeCommit();
+    if (precommitResult !== undefined) {
+      throw new Error("Display map precommit validation must be synchronous");
+    }
+    const descriptorIdentity = fileSystem.inspectDescriptor(descriptor);
+    const pathIdentity = fileSystem.inspectPath(temporaryPath);
+    assertTemporaryIdentity(
+      openedIdentity,
+      descriptorIdentity,
+      bytes.byteLength,
+    );
+    assertTemporaryIdentity(openedIdentity, pathIdentity, bytes.byteLength);
+    const verifiedBytes = fileSystem.readDescriptor(
+      descriptor,
+      bytes.byteLength + 1,
+    );
+    parseDisplayMap(verifiedBytes);
+    if (
+      verifiedBytes.byteLength !== bytes.byteLength ||
+      hashBytes(verifiedBytes) !== hashBytes(bytes) ||
+      !verifiedBytes.equals(Buffer.from(bytes))
+    ) {
+      throw new Error("Display map temporary bytes changed before commit");
+    }
     fileSystem.rename(temporaryPath, targetPath);
     ownsTemporary = false;
   } finally {
@@ -309,6 +350,26 @@ export async function writeDisplayMapAtomic(
       }
     }
   }
+}
+
+function assertTemporaryIdentity(
+  expected: DisplayMapFileIdentity,
+  actual: DisplayMapFileIdentity,
+  expectedBytes: number,
+): void {
+  if (
+    !actual.regularFile ||
+    actual.reparsePoint ||
+    actual.byteLength !== expectedBytes ||
+    actual.device !== expected.device ||
+    actual.file !== expected.file
+  ) {
+    throw new Error("Display map temporary file identity is invalid");
+  }
+}
+
+function hashBytes(bytes: Uint8Array): string {
+  return createHash("sha256").update(bytes).digest("hex");
 }
 
 export async function runDisplayConfigurator(
@@ -394,6 +455,7 @@ export async function runDisplayConfigurator(
     window: DisplayConfigBrowserWindowAdapter;
     disposeNavigation: () => void;
   }> = [];
+  let identifyRequestPending = false;
   let cleaned = false;
 
   const closeIdentifyCards = (): void => {
@@ -500,8 +562,9 @@ export async function runDisplayConfigurator(
         } catch {
           throw new Error("Display snapshot request is invalid");
         }
+        const nextSnapshot = requireCurrentSnapshot(request.topologySha256);
         closeIdentifyCards();
-        activeSnapshot = requireCurrentSnapshot(request.topologySha256);
+        activeSnapshot = nextSnapshot;
         return activeSnapshot;
       },
     ],
@@ -515,8 +578,17 @@ export async function runDisplayConfigurator(
         } catch {
           throw new Error("Display identify request is invalid");
         }
-        await openIdentifyCards(requireCurrentSnapshot(request.topologySha256));
-        return { closedAfterMs: IDENTIFY_DURATION_MS };
+        if (identifyRequestPending) {
+          throw new Error("Display identify request is already in progress");
+        }
+        const current = requireCurrentSnapshot(request.topologySha256);
+        identifyRequestPending = true;
+        try {
+          await openIdentifyCards(current);
+          return { closedAfterMs: IDENTIFY_DURATION_MS };
+        } finally {
+          identifyRequestPending = false;
+        }
       },
     ],
     [
@@ -553,7 +625,7 @@ export async function runDisplayConfigurator(
           request,
           host.nowUtc(),
         );
-        await writeDisplayMapAtomic(
+        writeDisplayMapAtomic(
           command.displayMapPath,
           bytes,
           () => {
@@ -775,16 +847,25 @@ function installWindowNavigationGuard(
   };
 }
 
-function prepareDisplayConfigTarget(command: DisplayConfigCommand): void {
+function prepareDisplayConfigTarget(
+  command: DisplayConfigCommand,
+  repositoryRoot: string,
+): void {
   const parent = win32.dirname(command.rehearsalRoot);
+  assertNoDisplayConfigReparseTraversal(parent);
   assertPlainDirectory(parent, "rehearsal parent");
   if (!existsSync(command.rehearsalRoot)) {
     mkdirSync(command.rehearsalRoot, { recursive: false });
   }
+  assertNoDisplayConfigReparseTraversal(command.rehearsalRoot);
   assertPlainDirectory(command.rehearsalRoot, "rehearsal root");
+  assertNoDisplayConfigReparseTraversal(command.displayMapPath);
   const realParent = realpathSync.native(parent);
   const realRoot = realpathSync.native(command.rehearsalRoot);
-  if (win32.dirname(realRoot).toLowerCase() !== realParent.toLowerCase()) {
+  if (
+    !pathsEqual(realParent, G2_REHEARSAL_PARENT) ||
+    !pathsEqual(win32.dirname(realRoot), realParent)
+  ) {
     throw new Error("Display configuration target escapes through a reparse point");
   }
   if (existsSync(command.displayMapPath)) {
@@ -793,6 +874,69 @@ function prepareDisplayConfigTarget(command: DisplayConfigCommand): void {
       throw new Error("Display map target must be a plain file");
     }
   }
+  const realMap = existsSync(command.displayMapPath)
+    ? realpathSync.native(command.displayMapPath)
+    : win32.join(realRoot, "display-map.json");
+  if (!pathsEqual(win32.dirname(realMap), realRoot)) {
+    throw new Error("Display map canonical path escapes the rehearsal root");
+  }
+  for (const candidate of [realRoot, realMap]) {
+    rejectCanonicalDisplayConfigTarget(candidate, repositoryRoot);
+  }
+}
+
+export interface DisplayConfigPathInspection {
+  readonly exists: boolean;
+  readonly reparsePoint: boolean;
+}
+
+export function assertNoDisplayConfigReparseTraversal(
+  path: string,
+  inspect: (path: string) => DisplayConfigPathInspection = inspectRealPath,
+): void {
+  let current = win32.resolve(path);
+  while (true) {
+    const entry = inspect(current);
+    if (entry.exists && entry.reparsePoint) {
+      throw new Error("Display configuration target contains a reparse point");
+    }
+    const parent = win32.dirname(current);
+    if (pathsEqual(parent, current)) return;
+    current = parent;
+  }
+}
+
+function inspectRealPath(path: string): DisplayConfigPathInspection {
+  if (!existsSync(path)) return { exists: false, reparsePoint: false };
+  return { exists: true, reparsePoint: lstatSync(path).isSymbolicLink() };
+}
+
+function rejectCanonicalDisplayConfigTarget(
+  path: string,
+  repositoryRoot: string,
+): void {
+  if (
+    isAtOrBelow(path, repositoryRoot) ||
+    isAtOrBelow(path, JANVIM_PRODUCT_ROOT) ||
+    G2_PROTECTED_ROOTS.some((root) => isAtOrBelow(path, root)) ||
+    /\\appdata\\local\\nvim(?:\\|$)/iu.test(win32.resolve(path))
+  ) {
+    throw new Error("Display configuration canonical target is forbidden");
+  }
+}
+
+function isAtOrBelow(candidate: string, root: string): boolean {
+  const relative = win32.relative(win32.resolve(root), win32.resolve(candidate));
+  return (
+    relative.length === 0 ||
+    (!win32.isAbsolute(relative) &&
+      relative !== ".." &&
+      !relative.startsWith(`..${win32.sep}`))
+  );
+}
+
+function pathsEqual(left: string, right: string): boolean {
+  return win32.resolve(left).toLowerCase() === win32.resolve(right).toLowerCase();
 }
 
 function assertPlainDirectory(path: string, label: string): void {
@@ -832,7 +976,10 @@ function normalizeHost(source: DisplayConfiguratorHost) {
     ...source,
     readFile: source.readFile ?? ((path: string) => readFileSync(path)),
     pathExists: source.pathExists ?? existsSync,
-    prepareTarget: source.prepareTarget ?? prepareDisplayConfigTarget,
+    prepareTarget:
+      source.prepareTarget ??
+      ((command: DisplayConfigCommand) =>
+        prepareDisplayConfigTarget(command, source.repositoryRoot)),
     atomicFileSystem: source.atomicFileSystem ?? realAtomicFileSystem,
     randomSuffix: source.randomSuffix ?? randomUUID,
     nowUtc: source.nowUtc ?? (() => new Date().toISOString()),
@@ -841,13 +988,52 @@ function normalizeHost(source: DisplayConfiguratorHost) {
 }
 
 const realAtomicFileSystem: DisplayMapAtomicFileSystem = {
-  openExclusive: (path) => openSync(path, "wx", 0o600),
+  openExclusive: (path) => openSync(path, "wx+", 0o600),
   write: (descriptor, bytes) => writeFileSync(descriptor, bytes),
   flush: (descriptor) => fsyncSync(descriptor),
+  inspectDescriptor: (descriptor) =>
+    normalizeFileIdentity(fstatSync(descriptor, { bigint: true })),
+  inspectPath: (path) =>
+    normalizeFileIdentity(lstatSync(path, { bigint: true })),
+  readDescriptor: (descriptor, maximumBytes) => {
+    const bytes = Buffer.alloc(maximumBytes);
+    let offset = 0;
+    while (offset < bytes.byteLength) {
+      const read = readSync(
+        descriptor,
+        bytes,
+        offset,
+        bytes.byteLength - offset,
+        offset,
+      );
+      if (read === 0) break;
+      offset += read;
+    }
+    return bytes.subarray(0, offset);
+  },
   close: (descriptor) => closeSync(descriptor),
   rename: (source, target) => renameSync(source, target),
   remove: (path) => rmSync(path, { force: true }),
 };
+
+function normalizeFileIdentity(
+  stat: ReturnType<typeof fstatSync> & {
+    readonly dev: bigint;
+    readonly ino: bigint;
+    readonly size: bigint;
+  },
+): DisplayMapFileIdentity {
+  if (stat.size > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw new Error("Display map temporary file is too large");
+  }
+  return {
+    device: stat.dev.toString(),
+    file: stat.ino.toString(),
+    byteLength: Number(stat.size),
+    regularFile: stat.isFile(),
+    reparsePoint: stat.isSymbolicLink(),
+  };
+}
 
 const realTimers: DisplayConfigTimerAdapter = {
   setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),

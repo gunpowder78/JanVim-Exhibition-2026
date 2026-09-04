@@ -59,6 +59,22 @@ class RecordingApi implements DisplayConfiguratorApi {
   }
 }
 
+class DeferredIdentifyApi extends RecordingApi {
+  private releasePending!: () => void;
+  private readonly pending = new Promise<void>((resolve) => {
+    this.releasePending = resolve;
+  });
+
+  public override async identifyDisplays(topologySha256: string): Promise<void> {
+    await super.identifyDisplays(topologySha256);
+    await this.pending;
+  }
+
+  public releaseIdentify(): void {
+    this.releasePending();
+  }
+}
+
 function createDocument(): Document {
   return new JSDOM(
     "<!doctype html><html><body><main data-display-configurator></main></body></html>",
@@ -205,6 +221,30 @@ describe("manual display configurator DOM model", () => {
     click(document.querySelector("[data-close-identify]")!);
     await tick();
     expect(api.closed).toBe(1);
+  });
+
+  it("disables Identify while its request is pending", async () => {
+    const document = createDocument();
+    const api = new DeferredIdentifyApi({
+      topologySha256: TOKEN,
+      displays: [display(1, "solo", 0)],
+      allowedModes: ["single-display-preview"],
+    });
+    await mountDisplayConfigurator(document, api);
+    const identify = document.querySelector<HTMLButtonElement>("[data-identify]")!;
+
+    click(identify);
+    expect(identify.disabled).toBe(true);
+    click(identify);
+    expect(api.identified).toBe(1);
+
+    api.releaseIdentify();
+    await tick();
+    await tick();
+    expect(identify.disabled).toBe(false);
+    click(identify);
+    await tick();
+    expect(api.identified).toBe(2);
   });
 
   it("shows no inferred mode when the topology has two displays", async () => {
