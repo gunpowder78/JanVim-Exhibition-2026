@@ -194,6 +194,8 @@ function Invoke-JanVimIsolatedSclang {
         [Parameter(Mandatory)]
         [string]$ScriptPath,
 
+        [string[]]$ScriptArguments = @(),
+
         [ValidateRange(1, 65535)]
         [int]$UdpPort = 57140,
 
@@ -231,6 +233,9 @@ function Invoke-JanVimIsolatedSclang {
         "-u", $UdpPort.ToString([System.Globalization.CultureInfo]::InvariantCulture),
         [System.IO.Path]::GetFullPath($ScriptPath)
     )) {
+        $arguments.Add($argument)
+    }
+    foreach ($argument in $ScriptArguments) {
         $arguments.Add($argument)
     }
 

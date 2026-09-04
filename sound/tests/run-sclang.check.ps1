@@ -23,8 +23,13 @@ try {
     [System.IO.Directory]::CreateDirectory($testRoot) | Out-Null
     $floodScript = Join-Path $testRoot "flood.scd"
     $hangScript = Join-Path $testRoot "hang.scd"
+    $argumentScript = Join-Path $testRoot "arguments.scd"
     [System.IO.File]::WriteAllText($floodScript, '"x".dup(20000).join.postln; 0.exit;')
     [System.IO.File]::WriteAllText($hangScript, 'loop { 1 + 1 };')
+    [System.IO.File]::WriteAllText(
+        $argumentScript,
+        'if(thisProcess.argv == ["first value", "second-value", ""]) { "ARGUMENTS_OK".postln; 0.exit } { thisProcess.argv.postln; 1.exit };'
+    )
 
     Import-Module $module -Force
 
@@ -44,6 +49,18 @@ try {
     }
     if ($result.StdOut.Length -gt 1024 -or $result.StdErr.Length -gt 1024) {
         throw "Captured output exceeded the configured bound"
+    }
+
+    $result = Invoke-JanVimIsolatedSclang `
+        -ScriptPath $argumentScript `
+        -ScriptArguments @("first value", "second-value", "") `
+        -UdpPort (Get-TestUdpPort) `
+        -TimeoutMilliseconds 10000 `
+        -KillTimeoutMilliseconds 1000 `
+        -MaxCaptureCharacters 1024 `
+        -WorkingDirectory $testRoot
+    if ($result.ExitCode -ne 0 -or -not $result.StdOut.Contains("ARGUMENTS_OK")) {
+        throw "Script arguments were not delivered unchanged"
     }
 
     $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
