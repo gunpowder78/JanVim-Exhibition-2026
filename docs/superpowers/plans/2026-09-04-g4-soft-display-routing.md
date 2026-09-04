@@ -52,7 +52,7 @@ export type ResolvedDisplayRoute =
   | { state: "configuration-required"; reason: DisplayConfigurationReason };
 ```
 
-- [ ] **Step 1: Write strict contract tests and identify the mutations they catch**
+- [x] **Step 1: Write strict contract tests and identify the mutations they catch**
 
   Use literal fixtures. Require the checked-in layout to contain only the approved roles/modes in
   the approved order. Require schema 2 to reject unknown fields, over-16 topology, over-limit
@@ -73,7 +73,7 @@ export type ResolvedDisplayRoute =
   });
   ```
 
-- [ ] **Step 2: Run focused tests and verify RED**
+- [x] **Step 2: Run focused tests and verify RED**
 
   Run:
 
@@ -85,26 +85,26 @@ export type ResolvedDisplayRoute =
 
   Expected: FAIL because the schema-2 module, logical layout, and unified resolver do not exist.
 
-- [ ] **Step 3: Implement strict parsers and version-specific hashes**
+- [x] **Step 3: Implement strict parsers and version-specific hashes**
 
   Parse from bounded `Uint8Array` before JSON conversion. Preserve the legacy hash and add a V2
   canonical array containing ID, bounds, working area, scale, and rotation. Use exact Zod objects,
   literal modes/roles, and clone/freeze public results. `topologySha256` is evidence of the capture;
   routing compares selected fingerprints so unassigned changes do not invalidate assigned roles.
 
-- [ ] **Step 4: Implement one resolver without changing legacy semantics**
+- [x] **Step 4: Implement one resolver without changing legacy semantics**
 
   Normalize schema 1 to `SCREEN-1`/`SCREEN-2` and mode `legacy-dual`. For schema 2, require exactly
   three distinct bindings in `production-3`, exactly one `SCREEN-1` binding and exactly one live
   display in preview, and return bounded `configuration-required` reasons rather than throwing for
   expected environment mismatch.
 
-- [ ] **Step 5: Verify GREEN and legacy mutation coverage**
+- [x] **Step 5: Verify GREEN and legacy mutation coverage**
 
   Run the two focused files. Also mutate a schema-1 fixture with a third display and confirm the
   existing `display-count-mismatch` result remains covered.
 
-- [ ] **Step 6: Commit the independent routing contract**
+- [x] **Step 6: Commit the independent routing contract**
 
   ```powershell
   git add -- `
@@ -164,14 +164,14 @@ type SaveDisplayMapRequest = {
 };
 ```
 
-- [ ] **Step 1: Add command, GUI-state, IPC, and script behavior tests**
+- [x] **Step 1: Add command, GUI-state, IPC, and script behavior tests**
 
   Prove exact flags/path boundaries, exact sender URL, strict save payloads, empty initial role
   selection, distinct production bindings, preview only at one live display, stale topology save
   rejection, atomic map replacement, refusal when terminal evidence exists, and timer/listener
   cleanup. Renderer model tests must exercise real DOM state rather than mocked markup.
 
-- [ ] **Step 2: Run focused tests and verify RED**
+- [x] **Step 2: Run focused tests and verify RED**
 
   ```powershell
   & '.\node_modules\.bin\vitest.cmd' run `
@@ -184,27 +184,27 @@ type SaveDisplayMapRequest = {
 
   Expected: FAIL because no configuration family, renderer, preload, or launcher exists.
 
-- [ ] **Step 3: Implement the command and least-privilege main-process runtime**
+- [x] **Step 3: Implement the command and least-privilege main-process runtime**
 
   Add exact `--display-config-mode=configure`, `--rehearsal-root=...`, and `--display-map=...`
   parsing. Require the map to be the direct child of one rehearsal root. Register only snapshot,
   identify, close-identify, and save handlers; verify sender URL and topology token on every call.
   Atomically write LF JSON through a same-directory temporary file and rename.
 
-- [ ] **Step 4: Implement bounded identify cards and the manual form**
+- [x] **Step 4: Implement bounded identify cards and the manual form**
 
   Sort cards by top edge, left edge, then ID and display `1..N`. Open local sandboxed cards only on
   the button action, cap at 16, and close all after 12 seconds or explicit close. Render selectors
   with no default role choices, explain SCREEN purposes and skipped roles, and disable Save until
   the selected mode is valid.
 
-- [ ] **Step 5: Add the dedicated preload/build and public launcher**
+- [x] **Step 5: Add the dedicated preload/build and public launcher**
 
   Build the configurator preload separately so the Narrative page never receives map-write APIs.
   Append both new Vite builds without changing the existing preload output path. The PowerShell
   launcher checks required files, path boundaries, and source-repository markers before Electron.
 
-- [ ] **Step 6: Verify GREEN, build, and commit**
+- [x] **Step 6: Verify GREEN, build, and commit**
 
   Run the focused tests, `npm run typecheck`, `npm run lint`, and `npm run build`. Confirm both GUI
   pages and the dedicated preload exist in `dist`, then commit only Task 2 paths.
@@ -228,14 +228,14 @@ type SaveDisplayMapRequest = {
 - Preserves: the coordinator sees one `ShowSecondarySurface`; its cue clock, presentation events,
   retries, and recovery budgets do not change.
 
-- [ ] **Step 1: Add surface-group and adapter integration tests**
+- [x] **Step 1: Add surface-group and adapter integration tests**
 
   Prove that production opens Narrative on SCREEN-2 and standby on SCREEN-3, sends events only to
   Narrative, closes both idempotently, and reports either unexpected window loss once. Prove legacy
   opens only Narrative. Prove preview uses SCREEN-1 for the deliberate start surface, hides it after
   the accepted Start event, exposes no Narrative/Jianshan artwork, and places JanVim on SCREEN-1.
 
-- [ ] **Step 2: Run focused tests and verify RED**
+- [x] **Step 2: Run focused tests and verify RED**
 
   ```powershell
   & '.\node_modules\.bin\vitest.cmd' run `
@@ -246,26 +246,26 @@ type SaveDisplayMapRequest = {
 
   Expected: FAIL because the G4 surface group and route consumption are absent.
 
-- [ ] **Step 3: Implement the static standby and grouped lifecycle**
+- [x] **Step 3: Implement the static standby and grouped lifecycle**
 
   Use a script-free deep-background local page with bounded text `见山 / STANDBY`. Generalize only
   the fullscreen window-plan helper needed by both surfaces. Install the existing local-only web
   guards for each page and aggregate close/dispose without changing Narrative IPC.
 
-- [ ] **Step 4: Consume resolved roles in Show while preserving G2**
+- [x] **Step 4: Consume resolved roles in Show while preserving G2**
 
   Freeze and parse `show/display-layout.json` only for schema-2 Show maps. Use resolved role objects
   directly for opening and JanVim placement; do not re-look-up persisted IDs. Leave the schema-1
   G2 parser and its exactly-two behavior unchanged.
 
-- [ ] **Step 5: Implement preview visibility behavior**
+- [x] **Step 5: Implement preview visibility behavior**
 
   Keep the local start surface visible above SCREEN-1 through readiness, then call its bounded
   `hide()` exactly once when Start is accepted. It may continue receiving deterministic cues behind
   JanVim so existing loop accounting remains intact. The visible artwork after Start is JanVim only;
   Stop remains available through SIGINT/controller stop.
 
-- [ ] **Step 6: Verify GREEN and commit**
+- [x] **Step 6: Verify GREEN and commit**
 
   Run the focused tests and `git diff --check`, then commit Task 3 paths.
 
@@ -288,7 +288,7 @@ type SaveDisplayMapRequest = {
 - Extends: `EmergencyStopReason` with `display-topology-changed` and expected startup result with
   `display-configuration-required`.
 
-- [ ] **Step 1: Add fake-clock topology and dispatcher tests**
+- [x] **Step 1: Add fake-clock topology and dispatcher tests**
 
   Exercise all three Electron events, event bursts, dispose-before-tick, extra unassigned changes,
   assigned ID/bounds/work-area/scale/rotation changes, invalid snapshots, and repeated events after
@@ -296,7 +296,7 @@ type SaveDisplayMapRequest = {
   Add command tests proving expected mapping mismatch returns exit 2 while unexpected validation or
   coordinator failures remain exit 1.
 
-- [ ] **Step 2: Run focused tests and verify RED**
+- [x] **Step 2: Run focused tests and verify RED**
 
   ```powershell
   & '.\node_modules\.bin\vitest.cmd' run `
@@ -306,20 +306,20 @@ type SaveDisplayMapRequest = {
     'apps\controller\tests\show-runtime-adapters.test.ts'
   ```
 
-- [ ] **Step 3: Implement expected configuration classification**
+- [x] **Step 3: Implement expected configuration classification**
 
   Use a typed/controller-owned error or exact discriminant; do not parse arbitrary host messages.
   ValidateOnly and Show startup return 2 only for the resolver's bounded configuration reasons.
   No artwork process/window may open before a mapped route exists.
 
-- [ ] **Step 4: Implement and bind the topology guard**
+- [x] **Step 4: Implement and bind the topology guard**
 
   Subscribe only after inputs are validated, compare assigned role fingerprints from the frozen
   map, and dispose listeners/timer during every terminal path. Feed the new reason through the
   existing bounded emergency cleanup so poem reset, lease settlement, evidence finalization, and
   no-auto-restart semantics remain owned by the coordinator.
 
-- [ ] **Step 5: Verify GREEN and commit**
+- [x] **Step 5: Verify GREEN and commit**
 
   Run the four focused files plus `apps/controller/tests/electron-lifecycle.test.ts`, then commit.
 
@@ -341,7 +341,7 @@ type SaveDisplayMapRequest = {
 - Produces: optional bounded `routing` evidence for schema-2 maps and launcher termination
   `configuration-required` for controller exit 2.
 
-- [ ] **Step 1: Add evidence and launcher tests before implementation**
+- [x] **Step 1: Add evidence and launcher tests before implementation**
 
   Require schema-2 map preflight to be strict and separate from unchanged schema-1 validation.
   Test layout/map byte caps and hashes, configuration exit 2 without watchdog relaunch, no terminal
@@ -349,7 +349,7 @@ type SaveDisplayMapRequest = {
   and preview, with preview acceptance scope and skipped roles. Prove schema-1 evidence still parses
   and existing launcher fixtures still pass.
 
-- [ ] **Step 2: Run focused tests and verify RED**
+- [x] **Step 2: Run focused tests and verify RED**
 
   ```powershell
   & '.\node_modules\.bin\vitest.cmd' run `
@@ -359,27 +359,27 @@ type SaveDisplayMapRequest = {
     'tests\recovery.test.ts'
   ```
 
-- [ ] **Step 3: Extend evidence without redefining legacy bytes**
+- [x] **Step 3: Extend evidence without redefining legacy bytes**
 
   Add a strict optional routing record only for schema-2 map runs: mode, three SHA-256 identities,
   selected role records, skipped roles, unassigned count, standby use, and topology-stop boolean.
   Keep existing `display.primary`/`display.secondary` fields for readers and omit new routing fields
   from legacy runs.
 
-- [ ] **Step 4: Add strict PowerShell schema-2 validation and exit-2 receipt**
+- [x] **Step 4: Add strict PowerShell schema-2 validation and exit-2 receipt**
 
   Branch on integer map schema. Retain the existing exact schema-1 property checks verbatim. For
   schema 2, independently enforce exact fields, limits, hashes, role cardinality, and layout digest
   before Electron. If Electron returns 2, publish one bounded JSON receipt with
   `termination:"configuration-required"`, do not create success evidence, and do not relaunch.
 
-- [ ] **Step 5: Update operator documentation and release identity through RED**
+- [x] **Step 5: Update operator documentation and release identity through RED**
 
   Document the manual GUI → ValidateOnly → Show sequence and single-display limitation. Build the
   bundle, record the new bytes/hash, first update the independent smoke-test expectation and observe
   launcher RED, then update only the launcher's reviewed bundle identity.
 
-- [ ] **Step 6: Verify focused GREEN and commit**
+- [x] **Step 6: Verify focused GREEN and commit**
 
   Run the four focused files, Electron build smoke, and `git diff --check`, then commit.
 
@@ -394,7 +394,7 @@ type SaveDisplayMapRequest = {
 - Produces: fresh automated evidence, exact bundle identity, and bounded three-display/one-display
   operator acceptance instructions.
 
-- [ ] **Step 1: Run fresh required gates in order**
+- [x] **Step 1: Run fresh required gates in order**
 
   ```powershell
   npm ci
@@ -411,19 +411,19 @@ type SaveDisplayMapRequest = {
   `npm ci` if those generated prerequisites are removed. Record every exit code and final test
   count; do not treat prerequisite restoration as a tracked source change.
 
-- [ ] **Step 2: Record immutable and generated identities**
+- [x] **Step 2: Record immutable and generated identities**
 
   Record HEAD, changed paths, Electron main bundle bytes/SHA-256, Electron executable SHA-256,
   JanVim core SHA-256, logical layout SHA-256, clean worktree status, and proof that the base P0
   worktree remains at `d79a929b77e8c4e3a3a8d81ca55404617459afbe` and clean.
 
-- [ ] **Step 3: Write the implementation receipt and operator scripts**
+- [x] **Step 3: Write the implementation receipt and operator scripts**
 
   Include copy-safe one-line PowerShell commands for: fresh-root GUI configuration, ValidateOnly,
   production Show, one-display preview, receipt retrieval, and Stop. Avoid multiline commands that
   can be truncated by the console.
 
-- [ ] **Step 4: Perform final branch-wide review**
+- [x] **Step 4: Perform final branch-wide review**
 
   Review the complete diff against the design, security boundaries, KISS scope, legacy rollback,
   and test evidence. Address every Critical/Important finding through one reviewed fix wave.
