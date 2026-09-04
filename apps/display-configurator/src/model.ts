@@ -57,7 +57,7 @@ export async function mountDisplayConfigurator(
     const description = createElement(
       document,
       "span",
-      `${display.label || "Unlabelled display"} · ID ${display.displayId} · ${display.bounds.width}×${display.bounds.height} @ ${display.scaleFactor} · rotation ${display.rotation}°`,
+      `${display.label || "Unlabelled display"} · ID ${display.displayId} · bounds ${display.bounds.x},${display.bounds.y} ${display.bounds.width}×${display.bounds.height} · work ${display.workingArea.x},${display.workingArea.y} ${display.workingArea.width}×${display.workingArea.height} · scale ${display.scaleFactor} · rotation ${display.rotation}°`,
     );
     item.append(badge, description);
     displayList.append(item);

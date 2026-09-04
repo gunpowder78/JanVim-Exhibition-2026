@@ -133,6 +133,8 @@ describe("manual display configurator DOM model", () => {
     expect(document.body.textContent).toContain("JanVim");
     expect(document.body.textContent).toContain("Narrative");
     expect(document.body.textContent).toContain("Jianshan standby");
+    expect(document.body.textContent).toContain("bounds 1920,0 1920×1080");
+    expect(document.body.textContent).toContain("work 1920,0 1920×1040");
   });
 
   it("enables production save only for three distinct explicit selections", async () => {
