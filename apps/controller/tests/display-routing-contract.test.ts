@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 
@@ -165,6 +166,20 @@ function parsedProductionMap() {
 }
 
 describe("strict logical display layout", () => {
+  it("pins the byte-hashed logical layout to LF in every checkout", () => {
+    const path = "show/display-layout.json";
+    const result = spawnSync("git", ["check-attr", "eol", "--", path], {
+      cwd: process.cwd(),
+      encoding: "utf8",
+      timeout: 5_000,
+      windowsHide: true,
+    });
+
+    expect(result.error).toBeUndefined();
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout.trim()).toBe(`${path}: eol: lf`);
+  });
+
   it("keeps only the approved roles and modes in their approved order", () => {
     const bytes = approvedLayoutBytes();
     const raw = JSON.parse(bytes.toString("utf8")) as unknown;

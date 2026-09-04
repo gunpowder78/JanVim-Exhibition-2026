@@ -1,5 +1,6 @@
 # Preserve exact bytes for inputs whose SHA-256 is part of the show contract.
 show/janvim-show.toml text eol=lf
+show/display-layout.json text eol=lf
 content/fixture/poem.txt text eol=lf
 content/fixture/show.manifest.json text eol=lf
 content/p0.1/** text eol=lf
