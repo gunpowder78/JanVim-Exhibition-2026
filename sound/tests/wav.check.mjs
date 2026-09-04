@@ -579,6 +579,79 @@ test("caps the service capture buffer at exactly 120 seconds of samples", async 
   assert.equal(parseRecords(result.stdout, "SOUND_READY").length, 0);
 });
 
+test("reports a capture write failure as an unclean service failure", async () => {
+  const { testsDirectory } = soundPaths();
+  const rehearsalDirectory = await freshRehearsalDirectory("sound-write-fail-");
+  const fakeLogPath = join(rehearsalDirectory, "fake-server.ndjson");
+  const capturePath = join(rehearsalDirectory, "must-not-exist.wav");
+  await writeFile(fakeLogPath, "", "utf8");
+
+  const result = await runIsolatedSclang({
+    scriptPath: join(testsDirectory, "service-fake-server.scd"),
+    scriptArguments: ["44444444444444444444444444444444", "silent", "1", capturePath],
+    timeoutMilliseconds: 12000,
+    environment: {
+      JANVIM_SOUND_FAKE_MODE: "write-fail",
+      JANVIM_SOUND_FAKE_LOG: fakeLogPath,
+    },
+  });
+  const fakeEvents = (await readFile(fakeLogPath, "utf8"))
+    .trim()
+    .split(/\r?\n/u)
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+
+  assert.ok(
+    fakeEvents.some(({ event }) => event === "write-fail-sent"),
+    `fake server never rejected /b_write\nevents: ${JSON.stringify(fakeEvents)}`,
+  );
+  assert.notEqual(result.status, 0);
+  assert.deepEqual(parseRecords(result.stdout, "SOUND_COMPLETE"), [
+    { reason: "duration", clean: false },
+  ]);
+  console.log(
+    `WRITE_FAILURE_EVIDENCE ${JSON.stringify({ rehearsalDirectory, fakeLogPath, capturePath })}`,
+  );
+});
+
+test("finishes forced cleanup with margin inside the eight-second deadline", async () => {
+  const { testsDirectory } = soundPaths();
+  const rehearsalDirectory = await freshRehearsalDirectory("sound-cleanup-bound-");
+  const fakeLogPath = join(rehearsalDirectory, "fake-server.ndjson");
+  await writeFile(fakeLogPath, "", "utf8");
+
+  const result = await runIsolatedSclang({
+    scriptPath: join(testsDirectory, "service-fake-server.scd"),
+    scriptArguments: ["55555555555555555555555555555555", "silent", "1", ""],
+    timeoutMilliseconds: 12000,
+    environment: {
+      JANVIM_SOUND_FAKE_MODE: "cleanup-hang",
+      JANVIM_SOUND_FAKE_LOG: fakeLogPath,
+    },
+  });
+  const completedAtMilliseconds = Date.now();
+  const fakeEvents = (await readFile(fakeLogPath, "utf8"))
+    .trim()
+    .split(/\r?\n/u)
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+  const cleanupStarted = fakeEvents.find(({ event }) => event === "cleanup-started");
+  const cleanupMilliseconds = completedAtMilliseconds - cleanupStarted?.atMilliseconds;
+
+  assert.ok(cleanupStarted, `fake server never observed the stop fade\nevents: ${JSON.stringify(fakeEvents)}`);
+  assert.ok(
+    cleanupMilliseconds < 7800,
+    `cleanup took ${cleanupMilliseconds} ms from stop request to process exit`,
+  );
+  assert.notEqual(result.status, 0);
+  assert.deepEqual(parseRecords(result.stdout, "SOUND_COMPLETE"), [
+    { reason: "duration", clean: false },
+  ]);
+  console.log(
+    `CLEANUP_BOUND_EVIDENCE ${JSON.stringify({ rehearsalDirectory, fakeLogPath, cleanupMilliseconds })}`,
+  );
+});
+
 test("rejects invalid CLI arguments before probing the private server port", async () => {
   const responder = dgram.createSocket("udp4");
   let packets = 0;

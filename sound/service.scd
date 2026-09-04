@@ -7,7 +7,7 @@ var options, server, serverPort = 57141, launchedPid, preflightId, preflightResp
 var endpointHelperPath, endpointOwned = false, endpointCheckPid;
 var endpointCheckGeneration = 0, endpointCheckTimeout;
 var phase = \validating, bootRoutine, startupTimeout, startupMonitor;
-var cleanupRoutine, cleanupTimeout;
+var cleanupRoutine, cleanupTimeout, captureWriteDoneResponder, captureWriteFailureResponder;
 var checker, statsTask, durationTask, serverFailureResponder, oscKeys = Array.new;
 var voiceBus, finalBus, mixer, outputSynth, captureBuffer, captureSynth, windSynth;
 var captureFrames, pluckNodes = Array.new, livePlucks = 0, maxPlucks = 0, heartbeatControl = 0;
@@ -226,6 +226,14 @@ removeResponders = {
     oscKeys.do { |key| OSCdef(key).free };
     oscKeys = Array.new;
     serverFailureResponder !? { serverFailureResponder.free; serverFailureResponder = nil };
+    captureWriteDoneResponder !? {
+        captureWriteDoneResponder.free;
+        captureWriteDoneResponder = nil;
+    };
+    captureWriteFailureResponder !? {
+        captureWriteFailureResponder.free;
+        captureWriteFailureResponder = nil;
+    };
     preflightResponder !? { preflightResponder.free; preflightResponder = nil };
 };
 
@@ -260,7 +268,7 @@ terminateOwnedProcess = { |reason, clean, exitCode|
 
 finishService = { |reason, initiallyClean|
     cleanupTimeout = Routine {
-        6.wait;
+        5.wait;
         if(phase == \stopping) {
             cleanupRoutine !? { cleanupRoutine.stop };
             terminateOwnedProcess.value(reason, false, 1);
@@ -272,6 +280,7 @@ finishService = { |reason, initiallyClean|
             if(ownershipStatus == 0 and: { ownsServerProcess.value }) {
                 endpointOwned = true;
                 cleanupRoutine = Routine {
+                    var captureWriteResult = \notRequested;
                     captureSynth !? { captureSynth.free };
                     outputSynth !? { outputSynth.free };
                     pluckNodes.do { |node| node.free };
@@ -279,18 +288,40 @@ finishService = { |reason, initiallyClean|
                     voiceBus !? { voiceBus.free };
                     finalBus !? { finalBus.free };
                     captureBuffer !? {
+                        captureWriteResult = \pending;
+                        captureWriteDoneResponder = OSCFunc({
+                            if(captureWriteResult == \pending) {
+                                captureWriteResult = \done;
+                            };
+                        }, "/done", server.addr,
+                            argTemplate: ["/b_write", captureBuffer.bufnum]).oneShot;
+                        captureWriteFailureResponder = OSCFunc({
+                            captureWriteResult = \failed;
+                        }, "/fail", server.addr, argTemplate: ["/b_write"]).oneShot;
                         captureBuffer.write(
                             capturePath, "wav", "int16", captureFrames, 0, false,
                             [\b_free, captureBuffer.bufnum]
                         );
                     };
                     server.sync;
+                    captureWriteDoneResponder !? {
+                        captureWriteDoneResponder.free;
+                        captureWriteDoneResponder = nil;
+                    };
+                    captureWriteFailureResponder !? {
+                        captureWriteFailureResponder.free;
+                        captureWriteFailureResponder = nil;
+                    };
 
                     if(phase == \stopping) {
                         inspectEndpoint.value({ |quitOwnershipStatus|
                             if(phase == \stopping) {
                                 if(quitOwnershipStatus == 0 and: { ownsServerProcess.value }) {
-                                    var attempts = 0, clean = initiallyClean;
+                                    var attempts = 0, clean = initiallyClean and: {
+                                        captureWriteResult == \notRequested or: {
+                                            captureWriteResult == \done
+                                        }
+                                    };
                                     endpointOwned = true;
                                     server.addr.sendMsg("/quit");
                                     cleanupRoutine = Routine {

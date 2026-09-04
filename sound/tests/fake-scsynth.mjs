@@ -36,6 +36,12 @@ const oscAddress = (packet) => {
   return packet.toString("utf8", 0, end < 0 ? packet.length : end);
 };
 
+const oscCommand = (packet) => {
+  const address = oscAddress(packet);
+  if (address) return address;
+  return packet.length >= 4 && packet.readInt32BE(0) === 15 ? "/n_set" : address;
+};
+
 const oscPackets = (packet) => {
   if (oscAddress(packet) !== "#bundle") return [packet];
   const packets = [];
@@ -64,13 +70,17 @@ if (mode === "foreign-sleeper") {
 } else {
   const socket = dgram.createSocket("udp4");
   let bufferAllocated = false;
+  let cleanupStarted = false;
   let failSent = false;
 
   const handlePacket = (packet, remote) => {
-    const address = oscAddress(packet);
+    const address = oscCommand(packet);
     log({ event: "packet", address });
 
-    if (address === "/status") {
+    if (address === "/n_set" && mode === "cleanup-hang") {
+      cleanupStarted = true;
+      log({ event: "cleanup-started", atMilliseconds: Date.now() });
+    } else if (address === "/status") {
       socket.send(
         oscMessage("/status.reply", [
           { type: "i", value: 1 },
@@ -99,7 +109,18 @@ if (mode === "foreign-sleeper") {
     } else if (address === "/b_alloc") {
       bufferAllocated = true;
       log({ event: "buffer-allocated", frames: readIntAt(packet, 1) });
+    } else if (address === "/b_write" && mode === "write-fail") {
+      log({ event: "write-fail-sent" });
+      socket.send(
+        oscMessage("/fail", [
+          { type: "s", value: "/b_write" },
+          { type: "s", value: "fixture capture write failure" },
+        ]),
+        remote.port,
+        remote.address,
+      );
     } else if (address === "/sync") {
+      if (mode === "cleanup-hang" && cleanupStarted) return;
       const reply = () =>
         socket.send(
           oscMessage("/synced", [{ type: "i", value: readIntAt(packet, 0) }]),
@@ -114,7 +135,11 @@ if (mode === "foreign-sleeper") {
       } else {
         reply();
       }
-    } else if (address === "/quit" && mode !== "delayed-fail") {
+    } else if (
+      address === "/quit" &&
+      mode !== "delayed-fail" &&
+      mode !== "cleanup-hang"
+    ) {
       socket.close(() => process.exit(0));
     }
   };
