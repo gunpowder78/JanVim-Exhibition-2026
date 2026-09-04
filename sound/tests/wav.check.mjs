@@ -1,16 +1,23 @@
 import assert from "node:assert/strict";
 import { Buffer } from "node:buffer";
-import { readFile, mkdtemp } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, readFile, mkdtemp, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import console from "node:console";
+import process from "node:process";
 import { clearTimeout, setTimeout } from "node:timers";
 import dgram from "node:dgram";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { analyzeWav } from "./analyze-wav.mjs";
+
+const REHEARSAL_ROOT = "D:/VirtualData/JanVim-Exhibition-Rehearsals";
+
+const freshRehearsalDirectory = async (prefix) => {
+  await mkdir(REHEARSAL_ROOT, { recursive: true });
+  return mkdtemp(join(REHEARSAL_ROOT, prefix));
+};
 
 const pcm16StereoWav = ({ sampleRate = 4, frames }) => {
   const frameBytes = 4;
@@ -126,6 +133,10 @@ test("rejects invalid or non-finite segment boundaries", () => {
     () => analyzeWav(wav, [{ name: "fractional", start: 0, end: 0.1 }]),
     /frame boundary/i,
   );
+  assert.throws(
+    () => analyzeWav(wav, [{ name: "zero-frames", start: 0, end: 1e-13 }]),
+    /at least one frame/i,
+  );
 });
 
 test("rejects non-buffer and greater-than-64-MiB inputs", () => {
@@ -146,7 +157,12 @@ const soundPaths = () => {
   };
 };
 
-const runIsolatedSclang = ({ scriptPath, scriptArguments, timeoutMilliseconds }) => {
+const runIsolatedSclang = ({
+  scriptPath,
+  scriptArguments,
+  timeoutMilliseconds,
+  environment = {},
+}) => {
   const paths = soundPaths();
   const command = [
     "$ErrorActionPreference = 'Stop'",
@@ -164,6 +180,7 @@ const runIsolatedSclang = ({ scriptPath, scriptArguments, timeoutMilliseconds })
   return new Promise((resolvePromise, rejectPromise) => {
     const child = spawn("pwsh", ["-NoProfile", "-NonInteractive", "-Command", command], {
       cwd: paths.repositoryDirectory,
+      env: { ...process.env, ...environment },
       windowsHide: true,
     });
     let stdout = "";
@@ -222,6 +239,79 @@ const syncedReply = (id) => {
   return packet;
 };
 
+const oscAddress = (packet) => {
+  const end = packet.indexOf(0);
+  return packet.toString("ascii", 0, end < 0 ? packet.length : end);
+};
+
+const oscPackets = (packet) => {
+  if (oscAddress(packet) !== "#bundle") return [packet];
+  const packets = [];
+  let offset = 16;
+  while (offset < packet.length) {
+    const byteLength = packet.readInt32BE(offset);
+    const nested = packet.subarray(offset + 4, offset + 4 + byteLength);
+    packets.push(...oscPackets(nested));
+    offset += 4 + byteLength;
+  }
+  return packets;
+};
+
+const oscString = (value) => {
+  const bytes = Buffer.from(`${value}\0`, "utf8");
+  const padded = Buffer.alloc(Math.ceil(bytes.length / 4) * 4);
+  bytes.copy(padded);
+  return padded;
+};
+
+const oscMessage = (address, fields = []) => {
+  const tags = oscString(`,${fields.map(({ type }) => type).join("")}`);
+  const values = fields.map(({ type, value }) => {
+    if (type === "s") return oscString(value);
+    const bytes = Buffer.alloc(type === "d" ? 8 : 4);
+    if (type === "i") bytes.writeInt32BE(value);
+    if (type === "f") bytes.writeFloatBE(value);
+    if (type === "d") bytes.writeDoubleBE(value);
+    return bytes;
+  });
+  return Buffer.concat([oscString(address), tags, ...values]);
+};
+
+const fakeServerReply = (socket, packet, remote) => {
+  oscPackets(packet).forEach((message) => {
+    const address = oscAddress(message);
+    if (address === "/sync") {
+      socket.send(syncedReply(message.readInt32BE(message.length - 4)), remote.port, remote.address);
+    } else if (address === "/status") {
+      socket.send(
+        oscMessage("/status.reply", [
+          { type: "i", value: 1 },
+          { type: "i", value: 0 },
+          { type: "i", value: 0 },
+          { type: "i", value: 1 },
+          { type: "i", value: 0 },
+          { type: "f", value: 0 },
+          { type: "f", value: 0 },
+          { type: "d", value: 48_000 },
+          { type: "d", value: 48_000 },
+        ]),
+        remote.port,
+        remote.address,
+      );
+    } else if (address === "/notify") {
+      socket.send(
+        oscMessage("/done", [
+          { type: "s", value: "/notify" },
+          { type: "i", value: 0 },
+          { type: "i", value: 1 },
+        ]),
+        remote.port,
+        remote.address,
+      );
+    }
+  });
+};
+
 const requireSignalBounds = (analysis, activeSegmentNames, silentSegmentNames) => {
   for (const name of activeSegmentNames) {
     const segment = analysis.segments.find((candidate) => candidate.name === name);
@@ -243,7 +333,7 @@ const requireSignalBounds = (analysis, activeSegmentNames, silentSegmentNames) =
 
 test("renders production pluck, wind, stop, and heartbeat-watchdog behavior in NRT", async () => {
   const { testsDirectory, soundDirectory, repositoryDirectory } = soundPaths();
-  const rehearsalDirectory = await mkdtemp(join(tmpdir(), "sound-nrt-"));
+  const rehearsalDirectory = await freshRehearsalDirectory("sound-nrt-");
   const launcher = join(soundDirectory, "sclang-launch.psm1");
   const renderer = join(testsDirectory, "render.scd");
   const command = [
@@ -274,6 +364,7 @@ test("renders production pluck, wind, stop, and heartbeat-watchdog behavior in N
 
   const mainPath = join(rehearsalDirectory, "main-capture.wav");
   const watchdogPath = join(rehearsalDirectory, "watchdog-capture.wav");
+  const captureCapPath = join(rehearsalDirectory, "capture-cap.wav");
   const main = analyzeWav(await readFile(mainPath), [
     { name: "initial", start: 0, end: 0.4 },
     { name: "pluck", start: 0.6, end: 2.2 },
@@ -286,6 +377,9 @@ test("renders production pluck, wind, stop, and heartbeat-watchdog behavior in N
     { name: "leaseFade", start: 2.8, end: 4.2 },
     { name: "postLease", start: 4.5, end: 6.5 },
   ]);
+  const captureCap = analyzeWav(await readFile(captureCapPath), [
+    { name: "recorded", start: 0.02, end: 0.08 },
+  ]);
 
   assert.deepEqual(main.format, {
     container: "RIFF",
@@ -296,11 +390,14 @@ test("renders production pluck, wind, stop, and heartbeat-watchdog behavior in N
   assert.ok(watchdog.duration >= 6.9 && watchdog.duration <= 6.9 + 64 / 48000);
   requireSignalBounds(main, ["pluck", "wind", "stopFade"], ["initial", "postFade"]);
   requireSignalBounds(watchdog, ["active", "leaseFade"], ["postLease"]);
+  assert.equal(captureCap.duration, 0.1);
+  assert.ok(captureCap.segments[0].peak > 1 / 32768, "bounded RecordBuf capture is empty");
 
   const evidence = {
     rehearsalDirectory,
     mainPath,
     watchdogPath,
+    captureCapPath,
     main: {
       duration: main.duration,
       channels: main.channels,
@@ -310,6 +407,11 @@ test("renders production pluck, wind, stop, and heartbeat-watchdog behavior in N
       duration: watchdog.duration,
       channels: watchdog.channels,
       segments: watchdog.segments.map(({ name, peak, rms }) => ({ name, peak, rms })),
+    },
+    captureCap: {
+      duration: captureCap.duration,
+      channels: captureCap.channels,
+      segments: captureCap.segments.map(({ name, peak, rms }) => ({ name, peak, rms })),
     },
   };
   console.log(`NRT_EVIDENCE ${JSON.stringify(evidence)}`);
@@ -344,6 +446,137 @@ test("refuses a responding occupant on the private server port without displacin
   } finally {
     await closeSocket(responder);
   }
+});
+
+test("sends nothing to a responder that occupies the server port after preflight", async () => {
+  const gate = dgram.createSocket("udp4");
+  const lateResponder = dgram.createSocket("udp4");
+  const lateAddresses = [];
+  let preflightRequests = 0;
+  let lateBoundResolve;
+  let lateBoundReject;
+  const lateBound = new Promise((resolvePromise, rejectPromise) => {
+    lateBoundResolve = resolvePromise;
+    lateBoundReject = rejectPromise;
+  });
+
+  lateResponder.on("message", (packet, remote) => {
+    lateAddresses.push(...oscPackets(packet).map(oscAddress));
+    fakeServerReply(lateResponder, packet, remote);
+  });
+  lateResponder.once("error", lateBoundReject);
+  gate.on("message", (packet) => {
+    if (oscAddress(packet) === "/sync") {
+      preflightRequests += 1;
+      gate.close(() => {
+        lateResponder.bind(57141, "127.0.0.1", lateBoundResolve);
+      });
+    }
+  });
+  await listen(gate, 57141);
+
+  try {
+    const { testsDirectory } = soundPaths();
+    const service = runIsolatedSclang({
+      scriptPath: join(testsDirectory, "service-fake-server.scd"),
+      scriptArguments: ["11111111111111111111111111111111", "silent", "1", ""],
+      timeoutMilliseconds: 6000,
+      environment: { JANVIM_SOUND_FAKE_MODE: "foreign-sleeper" },
+    });
+    await lateBound;
+    const result = await service;
+
+    assert.notEqual(result.status, 0);
+    assert.equal(preflightRequests, 1);
+    assert.equal(parseRecords(result.stdout, "SOUND_READY").length, 0);
+    assert.deepEqual(
+      lateAddresses,
+      [],
+      `late responder received server traffic: ${lateAddresses.join(", ")}`,
+    );
+    assert.equal(
+      parseRecords(result.stdout, "SOUND_COMPLETE").length,
+      1,
+      `service did not complete\naddresses: ${lateAddresses.join(", ")}\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
+    );
+    assert.equal(lateResponder.address().port, 57141);
+  } finally {
+    await closeSocket(gate).catch(() => {});
+    await closeSocket(lateResponder).catch(() => {});
+  }
+});
+
+test("cancels delayed boot setup before capture or READY after startup failure", async () => {
+  const { testsDirectory } = soundPaths();
+  const rehearsalDirectory = await freshRehearsalDirectory("sound-startup-cancel-");
+  const fakeLogPath = join(rehearsalDirectory, "fake-server.ndjson");
+  const capturePath = join(rehearsalDirectory, "must-not-exist.wav");
+  await writeFile(fakeLogPath, "", "utf8");
+
+  const result = await runIsolatedSclang({
+    scriptPath: join(testsDirectory, "service-fake-server.scd"),
+    scriptArguments: ["22222222222222222222222222222222", "silent", "1", capturePath],
+    timeoutMilliseconds: 12000,
+    environment: {
+      JANVIM_SOUND_FAKE_MODE: "delayed-fail",
+      JANVIM_SOUND_FAKE_LOG: fakeLogPath,
+    },
+  });
+  const fakeEvents = (await readFile(fakeLogPath, "utf8"))
+    .trim()
+    .split(/\r?\n/u)
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+  const failIndex = fakeEvents.findIndex(({ event }) => event === "fail-sent");
+  const packetsAfterFailure = fakeEvents
+    .slice(failIndex + 1)
+    .filter(({ event }) => event === "packet")
+    .map(({ address }) => address);
+
+  assert.notEqual(result.status, 0);
+  assert.ok(
+    failIndex >= 0,
+    `fake server never injected the delayed startup failure\nevents: ${JSON.stringify(fakeEvents)}\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
+  );
+  assert.equal(parseRecords(result.stdout, "SOUND_READY").length, 0);
+  assert.equal(parseRecords(result.stdout, "SOUND_COMPLETE").length, 1);
+  assert.ok(
+    !packetsAfterFailure.includes("/b_write"),
+    `capture setup resumed after failure: ${packetsAfterFailure.join(", ")}`,
+  );
+});
+
+test("caps the service capture buffer at exactly 120 seconds of samples", async () => {
+  const { testsDirectory } = soundPaths();
+  const rehearsalDirectory = await freshRehearsalDirectory("sound-capture-cap-");
+  const fakeLogPath = join(rehearsalDirectory, "fake-server.ndjson");
+  const capturePath = join(rehearsalDirectory, "must-not-exist.wav");
+  await writeFile(fakeLogPath, "", "utf8");
+
+  const result = await runIsolatedSclang({
+    scriptPath: join(testsDirectory, "service-fake-server.scd"),
+    scriptArguments: [
+      "33333333333333333333333333333333",
+      "silent",
+      "118.5",
+      capturePath,
+    ],
+    timeoutMilliseconds: 12000,
+    environment: {
+      JANVIM_SOUND_FAKE_MODE: "delayed-fail",
+      JANVIM_SOUND_FAKE_LOG: fakeLogPath,
+    },
+  });
+  const fakeEvents = (await readFile(fakeLogPath, "utf8"))
+    .trim()
+    .split(/\r?\n/u)
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+  const allocation = fakeEvents.find(({ event }) => event === "buffer-allocated");
+
+  assert.notEqual(result.status, 0);
+  assert.deepEqual(allocation, { event: "buffer-allocated", frames: 5_760_000 });
+  assert.equal(parseRecords(result.stdout, "SOUND_READY").length, 0);
 });
 
 test("rejects invalid CLI arguments before probing the private server port", async () => {
@@ -392,7 +625,7 @@ test("rejects invalid CLI arguments before probing the private server port", asy
 
 test("boots and cleans up one captured silent service without an audible output", async () => {
   const { soundDirectory } = soundPaths();
-  const rehearsalDirectory = await mkdtemp(join(tmpdir(), "sound-service-"));
+  const rehearsalDirectory = await freshRehearsalDirectory("sound-service-");
   const capturePath = join(rehearsalDirectory, "silent-capture.wav");
   const session = "fedcba9876543210fedcba9876543210";
   const result = await runIsolatedSclang({

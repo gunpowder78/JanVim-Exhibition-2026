@@ -4,12 +4,17 @@ var finiteFloat, validSession, validDurationText, jsonString, emit;
 var emitReady, emitEvent, emitStats, emitComplete, completeEmitted = false;
 var soundRoot, policyFactory, policy, synthFactory, definitions;
 var options, server, serverPort = 57141, launchedPid, preflightId, preflightResponder;
+var endpointHelperPath, endpointOwned = false, endpointCheckPid;
+var endpointCheckGeneration = 0, endpointCheckTimeout;
 var phase = \validating, bootRoutine, startupTimeout, startupMonitor;
+var cleanupRoutine, cleanupTimeout;
 var checker, statsTask, durationTask, serverFailureResponder, oscKeys = Array.new;
 var voiceBus, finalBus, mixer, outputSynth, captureBuffer, captureSynth, windSynth;
-var pluckNodes = Array.new, livePlucks = 0, maxPlucks = 0, heartbeatControl = 0;
-var stopTasks, removeResponders, ownsServer, finishWithoutServer, finishService;
-var abortStartup, beginStop, installOsc, processAction, setupApplication, startSafeBoot;
+var captureFrames, pluckNodes = Array.new, livePlucks = 0, maxPlucks = 0, heartbeatControl = 0;
+var pidIsRunning, cancelEndpointCheck, inspectEndpoint, stopTasks, removeResponders;
+var ownsServerProcess, ownsServer, finishWithoutServer, terminateOwnedProcess, finishService;
+var abortStartup, beginStop, installOsc, processAction, setupApplication;
+var beginBootWait, verifyStartupEndpoint, startSafeBoot;
 
 finiteFloat = { |value|
     value.isFloat and: {
@@ -121,9 +126,14 @@ if(argumentError.notNil) {
 hardwareOutput = ["listen"].includesEqual(mode);
 
 soundRoot = thisProcess.nowExecutingPath.dirname;
+endpointHelperPath = soundRoot +/+ "server-port-owner.ps1";
 policyFactory = (soundRoot +/+ "policy.scd").load;
 synthFactory = (soundRoot +/+ "synths.scd").load;
-if(policyFactory.isKindOf(Function).not or: { synthFactory.isKindOf(Function).not }) {
+if(
+    policyFactory.isKindOf(Function).not or: {
+        synthFactory.isKindOf(Function).not or: { File.exists(endpointHelperPath).not }
+    }
+) {
     emitComplete.value("loadFailure", false);
     2.exit;
 } {
@@ -142,10 +152,74 @@ options = ServerOptions.new
     .zeroConf_(false);
 server = Server(\janvimSoundService, NetAddr("127.0.0.1", serverPort), options);
 
+pidIsRunning = { |pid|
+    var result;
+    if(pid.isNil) {
+        false
+    } {
+        result = pid.pidRunning;
+        result.notNil and: { result != false }
+    }
+};
+
+ownsServerProcess = {
+    launchedPid.notNil and: {
+        server.pid == launchedPid and: { pidIsRunning.value(launchedPid) }
+    }
+};
+
+cancelEndpointCheck = {
+    endpointCheckGeneration = endpointCheckGeneration + 1;
+    endpointCheckTimeout !? { endpointCheckTimeout.stop; endpointCheckTimeout = nil };
+    if(pidIsRunning.value(endpointCheckPid)) {
+        thisProcess.platform.killProcessByID(endpointCheckPid);
+    };
+    endpointCheckPid = nil;
+};
+
+inspectEndpoint = { |action|
+    var generation;
+    cancelEndpointCheck.value;
+    generation = endpointCheckGeneration;
+    if(ownsServerProcess.value.not) {
+        action.value(2);
+    } {
+        endpointCheckPid = [
+            "pwsh.exe", "-NoProfile", "-NonInteractive", "-File", endpointHelperPath,
+            "-Port", serverPort.asString, "-ExpectedPid", launchedPid.asString
+        ].unixCmd({ |exitCode|
+            {
+                if(generation == endpointCheckGeneration) {
+                    endpointCheckTimeout !? {
+                        endpointCheckTimeout.stop;
+                        endpointCheckTimeout = nil;
+                    };
+                    endpointCheckPid = nil;
+                    action.value(exitCode);
+                };
+            }.defer;
+        }, false);
+        endpointCheckTimeout = Routine {
+            1.5.wait;
+            if(generation == endpointCheckGeneration) {
+                endpointCheckGeneration = endpointCheckGeneration + 1;
+                if(pidIsRunning.value(endpointCheckPid)) {
+                    thisProcess.platform.killProcessByID(endpointCheckPid);
+                };
+                endpointCheckPid = nil;
+                endpointCheckTimeout = nil;
+                action.value(4);
+            };
+        }.play(AppClock);
+    };
+};
+
 stopTasks = {
-    [checker, statsTask, durationTask, startupTimeout, startupMonitor, bootRoutine].do { |task|
+    [checker, statsTask, durationTask, startupTimeout, startupMonitor, bootRoutine,
+        cleanupRoutine, cleanupTimeout].do { |task|
         if(task.notNil and: { task !== thisThread }) { task.stop };
     };
+    cancelEndpointCheck.value;
 };
 
 removeResponders = {
@@ -155,62 +229,102 @@ removeResponders = {
     preflightResponder !? { preflightResponder.free; preflightResponder = nil };
 };
 
-ownsServer = {
-    launchedPid.notNil and: {
-        server.pid == launchedPid and: { launchedPid.pidRunning }
-    }
-};
+ownsServer = { endpointOwned and: { ownsServerProcess.value } };
 
 finishWithoutServer = { |reason, clean, exitCode|
     if(phase != \complete) {
         phase = \complete;
         stopTasks.value;
         removeResponders.value;
+        if(server.statusWatcher.aliveThread.notNil) { server.stopAliveThread };
         server.remove;
         emitComplete.value(reason, clean);
         AppClock.sched(0.05, { exitCode.exit; nil });
     };
 };
 
-finishService = { |reason, initiallyClean|
-    Routine {
-        var clean = initiallyClean, attempts = 0;
-
-        captureSynth !? { captureSynth.free };
-        outputSynth !? { outputSynth.free };
-        pluckNodes.do { |node| node.free };
-        windSynth !? { windSynth.free };
-        captureBuffer !? {
-            captureBuffer.close({ |buffer| buffer.freeMsg });
+terminateOwnedProcess = { |reason, clean, exitCode|
+    cleanupRoutine = Routine {
+        var ended;
+        endpointOwned = false;
+        if(pidIsRunning.value(launchedPid)) {
+            thisProcess.platform.killProcessByID(launchedPid);
         };
-        voiceBus !? { voiceBus.free };
-        finalBus !? { finalBus.free };
-        0.25.wait;
-
-        if(ownsServer.value) {
-            server.addr.sendMsg("/quit");
-            while { launchedPid.pidRunning and: { attempts < 60 } } {
-                0.05.wait;
-                attempts = attempts + 1;
-            };
-            if(launchedPid.pidRunning) {
-                thisProcess.platform.killProcessByID(launchedPid);
-                20.do {
-                    if(launchedPid.pidRunning) { 0.05.wait };
-                };
-            };
-            clean = clean and: { launchedPid.pidRunning.not };
-        } {
-            clean = clean and: { launchedPid.notNil and: { launchedPid.pidRunning.not } };
+        20.do {
+            if(pidIsRunning.value(launchedPid)) { 0.05.wait };
         };
-
-        server.stopAliveThread;
-        server.remove;
-        phase = \complete;
-        emitComplete.value(reason, clean);
-        0.05.wait;
-        if(clean) { 0.exit } { 1.exit };
+        ended = pidIsRunning.value(launchedPid).not;
+        finishWithoutServer.value(reason, clean and: { ended }, exitCode);
     }.play(AppClock);
+};
+
+finishService = { |reason, initiallyClean|
+    cleanupTimeout = Routine {
+        6.wait;
+        if(phase == \stopping) {
+            cleanupRoutine !? { cleanupRoutine.stop };
+            terminateOwnedProcess.value(reason, false, 1);
+        };
+    }.play(AppClock);
+
+    inspectEndpoint.value({ |ownershipStatus|
+        if(phase == \stopping) {
+            if(ownershipStatus == 0 and: { ownsServerProcess.value }) {
+                endpointOwned = true;
+                cleanupRoutine = Routine {
+                    captureSynth !? { captureSynth.free };
+                    outputSynth !? { outputSynth.free };
+                    pluckNodes.do { |node| node.free };
+                    windSynth !? { windSynth.free };
+                    voiceBus !? { voiceBus.free };
+                    finalBus !? { finalBus.free };
+                    captureBuffer !? {
+                        captureBuffer.write(
+                            capturePath, "wav", "int16", captureFrames, 0, false,
+                            [\b_free, captureBuffer.bufnum]
+                        );
+                    };
+                    server.sync;
+
+                    if(phase == \stopping) {
+                        inspectEndpoint.value({ |quitOwnershipStatus|
+                            if(phase == \stopping) {
+                                if(quitOwnershipStatus == 0 and: { ownsServerProcess.value }) {
+                                    var attempts = 0, clean = initiallyClean;
+                                    endpointOwned = true;
+                                    server.addr.sendMsg("/quit");
+                                    cleanupRoutine = Routine {
+                                        while {
+                                            pidIsRunning.value(launchedPid) and: { attempts < 60 }
+                                        } {
+                                            0.05.wait;
+                                            attempts = attempts + 1;
+                                        };
+                                        if(pidIsRunning.value(launchedPid)) {
+                                            thisProcess.platform.killProcessByID(launchedPid);
+                                            20.do {
+                                                if(pidIsRunning.value(launchedPid)) { 0.05.wait };
+                                            };
+                                        };
+                                        clean = clean and: {
+                                            pidIsRunning.value(launchedPid).not
+                                        };
+                                        finishWithoutServer.value(
+                                            reason, clean, if(clean) { 0 } { 1 }
+                                        );
+                                    }.play(AppClock);
+                                } {
+                                    terminateOwnedProcess.value(reason, false, 1);
+                                };
+                            };
+                        });
+                    };
+                }.play(AppClock);
+            } {
+                terminateOwnedProcess.value(reason, false, 1);
+            };
+        };
+    });
 };
 
 abortStartup = { |reason|
@@ -218,18 +332,9 @@ abortStartup = { |reason|
         phase = \stopping;
         stopTasks.value;
         removeResponders.value;
-        if(ownsServer.value) {
-            server.addr.sendMsg("/quit");
-            AppClock.sched(1.0, {
-                if(launchedPid.pidRunning) {
-                    thisProcess.platform.killProcessByID(launchedPid);
-                };
-                finishWithoutServer.value(reason, false, 1);
-                nil
-            });
-        } {
-            finishWithoutServer.value(reason, false, 1);
-        };
+        endpointOwned = false;
+        if(server.statusWatcher.aliveThread.notNil) { server.stopAliveThread };
+        terminateOwnedProcess.value(reason, reason == "serverPortOccupied", 1);
     };
 };
 
@@ -334,93 +439,143 @@ installOsc = {
 };
 
 setupApplication = {
-    if(ownsServer.value.not) {
+    if(phase != \starting or: { ownsServer.value.not }) {
         abortStartup.value("ownershipLost");
     } {
-        server.bootInit(false);
-        serverFailureResponder = OSCFunc({ |msg|
-            if(phase == \starting) {
-                abortStartup.value("serverFailure")
-            } {
-                beginStop.value("serverFailure", false)
-            };
-        }, "/fail", server.addr);
-        definitions.do { |definition| definition.send(server) };
-        server.sync;
-        if(phase == \starting) {
-            voiceBus = Bus.audio(server, 2);
-            finalBus = Bus.audio(server, 2);
-            mixer = Synth.head(server, \jvMix, [
-                \inBus, voiceBus.index,
-                \outBus, finalBus.index,
-                \heartbeat, 0,
-                \armed, 0,
-                \stop, 0
-            ]);
-
-            if(capturePath.notEmpty) {
-                captureBuffer = Buffer.alloc(server, 65536, 2);
+        try {
+            server.bootInit(false);
+            if(phase == \starting and: { ownsServer.value }) {
+                serverFailureResponder = OSCFunc({ |msg|
+                    if(phase == \starting) {
+                        abortStartup.value("serverFailure")
+                    } {
+                        beginStop.value("serverFailure", false)
+                    };
+                }, "/fail", server.addr);
+                definitions.do { |definition| definition.send(server) };
                 server.sync;
-                captureBuffer.write(capturePath, "wav", "int16", 0, 0, true);
-                server.sync;
-                captureSynth = Synth.after(mixer, \jvCapture, [
-                    \inBus, finalBus.index,
-                    \bufnum, captureBuffer.bufnum
-                ]);
-            };
 
-            if(hardwareOutput) {
-                outputSynth = Synth.after(captureSynth ? mixer, \jvOutput, [
-                    \inBus, finalBus.index,
-                    \hardware, 1
-                ]);
-            };
+                if(phase == \starting and: { ownsServer.value }) {
+                    voiceBus = Bus.audio(server, 2);
+                    finalBus = Bus.audio(server, 2);
+                    mixer = Synth.head(server, \jvMix, [
+                        \inBus, voiceBus.index,
+                        \outBus, finalBus.index,
+                        \heartbeat, 0,
+                        \armed, 0,
+                        \stop, 0
+                    ]);
 
-            installOsc.value;
-            phase = \ready;
-            startupTimeout.stop;
-            startupMonitor.stop;
-            emitReady.value;
-            emitStats.value;
-
-            checker = Routine {
-                loop {
-                    0.05.wait;
-                    if(phase == \ready) {
-                        if(
-                            server.pid != launchedPid or: {
-                                launchedPid.pidRunning.not or: { server.unresponsive }
-                            }
-                        ) {
-                            beginStop.value("serverExit", false);
+                    if(capturePath.notEmpty) {
+                        captureFrames = ((duration + 1.5).min(120) * 48000).asInteger;
+                        captureBuffer = Buffer.alloc(server, captureFrames, 2);
+                        server.sync;
+                        if(phase == \starting and: { ownsServer.value }) {
+                            captureSynth = Synth.after(mixer, \jvCapture, [
+                                \inBus, finalBus.index,
+                                \bufnum, captureBuffer.bufnum
+                            ]);
+                            captureSynth.onFree { { captureSynth = nil }.defer };
                         } {
-                            processAction.value(policy.at(\tick).value(Main.elapsedTime));
+                            abortStartup.value("ownershipLost");
                         };
                     };
+
+                    if(phase == \starting and: { ownsServer.value }) {
+                        if(hardwareOutput) {
+                            outputSynth = Synth.after(captureSynth ? mixer, \jvOutput, [
+                                \inBus, finalBus.index,
+                                \hardware, 1
+                            ]);
+                        };
+
+                        installOsc.value;
+                        phase = \ready;
+                        startupTimeout.stop;
+                        startupMonitor.stop;
+                        emitReady.value;
+                        emitStats.value;
+
+                        checker = Routine {
+                            loop {
+                                0.05.wait;
+                                if(phase == \ready) {
+                                    if(ownsServer.value.not or: { server.unresponsive }) {
+                                        beginStop.value("serverExit", false);
+                                    } {
+                                        processAction.value(
+                                            policy.at(\tick).value(Main.elapsedTime)
+                                        );
+                                    };
+                                };
+                            };
+                        }.play(AppClock);
+                        statsTask = Routine {
+                            loop {
+                                5.0.wait;
+                                if(phase == \ready) { emitStats.value };
+                            };
+                        }.play(AppClock);
+                        durationTask = Routine {
+                            duration.wait;
+                            beginStop.value("duration", true);
+                        }.play(AppClock);
+                    };
+                } {
+                    abortStartup.value("ownershipLost");
                 };
-            }.play(AppClock);
-            statsTask = Routine {
-                loop {
-                    5.0.wait;
-                    if(phase == \ready) { emitStats.value };
-                };
-            }.play(AppClock);
-            durationTask = Routine {
-                duration.wait;
-                beginStop.value("duration", true);
-            }.play(AppClock);
+            } {
+                abortStartup.value("ownershipLost");
+            };
+        } { |error|
+            if(phase == \starting) { abortStartup.value("setupFailure") };
         };
     };
 };
 
+beginBootWait = {
+    if(phase == \starting and: { ownsServer.value }) {
+        server.statusWatcher.serverBooting = true;
+        bootRoutine = server.statusWatcher.doWhenBooted({
+            server.statusWatcher.serverBooting = false;
+            if(phase == \starting and: { ownsServer.value }) {
+                setupApplication.value;
+            };
+        }, 100, { abortStartup.value("bootFailure"); false }, AppClock);
+        server.startAliveThread;
+    } {
+        abortStartup.value("ownershipLost");
+    };
+};
+
+verifyStartupEndpoint = {
+    inspectEndpoint.value({ |ownershipStatus|
+        if(phase == \starting) {
+            switch(ownershipStatus,
+                0, {
+                    endpointOwned = true;
+                    beginBootWait.value;
+                },
+                2, {
+                    if(ownsServerProcess.value) {
+                        AppClock.sched(0.05, {
+                            if(phase == \starting) { verifyStartupEndpoint.value };
+                            nil
+                        });
+                    } {
+                        abortStartup.value("serverExit");
+                    };
+                },
+                3, { abortStartup.value("serverPortOccupied") },
+                { abortStartup.value("ownershipCheckFailed") }
+            );
+        };
+    });
+};
+
 startSafeBoot = {
     phase = \starting;
-    server.statusWatcher.serverBooting = true;
-    bootRoutine = server.doWhenBooted({
-        server.statusWatcher.serverBooting = false;
-        setupApplication.value;
-    }, 100, { abortStartup.value("bootFailure"); false }, AppClock);
-    server.bootServerApp({ server.startAliveThread });
+    server.bootServerApp({ });
     launchedPid = server.pid;
     if(launchedPid.isNil) {
         abortStartup.value("bootFailure");
@@ -431,12 +586,13 @@ startSafeBoot = {
         }.play(AppClock);
         startupMonitor = Routine {
             while { phase == \starting } {
-                if(launchedPid.pidRunning.not) {
+                if(pidIsRunning.value(launchedPid).not) {
                     abortStartup.value("serverExit");
                 };
                 0.05.wait;
             };
         }.play(AppClock);
+        verifyStartupEndpoint.value;
     };
 };
 

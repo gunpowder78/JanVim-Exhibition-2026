@@ -1,7 +1,8 @@
 (
 var assert, outputDirectory, synthsPath, synthFactory, definitions, hasDefinition;
 var options, addDefinitions, addScoreCleanup;
-var mainScore, watchdogScore, renderScore, mainCapture, watchdogCapture;
+var mainScore, watchdogScore, captureCapScore, renderScore;
+var mainCapture, watchdogCapture, captureCapCapture, captureCapEngineCapture;
 
 assert = { |condition, message|
     if(condition.not) { Error("ASSERTION FAILED: " ++ message).throw };
@@ -71,6 +72,23 @@ try {
     watchdogScore.add([0.75, [\n_set, 2000, \heartbeat, 2]]);
     addScoreCleanup.value(watchdogScore, 2001, 2200, 6.60);
 
+    captureCapCapture = outputDirectory +/+ "capture-cap.wav";
+    captureCapEngineCapture = outputDirectory +/+ "capture-cap-engine.wav";
+    captureCapScore = Score.new;
+    addDefinitions.value(captureCapScore);
+    captureCapScore.add([0.0, [\b_alloc, 0, 4800, 2]]);
+    captureCapScore.add([0.01, [\s_new, \jvMix, 3000, 0, 0,
+        \inBus, 16, \outBus, 18, \heartbeat, 0, \armed, 0]]);
+    captureCapScore.add([0.01, [\s_new, \jvWind, 3200, 2, 3000,
+        \outBus, 16, \energy, 0.8, \pan, 0.1, \gate, 1]]);
+    captureCapScore.add([0.01, [\s_new, \jvCapture, 3001, 3, 3000,
+        \inBus, 18, \bufnum, 0]]);
+    captureCapScore.add([0.40, [\n_set, 3200, \gate, 0]]);
+    captureCapScore.add([0.45, [\b_write, 0, captureCapCapture,
+        "wav", "int16", 4800, 0, 0]]);
+    captureCapScore.add([0.50, [\b_free, 0]]);
+    captureCapScore.add([0.55, [\c_set, 0, 0]]);
+
     renderScore = { |score, scoreName, capturePath, engineDuration, action|
         score.recordNRT(
             oscFilePath: outputDirectory +/+ (scoreName ++ ".osc"),
@@ -87,8 +105,16 @@ try {
 
     renderScore.value(mainScore, "main", mainCapture, 9.0, {
         renderScore.value(watchdogScore, "watchdog", watchdogCapture, 6.9, {
-            "PASS: sound/tests/render.scd".postln;
-            0.exit;
+            renderScore.value(
+                captureCapScore,
+                "capture-cap",
+                captureCapEngineCapture,
+                0.6,
+                {
+                    "PASS: sound/tests/render.scd".postln;
+                    0.exit;
+                }
+            );
         });
     });
 } { |error|

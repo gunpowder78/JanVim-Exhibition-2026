@@ -65,7 +65,17 @@
         }),
 
         SynthDef(\jvCapture, { |inBus = 18, bufnum = 0|
-            DiskOut.ar(bufnum, In.ar(inBus, 2));
+            RecordBuf.ar(
+                In.ar(inBus, 2),
+                bufnum,
+                offset: 0,
+                recLevel: 1,
+                preLevel: 0,
+                run: 1,
+                loop: 0,
+                trigger: 1,
+                doneAction: Done.freeSelf
+            );
         })
     ]
 }

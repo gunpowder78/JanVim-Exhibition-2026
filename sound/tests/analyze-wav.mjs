@@ -112,6 +112,7 @@ const validateSegments = (segments, sampleRate, duration) => {
     ) {
       fail("segment must end on a frame boundary");
     }
+    if (frameEnd <= frameStart) fail("segment must contain at least one frame");
     return { name, start, end, frameStart, frameEnd };
   });
 };
