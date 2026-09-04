@@ -65,10 +65,30 @@ then rerun this section once; never repair an input during a run.
 
 ## Display Capture and Confirmation
 
-Precondition -> both intended screens are powered on, the Preflight variables describe a fresh
-external root, and the checked-in display map remains unconfirmed.
+Precondition -> for G4, either all three intended extended displays are powered on or exactly one
+display is connected for a bounded preview; the Preflight variables describe a fresh external
+root, and the checked-in display map remains unconfirmed. The legacy G2 path still requires its two
+intended displays.
 
-Exact command/action -> first run `start-g2-rehearsal.ps1 Capture`:
+Exact command/action -> the G4 production sequence is `manual configure -> ValidateOnly -> Show`.
+Launch `configure-displays.ps1`, read the numbered cards on the physical displays, explicitly bind
+SCREEN-1 to JanVim, SCREEN-2 to Narrative, and SCREEN-3 to the local 《见山》 standby surface, then
+press Save. Do not infer roles from connector, array order, display ID, geometry, or DPI:
+
+```powershell
+# block: configure
+pwsh -NoProfile -File "$repo\scripts\configure-displays.ps1" -RehearsalRoot $root -DisplayMapPath $map
+if ($LASTEXITCODE -ne 0) {
+    throw "display-configuration-failed:$LASTEXITCODE"
+}
+```
+
+When exactly one display is present, the GUI may save `single-display-preview`: it binds SCREEN-1
+only, explicitly skips SCREEN-2 and SCREEN-3, and can never count as physical acceptance. With two
+displays, or with three displays before all roles are explicitly assigned, close without saving and
+correct the topology manually.
+
+For legacy schema-1 rollback only, first run `start-g2-rehearsal.ps1 Capture`:
 
 ```powershell
 # block: capture
@@ -103,15 +123,20 @@ $mapSha256 = (Get-FileHash -LiteralPath $map -Algorithm SHA256).Hash.ToLowerInva
 [pscustomobject]@{ runId = $runId; displayMapSha256 = $mapSha256 } | Format-List
 ```
 
-Visible result -> the fresh external map is confirmed while the checked-in display map remains
-unconfirmed.
+Visible result -> the G4 GUI displays numbered identify cards and writes one confirmed schema-2
+external map only after explicit Save; the legacy path writes its confirmed schema-1 map. The
+checked-in display map remains unconfirmed.
 
-Machine evidence -> Capture and Confirm receipts name the external map, the two explicit display
-IDs, and the printed external map SHA-256.
+Machine evidence -> the fresh external map records mode, logical-layout SHA-256, physical topology
+SHA-256, explicit soft-role bindings, unassigned displays, geometry, DPI scale, and rotation. Legacy
+Capture and Confirm receipts still name the external map, the two explicit display IDs, and the
+printed external map SHA-256.
 
-Bounded failure branch -> stop if either display differs. Discard this external root as failed
-evidence, correct cabling or display settings, then perform one new Preflight/Capture/Confirm
-sequence; never confirm a checked-in map.
+Bounded failure branch -> if the GUI exits without a confirmed map, or later ValidateOnly returns
+`configuration-required`, stop. Discard this external root as failed evidence, correct cabling,
+display settings, or assignments manually, then create one fresh root and rerun configuration. Do
+not auto-remap or auto-resume. For legacy rollback, stop if either display differs and perform one
+new Preflight/Capture/Confirm sequence; never confirm a checked-in map.
 
 ## Physical Network Disconnect
 

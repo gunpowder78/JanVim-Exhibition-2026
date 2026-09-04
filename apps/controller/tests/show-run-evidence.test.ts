@@ -20,6 +20,7 @@ import {
   type LoopEvidence,
   type ShowRunEvidenceRecord,
 } from "../src/show-run-evidence.ts";
+import { hashDisplayGeometryV2 } from "../src/display-routing-contract.ts";
 import type { LatencySummary } from "../src/run-telemetry.ts";
 
 const HASH_A = "a".repeat(64);
@@ -237,6 +238,71 @@ function validShowRecord(): ShowRunEvidenceRecord {
   };
 }
 
+function routingRole(
+  softId: "SCREEN-1" | "SCREEN-2" | "SCREEN-3",
+  displayId: string,
+  x: number,
+  scaleFactor = 1,
+  rotation: 0 | 90 | 180 | 270 = 0,
+) {
+  const role = {
+    softId,
+    displayId,
+    bounds: { x, y: 0, width: 1920, height: 1080 },
+    workingArea: { x, y: 0, width: 1920, height: 1040 },
+    scaleFactor,
+    rotation,
+  };
+  return {
+    ...role,
+    geometrySha256: hashDisplayGeometryV2(role),
+  };
+}
+
+function validProductionRoutingRecord(): ShowRunEvidenceRecord {
+  const record = cloneRecord();
+  return {
+    ...record,
+    routing: {
+      mode: "production-3",
+      layoutSha256: HASH_A,
+      mapSha256: record.display.mapSha256,
+      topologySha256: HASH_B,
+      selectedRoles: [
+        routingRole("SCREEN-1", "111", 0),
+        routingRole("SCREEN-2", "222", 1920, 1.25, 90),
+        routingRole("SCREEN-3", "333", 3840, 1, 180),
+      ],
+      skippedRoles: [],
+      unassignedDisplayCount: 1,
+      standbyUsed: true,
+      topologyStopped: false,
+    },
+  } as ShowRunEvidenceRecord;
+}
+
+function validPreviewRoutingRecord(): ShowRunEvidenceRecord {
+  const record = cloneRecord();
+  const { secondary: _secondary, ...previewDisplay } = record.display;
+  return {
+    ...record,
+    acceptanceScope: "single-display-preview",
+    physicalProjectorsTested: false,
+    display: previewDisplay,
+    routing: {
+      mode: "single-display-preview",
+      layoutSha256: HASH_A,
+      mapSha256: record.display.mapSha256,
+      topologySha256: HASH_B,
+      selectedRoles: [routingRole("SCREEN-1", "111", 0)],
+      skippedRoles: ["SCREEN-2", "SCREEN-3"],
+      unassignedDisplayCount: 0,
+      standbyUsed: false,
+      topologyStopped: false,
+    },
+  } as unknown as ShowRunEvidenceRecord;
+}
+
 function cloneRecord(record = validEvidenceRecord()): ShowRunEvidenceRecord {
   return structuredClone(record);
 }
@@ -289,6 +355,109 @@ function reverseObjectKeys(value: unknown): unknown {
 }
 
 describe("strict show-run evidence schema", () => {
+  it("keeps legacy display-map evidence byte-shape compatible by omitting routing", () => {
+    const legacy = validEvidenceRecord();
+    const parsed = parseShowRunEvidence(legacy);
+
+    expect(parsed).toEqual(legacy);
+    expect(parsed).not.toHaveProperty("routing");
+    expect(Object.keys(parsed.display)).toEqual([
+      "mapSha256",
+      "primary",
+      "secondary",
+    ]);
+  });
+
+  it("accepts a strict production routing record without replacing legacy geometry hashes", () => {
+    const record = validProductionRoutingRecord() as ShowRunEvidenceRecord & {
+      routing: { selectedRoles: Array<{ geometrySha256: string }> };
+    };
+    const parsed = parseShowRunEvidence(record) as typeof record;
+
+    expect(parsed.routing).toEqual(record.routing);
+    expect(parsed.display.primary.geometrySha256).toBe(
+      "b2bc82d7bea454184acfb21ae9139e97c32aefb994443034423653e85f9c83cc",
+    );
+    expect(parsed.routing.selectedRoles[0]!.geometrySha256).not.toBe(
+      parsed.display.primary.geometrySha256,
+    );
+  });
+
+  it("accepts deliberate one-display preview evidence without fabricating secondary", () => {
+    const parsed = parseShowRunEvidence(validPreviewRoutingRecord()) as unknown as {
+      acceptanceScope: string;
+      physicalProjectorsTested: boolean;
+      display: Record<string, unknown>;
+      routing: { skippedRoles: string[]; standbyUsed: boolean };
+    };
+
+    expect(parsed.acceptanceScope).toBe("single-display-preview");
+    expect(parsed.physicalProjectorsTested).toBe(false);
+    expect(parsed.display).not.toHaveProperty("secondary");
+    expect(parsed.routing.skippedRoles).toEqual(["SCREEN-2", "SCREEN-3"]);
+    expect(parsed.routing.standbyUsed).toBe(false);
+  });
+
+  it("rejects unknown routing fields, invalid limits, duplicate roles, and V2 hash drift", () => {
+    const mutations: Array<[string, (routing: Record<string, unknown>) => void]> = [
+      ["unknown", (routing) => { routing.extra = true; }],
+      ["unassigned limit", (routing) => { routing.unassignedDisplayCount = 17; }],
+      [
+        "duplicate soft role",
+        (routing) => {
+          const roles = routing.selectedRoles as Array<Record<string, unknown>>;
+          roles[1]!.softId = "SCREEN-1";
+        },
+      ],
+      [
+        "duplicate display",
+        (routing) => {
+          const roles = routing.selectedRoles as Array<Record<string, unknown>>;
+          roles[1]!.displayId = roles[0]!.displayId;
+        },
+      ],
+      [
+        "V2 hash",
+        (routing) => {
+          const roles = routing.selectedRoles as Array<Record<string, unknown>>;
+          roles[0]!.geometrySha256 = HASH_C;
+        },
+      ],
+    ];
+
+    for (const [name, mutate] of mutations) {
+      const record = structuredClone(validProductionRoutingRecord()) as unknown as {
+        routing: Record<string, unknown>;
+      };
+      mutate(record.routing);
+      expect(() => parseShowRunEvidence(record), name).toThrow();
+    }
+  });
+
+  it("enforces routing mode cardinality, skipped roles, standby, and map identity", () => {
+    const mutations: Array<[string, (record: any) => void]> = [
+      ["map identity", (record) => { record.routing.mapSha256 = HASH_C; }],
+      ["production role cardinality", (record) => { record.routing.selectedRoles.pop(); }],
+      ["production skipped roles", (record) => { record.routing.skippedRoles = ["SCREEN-3"]; }],
+      ["production standby", (record) => { record.routing.standbyUsed = false; }],
+      ["preview fake secondary", (record) => { record.display.secondary = cloneRecord().display.secondary; }],
+      ["preview role cardinality", (record) => { record.routing.selectedRoles.push(routingRole("SCREEN-2", "222", 1920)); }],
+      ["preview skipped roles", (record) => { record.routing.skippedRoles = ["SCREEN-2"]; }],
+      ["preview standby", (record) => { record.routing.standbyUsed = true; }],
+    ];
+
+    for (const [name, mutate] of mutations.slice(0, 4)) {
+      const record = structuredClone(validProductionRoutingRecord());
+      mutate(record);
+      expect(() => parseShowRunEvidence(record), name).toThrow();
+    }
+    for (const [name, mutate] of mutations.slice(4)) {
+      const record = structuredClone(validPreviewRoutingRecord());
+      mutate(record);
+      expect(() => parseShowRunEvidence(record), name).toThrow();
+    }
+  });
+
   it("rejects schema 1 instead of treating retained tails as current run-wide proof", () => {
     const legacy = { ...validEvidenceRecord(), schema: 1 };
     expect(() => parseShowRunEvidence(legacy)).toThrow();

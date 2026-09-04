@@ -60,8 +60,8 @@ $crashWindowMilliseconds = 600000L
 $restartDelaysMilliseconds = @(1000, 2000, 4000)
 # JANVIM_REVIEWED_ELECTRON_RELEASE_IDENTITY_BEGIN
 $reviewedElectronMainRelativePath = 'apps/controller/dist/main/electron-main.js'
-$reviewedElectronMainBytes = 451996L
-$reviewedElectronMainSha256 = 'bc60718dd52323259c397057265245042b4ea1823609cff3958568ceafd36c55'
+$reviewedElectronMainBytes = 526566L
+$reviewedElectronMainSha256 = 'e4ee50d699c7212799760830993d6c37f9706892d4614b76e1e0f10d97f8d43a'
 $reviewedElectronMainRuntimeImports = @(
     'electron'
     'node:child_process'
@@ -560,6 +560,7 @@ function Read-BoundedJsonSnapshot {
     }
     return [pscustomobject]@{
         Value = $value
+        Text = $fileSnapshot.Text
         ByteLength = $fileSnapshot.ByteLength
         FileSha256 = $fileSnapshot.FileSha256
     }
@@ -1061,15 +1062,19 @@ function Read-SelectedContentProfile {
     }
 }
 
-function Assert-NoDuplicateJsonPropertyNames {
-    param([Parameter(Mandatory = $true)][string]$Text)
+function Assert-NoDuplicateJsonPropertyNamesForReason {
+    param(
+        [Parameter(Mandatory = $true)][string]$Text,
+        [Parameter(Mandatory = $true)][string]$Reason,
+        [ValidateRange(1, 64)][int]$MaximumDepth = 8
+    )
 
     $document = $null
     try {
         $options = [System.Text.Json.JsonDocumentOptions]::new()
         $options.AllowTrailingCommas = $false
         $options.CommentHandling = [System.Text.Json.JsonCommentHandling]::Disallow
-        $options.MaxDepth = 8
+        $options.MaxDepth = $MaximumDepth
         $document = [System.Text.Json.JsonDocument]::Parse($Text, $options)
         $pending = [Collections.Generic.Stack[System.Text.Json.JsonElement]]::new()
         $pending.Push($document.RootElement)
@@ -1079,7 +1084,7 @@ function Assert-NoDuplicateJsonPropertyNames {
                 $propertyNames = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
                 foreach ($property in $element.EnumerateObject()) {
                     if (-not $propertyNames.Add($property.Name)) {
-                        throw 'duplicate-json-property'
+                        throw $Reason
                     }
                     $pending.Push($property.Value)
                 }
@@ -1092,13 +1097,22 @@ function Assert-NoDuplicateJsonPropertyNames {
         }
     }
     catch {
-        throw 'electron-module-graph-invalid'
+        throw $Reason
     }
     finally {
         if ($null -ne $document) {
             $document.Dispose()
         }
     }
+}
+
+function Assert-NoDuplicateJsonPropertyNames {
+    param([Parameter(Mandatory = $true)][string]$Text)
+
+    Assert-NoDuplicateJsonPropertyNamesForReason `
+        -Text $Text `
+        -Reason 'electron-module-graph-invalid' `
+        -MaximumDepth 8
 }
 
 function Read-StrictElectronModuleGraph {
@@ -1308,6 +1322,376 @@ function Assert-ConfirmedDisplayRole {
         -not (Test-FinitePositiveJsonNumber -Value $scaleFactor) -or
         -not (Test-HashValue -Value $geometrySha256) -or
         (Get-DisplayGeometrySha256 -Role $Role) -cne $geometrySha256
+    ) {
+        throw $Reason
+    }
+}
+
+function Get-DisplayRoutingSha256 {
+    param([Parameter(Mandatory = $true)][string]$Canonical)
+
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    try {
+        $bytes = [Text.UTF8Encoding]::new($false, $true).GetBytes($Canonical)
+        return [Convert]::ToHexString($sha256.ComputeHash($bytes)).ToLowerInvariant()
+    }
+    finally {
+        $sha256.Dispose()
+    }
+}
+
+function Get-CanonicalDisplayJsonNumber {
+    param(
+        [Parameter(Mandatory = $true)][object]$Value,
+        [Parameter(Mandatory = $true)][string]$Reason
+    )
+
+    if ($Value -is [int] -or $Value -is [long]) {
+        return ([long]$Value).ToString([Globalization.CultureInfo]::InvariantCulture)
+    }
+    if ($Value -isnot [double] -and $Value -isnot [decimal]) {
+        throw $Reason
+    }
+    $number = [double]$Value
+    if (-not [double]::IsFinite($number)) {
+        throw $Reason
+    }
+    $text = $number.ToString('R', [Globalization.CultureInfo]::InvariantCulture).ToLowerInvariant()
+    $text = $text -replace 'e\+', 'e'
+    $text = $text -replace 'e(-?)0+([0-9]+)$', 'e$1$2'
+    return $text
+}
+
+function Test-SafeDisplayJsonInteger {
+    param([Parameter(Mandatory = $true)][object]$Value)
+
+    return (
+        ($Value -is [int] -or $Value -is [long]) -and
+        [decimal]$Value -ge -9007199254740991 -and
+        [decimal]$Value -le 9007199254740991
+    )
+}
+
+function Assert-DisplayRoutingText {
+    param(
+        [Parameter(Mandatory = $true)][object]$Value,
+        [Parameter(Mandatory = $true)][int]$MaximumBytes,
+        [Parameter(Mandatory = $true)][string]$Reason
+    )
+
+    if (
+        $Value -isnot [string] -or
+        $Value.Length -eq 0 -or
+        [Text.Encoding]::UTF8.GetByteCount($Value) -gt $MaximumBytes -or
+        $Value -match '[\x00-\x1f\x7f-\x9f]'
+    ) {
+        throw $Reason
+    }
+}
+
+function Assert-DisplayRectangleV2 {
+    param(
+        [Parameter(Mandatory = $true)][object]$Rectangle,
+        [Parameter(Mandatory = $true)][string]$Reason
+    )
+
+    if ($Rectangle -isnot [pscustomobject]) {
+        throw $Reason
+    }
+    Assert-ExactPropertySet `
+        -InputObject $Rectangle `
+        -ExpectedNames @('x', 'y', 'width', 'height') `
+        -Reason $Reason
+    $x = Get-RequiredPropertyValue -InputObject $Rectangle -Name 'x' -Reason $Reason
+    $y = Get-RequiredPropertyValue -InputObject $Rectangle -Name 'y' -Reason $Reason
+    $width = Get-RequiredPropertyValue -InputObject $Rectangle -Name 'width' -Reason $Reason
+    $height = Get-RequiredPropertyValue -InputObject $Rectangle -Name 'height' -Reason $Reason
+    if (
+        -not (Test-SafeDisplayJsonInteger -Value $x) -or
+        -not (Test-SafeDisplayJsonInteger -Value $y) -or
+        -not (Test-SafeDisplayJsonInteger -Value $width) -or
+        -not (Test-SafeDisplayJsonInteger -Value $height) -or
+        [long]$width -le 0 -or
+        [long]$height -le 0 -or
+        [decimal]$x + [decimal]$width -lt -9007199254740991 -or
+        [decimal]$x + [decimal]$width -gt 9007199254740991 -or
+        [decimal]$y + [decimal]$height -lt -9007199254740991 -or
+        [decimal]$y + [decimal]$height -gt 9007199254740991
+    ) {
+        throw $Reason
+    }
+}
+
+function Get-DisplayGeometryV2Sha256 {
+    param(
+        [Parameter(Mandatory = $true)][pscustomobject]$Display,
+        [Parameter(Mandatory = $true)][string]$Reason
+    )
+
+    $bounds = $Display.bounds
+    $workingArea = $Display.workingArea
+    $canonical = '[{0},{1},{2},{3},{4},{5},{6},{7},{8},{9},{10}]' -f @(
+        (ConvertTo-Json -Compress -InputObject ([string]$Display.displayId)),
+        (Get-CanonicalDisplayJsonNumber -Value $bounds.x -Reason $Reason),
+        (Get-CanonicalDisplayJsonNumber -Value $bounds.y -Reason $Reason),
+        (Get-CanonicalDisplayJsonNumber -Value $bounds.width -Reason $Reason),
+        (Get-CanonicalDisplayJsonNumber -Value $bounds.height -Reason $Reason),
+        (Get-CanonicalDisplayJsonNumber -Value $workingArea.x -Reason $Reason),
+        (Get-CanonicalDisplayJsonNumber -Value $workingArea.y -Reason $Reason),
+        (Get-CanonicalDisplayJsonNumber -Value $workingArea.width -Reason $Reason),
+        (Get-CanonicalDisplayJsonNumber -Value $workingArea.height -Reason $Reason),
+        (Get-CanonicalDisplayJsonNumber -Value $Display.scaleFactor -Reason $Reason),
+        (Get-CanonicalDisplayJsonNumber -Value $Display.rotation -Reason $Reason)
+    )
+    return Get-DisplayRoutingSha256 -Canonical $canonical
+}
+
+function Assert-DisplayPhysicalV2 {
+    param(
+        [Parameter(Mandatory = $true)][object]$Display,
+        [Parameter(Mandatory = $true)][bool]$Binding,
+        [Parameter(Mandatory = $true)][string]$Reason
+    )
+
+    if ($Display -isnot [pscustomobject]) {
+        throw $Reason
+    }
+    $expectedNames = @(
+        if ($Binding) { 'softId' }
+        'displayId'
+        'label'
+        'bounds'
+        'workingArea'
+        'scaleFactor'
+        'rotation'
+        'geometrySha256'
+    )
+    Assert-ExactPropertySet -InputObject $Display -ExpectedNames $expectedNames -Reason $Reason
+    if ($Binding) {
+        $softId = Get-RequiredPropertyValue -InputObject $Display -Name 'softId' -Reason $Reason
+        if ($softId -isnot [string] -or $softId -cnotin @('SCREEN-1', 'SCREEN-2', 'SCREEN-3')) {
+            throw $Reason
+        }
+    }
+    $displayId = Get-RequiredPropertyValue -InputObject $Display -Name 'displayId' -Reason $Reason
+    $label = Get-RequiredPropertyValue -InputObject $Display -Name 'label' -Reason $Reason
+    Assert-DisplayRoutingText -Value $displayId -MaximumBytes 256 -Reason $Reason
+    Assert-DisplayRoutingText -Value $label -MaximumBytes 512 -Reason $Reason
+    $bounds = Get-RequiredPropertyValue -InputObject $Display -Name 'bounds' -Reason $Reason
+    $workingArea = Get-RequiredPropertyValue -InputObject $Display -Name 'workingArea' -Reason $Reason
+    Assert-DisplayRectangleV2 -Rectangle $bounds -Reason $Reason
+    Assert-DisplayRectangleV2 -Rectangle $workingArea -Reason $Reason
+    $scaleFactor = Get-RequiredPropertyValue -InputObject $Display -Name 'scaleFactor' -Reason $Reason
+    $rotation = Get-RequiredPropertyValue -InputObject $Display -Name 'rotation' -Reason $Reason
+    $geometrySha256 = Get-RequiredPropertyValue -InputObject $Display -Name 'geometrySha256' -Reason $Reason
+    if (
+        -not (Test-FinitePositiveJsonNumber -Value $scaleFactor) -or
+        -not (Test-SafeDisplayJsonInteger -Value $rotation) -or
+        [long]$rotation -cnotin @(0L, 90L, 180L, 270L) -or
+        -not (Test-HashValue -Value $geometrySha256) -or
+        (Get-DisplayGeometryV2Sha256 -Display $Display -Reason $Reason) -cne $geometrySha256
+    ) {
+        throw $Reason
+    }
+}
+
+function Get-DisplayTopologyV2Sha256 {
+    param(
+        [Parameter(Mandatory = $true)][object[]]$Displays,
+        [Parameter(Mandatory = $true)][string]$Reason
+    )
+
+    $sorted = @($Displays)
+    for ($index = 1; $index -lt $sorted.Count; $index += 1) {
+        $candidate = $sorted[$index]
+        $cursor = $index - 1
+        while (
+            $cursor -ge 0 -and
+            [StringComparer]::Ordinal.Compare(
+                [string]$sorted[$cursor].displayId,
+                [string]$candidate.displayId
+            ) -gt 0
+        ) {
+            $sorted[$cursor + 1] = $sorted[$cursor]
+            $cursor -= 1
+        }
+        $sorted[$cursor + 1] = $candidate
+    }
+    $rows = [Collections.Generic.List[string]]::new()
+    foreach ($display in $sorted) {
+        $softIdJson = 'null'
+        $softIdProperty = @($display.PSObject.Properties | Where-Object { $_.Name -ceq 'softId' })
+        if ($softIdProperty.Count -eq 1) {
+            $softIdJson = ConvertTo-Json -Compress -InputObject ([string]$softIdProperty[0].Value)
+        }
+        $bounds = $display.bounds
+        $workingArea = $display.workingArea
+        $rows.Add(('[{0},{1},{2},{3},{4},{5},{6},{7},{8},{9},{10},{11},{12}]' -f @(
+            $softIdJson,
+            (ConvertTo-Json -Compress -InputObject ([string]$display.displayId)),
+            (ConvertTo-Json -Compress -InputObject ([string]$display.label)),
+            (Get-CanonicalDisplayJsonNumber -Value $bounds.x -Reason $Reason),
+            (Get-CanonicalDisplayJsonNumber -Value $bounds.y -Reason $Reason),
+            (Get-CanonicalDisplayJsonNumber -Value $bounds.width -Reason $Reason),
+            (Get-CanonicalDisplayJsonNumber -Value $bounds.height -Reason $Reason),
+            (Get-CanonicalDisplayJsonNumber -Value $workingArea.x -Reason $Reason),
+            (Get-CanonicalDisplayJsonNumber -Value $workingArea.y -Reason $Reason),
+            (Get-CanonicalDisplayJsonNumber -Value $workingArea.width -Reason $Reason),
+            (Get-CanonicalDisplayJsonNumber -Value $workingArea.height -Reason $Reason),
+            (Get-CanonicalDisplayJsonNumber -Value $display.scaleFactor -Reason $Reason),
+            (Get-CanonicalDisplayJsonNumber -Value $display.rotation -Reason $Reason)
+        )))
+    }
+    return Get-DisplayRoutingSha256 -Canonical ('[' + [string]::Join(',', $rows) + ']')
+}
+
+function Assert-DisplayLayoutV1 {
+    param(
+        [Parameter(Mandatory = $true)][object]$Layout,
+        [Parameter(Mandatory = $true)][string]$Reason
+    )
+
+    if ($Layout -isnot [pscustomobject]) {
+        throw $Reason
+    }
+    Assert-ExactPropertySet -InputObject $Layout -ExpectedNames @('schema', 'roles', 'modes') -Reason $Reason
+    if (-not (Test-ExactJsonInteger -Value (Get-RequiredPropertyValue -InputObject $Layout -Name 'schema' -Reason $Reason) -Expected 1)) {
+        throw $Reason
+    }
+    $rolesValue = Get-RequiredPropertyValue -InputObject $Layout -Name 'roles' -Reason $Reason
+    if ($rolesValue -isnot [array]) {
+        throw $Reason
+    }
+    $roles = @($rolesValue)
+    $expectedRoleSoftIds = @('SCREEN-1', 'SCREEN-2', 'SCREEN-3')
+    $expectedRoleSurfaces = @('janvim', 'narrative', 'jianshan-placeholder')
+    if ($roles.Count -ne $expectedRoleSoftIds.Count) {
+        throw $Reason
+    }
+    for ($index = 0; $index -lt $expectedRoleSoftIds.Count; $index += 1) {
+        Assert-ExactPropertySet -InputObject $roles[$index] -ExpectedNames @('softId', 'surface') -Reason $Reason
+        if (
+            $roles[$index].softId -cne $expectedRoleSoftIds[$index] -or
+            $roles[$index].surface -cne $expectedRoleSurfaces[$index]
+        ) {
+            throw $Reason
+        }
+    }
+    $modesValue = Get-RequiredPropertyValue -InputObject $Layout -Name 'modes' -Reason $Reason
+    if ($modesValue -isnot [array]) {
+        throw $Reason
+    }
+    $modes = @($modesValue)
+    if ($modes.Count -ne 2) {
+        throw $Reason
+    }
+    foreach ($mode in $modes) {
+        Assert-ExactPropertySet -InputObject $mode -ExpectedNames @('mode', 'activeRoles', 'skippedRoles') -Reason $Reason
+        if (
+            (Get-RequiredPropertyValue -InputObject $mode -Name 'activeRoles' -Reason $Reason) -isnot [array] -or
+            (Get-RequiredPropertyValue -InputObject $mode -Name 'skippedRoles' -Reason $Reason) -isnot [array]
+        ) {
+            throw $Reason
+        }
+    }
+    if (
+        $modes[0].mode -cne 'production-3' -or
+        [string]::Join(',', @($modes[0].activeRoles)) -cne 'SCREEN-1,SCREEN-2,SCREEN-3' -or
+        @($modes[0].skippedRoles).Count -ne 0 -or
+        $modes[1].mode -cne 'single-display-preview' -or
+        [string]::Join(',', @($modes[1].activeRoles)) -cne 'SCREEN-1' -or
+        [string]::Join(',', @($modes[1].skippedRoles)) -cne 'SCREEN-2,SCREEN-3'
+    ) {
+        throw $Reason
+    }
+}
+
+function Assert-DisplayMapV2 {
+    param(
+        [Parameter(Mandatory = $true)][object]$Map,
+        [Parameter(Mandatory = $true)][string]$ExpectedLayoutSha256,
+        [Parameter(Mandatory = $true)][string]$Reason
+    )
+
+    if ($Map -isnot [pscustomobject]) {
+        throw $Reason
+    }
+    Assert-ExactPropertySet `
+        -InputObject $Map `
+        -ExpectedNames @('schema', 'mappingStatus', 'mode', 'layoutSha256', 'capturedAtUtc', 'topologySha256', 'bindings', 'unassignedDisplays') `
+        -Reason $Reason
+    $mode = Get-RequiredPropertyValue -InputObject $Map -Name 'mode' -Reason $Reason
+    $layoutSha256 = Get-RequiredPropertyValue -InputObject $Map -Name 'layoutSha256' -Reason $Reason
+    $capturedAtUtc = Get-RequiredPropertyValue -InputObject $Map -Name 'capturedAtUtc' -Reason $Reason
+    $topologySha256 = Get-RequiredPropertyValue -InputObject $Map -Name 'topologySha256' -Reason $Reason
+    if (
+        -not (Test-ExactJsonInteger -Value (Get-RequiredPropertyValue -InputObject $Map -Name 'schema' -Reason $Reason) -Expected 2) -or
+        (Get-RequiredPropertyValue -InputObject $Map -Name 'mappingStatus' -Reason $Reason) -cne 'confirmed' -or
+        $mode -cnotin @('production-3', 'single-display-preview') -or
+        -not (Test-HashValue -Value $layoutSha256) -or
+        $layoutSha256 -cne $ExpectedLayoutSha256 -or
+        -not (Test-HashValue -Value $topologySha256) -or
+        $capturedAtUtc -isnot [string] -or
+        $capturedAtUtc -cnotmatch '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$'
+    ) {
+        throw $Reason
+    }
+    $timestamp = [DateTimeOffset]::MinValue
+    if (
+        -not [DateTimeOffset]::TryParseExact(
+            $capturedAtUtc,
+            'yyyy-MM-ddTHH:mm:ss.fffZ',
+            [Globalization.CultureInfo]::InvariantCulture,
+            [Globalization.DateTimeStyles]::AssumeUniversal,
+            [ref]$timestamp
+        ) -or
+        $timestamp.ToUniversalTime().ToString(
+            'yyyy-MM-ddTHH:mm:ss.fffZ',
+            [Globalization.CultureInfo]::InvariantCulture
+        ) -cne $capturedAtUtc
+    ) {
+        throw $Reason
+    }
+    $bindingsValue = Get-RequiredPropertyValue -InputObject $Map -Name 'bindings' -Reason $Reason
+    $unassignedValue = Get-RequiredPropertyValue -InputObject $Map -Name 'unassignedDisplays' -Reason $Reason
+    if ($bindingsValue -isnot [array] -or $unassignedValue -isnot [array]) {
+        throw $Reason
+    }
+    $bindings = @($bindingsValue)
+    $unassigned = @($unassignedValue)
+    if ($bindings.Count + $unassigned.Count -gt 16) {
+        throw $Reason
+    }
+    $displayIds = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $softIds = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($binding in $bindings) {
+        Assert-DisplayPhysicalV2 -Display $binding -Binding $true -Reason $Reason
+        if (
+            -not $displayIds.Add([string]$binding.displayId) -or
+            -not $softIds.Add([string]$binding.softId)
+        ) {
+            throw $Reason
+        }
+    }
+    foreach ($display in $unassigned) {
+        Assert-DisplayPhysicalV2 -Display $display -Binding $false -Reason $Reason
+        if (-not $displayIds.Add([string]$display.displayId)) {
+            throw $Reason
+        }
+    }
+    if (
+        ($mode -ceq 'production-3' -and (
+            $bindings.Count -ne 3 -or
+            -not $softIds.Contains('SCREEN-1') -or
+            -not $softIds.Contains('SCREEN-2') -or
+            -not $softIds.Contains('SCREEN-3')
+        )) -or
+        ($mode -ceq 'single-display-preview' -and (
+            $bindings.Count -ne 1 -or
+            $bindings[0].softId -cne 'SCREEN-1' -or
+            $unassigned.Count -ne 0
+        )) -or
+        (Get-DisplayTopologyV2Sha256 -Displays @($bindings + $unassigned) -Reason $Reason) -cne $topologySha256
     ) {
         throw $Reason
     }
@@ -1620,12 +2004,151 @@ function Read-StrictTerminalMarker {
     return $marker
 }
 
+function Test-ShowEvidenceRectangleEqual {
+    param(
+        [Parameter(Mandatory = $true)][object]$Left,
+        [Parameter(Mandatory = $true)][object]$Right
+    )
+
+    return (
+        [long]$Left.x -eq [long]$Right.x -and
+        [long]$Left.y -eq [long]$Right.y -and
+        [long]$Left.width -eq [long]$Right.width -and
+        [long]$Left.height -eq [long]$Right.height
+    )
+}
+
+function Assert-ShowEvidenceCompatibilityDisplay {
+    param(
+        [Parameter(Mandatory = $true)][object]$Display,
+        [Parameter(Mandatory = $true)][string]$Reason,
+        [object]$ExpectedBinding
+    )
+
+    if ($Display -isnot [pscustomobject]) {
+        throw $Reason
+    }
+    Assert-ExactPropertySet `
+        -InputObject $Display `
+        -ExpectedNames @('id', 'bounds', 'workingArea', 'scaleFactor', 'rotation', 'geometrySha256') `
+        -Reason $Reason
+    $displayId = Get-RequiredPropertyValue -InputObject $Display -Name 'id' -Reason $Reason
+    $bounds = Get-RequiredPropertyValue -InputObject $Display -Name 'bounds' -Reason $Reason
+    $workingArea = Get-RequiredPropertyValue -InputObject $Display -Name 'workingArea' -Reason $Reason
+    $scaleFactor = Get-RequiredPropertyValue -InputObject $Display -Name 'scaleFactor' -Reason $Reason
+    $rotation = Get-RequiredPropertyValue -InputObject $Display -Name 'rotation' -Reason $Reason
+    $geometrySha256 = Get-RequiredPropertyValue -InputObject $Display -Name 'geometrySha256' -Reason $Reason
+    Assert-DisplayRoutingText -Value $displayId -MaximumBytes 256 -Reason $Reason
+    Assert-DisplayRectangleV2 -Rectangle $bounds -Reason $Reason
+    Assert-DisplayRectangleV2 -Rectangle $workingArea -Reason $Reason
+    if (
+        -not (Test-FinitePositiveJsonNumber -Value $scaleFactor) -or
+        -not (Test-SafeDisplayJsonInteger -Value $rotation) -or
+        [long]$rotation -cnotin @(0L, 90L, 180L, 270L) -or
+        -not (Test-HashValue -Value $geometrySha256)
+    ) {
+        throw $Reason
+    }
+    $legacyRole = [pscustomobject]@{
+        displayId = [string]$displayId
+        bounds = $bounds
+        scaleFactor = $scaleFactor
+    }
+    if ((Get-DisplayGeometrySha256 -Role $legacyRole) -cne $geometrySha256) {
+        throw $Reason
+    }
+    if ($null -ne $ExpectedBinding) {
+        if (
+            $ExpectedBinding -isnot [pscustomobject] -or
+            [string]$displayId -cne [string]$ExpectedBinding.displayId -or
+            -not (Test-ShowEvidenceRectangleEqual -Left $bounds -Right $ExpectedBinding.bounds) -or
+            -not (Test-ShowEvidenceRectangleEqual -Left $workingArea -Right $ExpectedBinding.workingArea) -or
+            [double]$scaleFactor -ne [double]$ExpectedBinding.scaleFactor -or
+            [long]$rotation -ne [long]$ExpectedBinding.rotation
+        ) {
+            throw $Reason
+        }
+    }
+}
+
+function Get-ExpectedDisplayBinding {
+    param(
+        [Parameter(Mandatory = $true)][pscustomobject]$DisplayMap,
+        [Parameter(Mandatory = $true)][string]$SoftId,
+        [Parameter(Mandatory = $true)][string]$Reason
+    )
+
+    $matches = @($DisplayMap.bindings | Where-Object { $_.softId -ceq $SoftId })
+    if ($matches.Count -ne 1) {
+        throw $Reason
+    }
+    return $matches[0]
+}
+
+function Assert-ShowEvidenceRoutingRole {
+    param(
+        [Parameter(Mandatory = $true)][object]$Role,
+        [Parameter(Mandatory = $true)][pscustomobject]$ExpectedBinding,
+        [Parameter(Mandatory = $true)][string]$ExpectedSoftId,
+        [Parameter(Mandatory = $true)][string]$Reason
+    )
+
+    if ($Role -isnot [pscustomobject]) {
+        throw $Reason
+    }
+    Assert-ExactPropertySet `
+        -InputObject $Role `
+        -ExpectedNames @('softId', 'displayId', 'bounds', 'workingArea', 'scaleFactor', 'rotation', 'geometrySha256') `
+        -Reason $Reason
+    $softId = Get-RequiredPropertyValue -InputObject $Role -Name 'softId' -Reason $Reason
+    $displayId = Get-RequiredPropertyValue -InputObject $Role -Name 'displayId' -Reason $Reason
+    $bounds = Get-RequiredPropertyValue -InputObject $Role -Name 'bounds' -Reason $Reason
+    $workingArea = Get-RequiredPropertyValue -InputObject $Role -Name 'workingArea' -Reason $Reason
+    $scaleFactor = Get-RequiredPropertyValue -InputObject $Role -Name 'scaleFactor' -Reason $Reason
+    $rotation = Get-RequiredPropertyValue -InputObject $Role -Name 'rotation' -Reason $Reason
+    $geometrySha256 = Get-RequiredPropertyValue -InputObject $Role -Name 'geometrySha256' -Reason $Reason
+    Assert-DisplayRoutingText -Value $displayId -MaximumBytes 256 -Reason $Reason
+    Assert-DisplayRectangleV2 -Rectangle $bounds -Reason $Reason
+    Assert-DisplayRectangleV2 -Rectangle $workingArea -Reason $Reason
+    if (
+        $softId -isnot [string] -or
+        $softId -cne $ExpectedSoftId -or
+        $displayId -cne [string]$ExpectedBinding.displayId -or
+        -not (Test-FinitePositiveJsonNumber -Value $scaleFactor) -or
+        -not (Test-SafeDisplayJsonInteger -Value $rotation) -or
+        [long]$rotation -cnotin @(0L, 90L, 180L, 270L) -or
+        -not (Test-HashValue -Value $geometrySha256) -or
+        -not (Test-ShowEvidenceRectangleEqual -Left $bounds -Right $ExpectedBinding.bounds) -or
+        -not (Test-ShowEvidenceRectangleEqual -Left $workingArea -Right $ExpectedBinding.workingArea) -or
+        [double]$scaleFactor -ne [double]$ExpectedBinding.scaleFactor -or
+        [long]$rotation -ne [long]$ExpectedBinding.rotation
+    ) {
+        throw $Reason
+    }
+    $physical = [pscustomobject]@{
+        displayId = [string]$displayId
+        bounds = $bounds
+        workingArea = $workingArea
+        scaleFactor = $scaleFactor
+        rotation = $rotation
+    }
+    if (
+        (Get-DisplayGeometryV2Sha256 -Display $physical -Reason $Reason) -cne $geometrySha256 -or
+        $geometrySha256 -cne [string]$ExpectedBinding.geometrySha256
+    ) {
+        throw $Reason
+    }
+}
+
 function Read-StrictShowRunIdentityEvidence {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
         [Parameter(Mandatory = $true)][string]$ControllerRunId,
         [Parameter(Mandatory = $true)][string]$ExpectedMode,
         [Parameter(Mandatory = $true)][string]$ExpectedDisplayMapSha256,
+        [Parameter(Mandatory = $true)][long]$ExpectedDisplayMapSchema,
+        [Parameter(Mandatory = $true)][pscustomobject]$ExpectedDisplayMap,
+        [Parameter(Mandatory = $true)][string]$ExpectedDisplayLayoutSha256,
         [Parameter(Mandatory = $true)][string]$ExpectedArtifactTag,
         [Parameter(Mandatory = $true)][string]$ExpectedArtifactCommit,
         [Parameter(Mandatory = $true)][string]$ExpectedArtifactLayoutEngine,
@@ -1645,7 +2168,7 @@ function Read-StrictShowRunIdentityEvidence {
         -Path $Path `
         -MaximumBytes $maximumEvidenceBytes `
         -Reason $reason
-    Assert-ExactPropertySet -InputObject $evidence -ExpectedNames @(
+    $expectedTopLevelNames = @(
         'schema',
         'runId',
         'controllerRunId',
@@ -1663,7 +2186,11 @@ function Read-StrictShowRunIdentityEvidence {
         'shutdown',
         'loggingIncomplete',
         'operatorNotes'
-    ) -Reason $reason
+    )
+    if ($ExpectedDisplayMapSchema -eq 2) {
+        $expectedTopLevelNames += 'routing'
+    }
+    Assert-ExactPropertySet -InputObject $evidence -ExpectedNames $expectedTopLevelNames -Reason $reason
 
     $display = Get-RequiredPropertyValue -InputObject $evidence -Name 'display' -Reason $reason
     $artifact = Get-RequiredPropertyValue -InputObject $evidence -Name 'artifact' -Reason $reason
@@ -1679,9 +2206,14 @@ function Read-StrictShowRunIdentityEvidence {
     ) {
         throw $reason
     }
-    Assert-ExactPropertySet -InputObject $display -ExpectedNames @(
-        'mapSha256', 'primary', 'secondary'
-    ) -Reason $reason
+    $expectedDisplayNames = @('mapSha256', 'primary')
+    if (
+        $ExpectedDisplayMapSchema -eq 1 -or
+        ($ExpectedDisplayMapSchema -eq 2 -and $ExpectedDisplayMap.mode -ceq 'production-3')
+    ) {
+        $expectedDisplayNames += 'secondary'
+    }
+    Assert-ExactPropertySet -InputObject $display -ExpectedNames $expectedDisplayNames -Reason $reason
     Assert-ExactPropertySet -InputObject $artifact -ExpectedNames @(
         'tag', 'commit', 'layoutEngine', 'lockSha256', 'coreBytes', 'coreSha256'
     ) -Reason $reason
@@ -1716,7 +2248,7 @@ function Read-StrictShowRunIdentityEvidence {
         $evidenceMode -isnot [string] -or
         $evidenceMode -cne $ExpectedMode -or
         $acceptanceScope -isnot [string] -or
-        $acceptanceScope -cnotin @('monitor-simulation', 'physical-projectors') -or
+        $acceptanceScope -cnotin @('monitor-simulation', 'physical-projectors', 'single-display-preview') -or
         $physicalProjectorsTested -isnot [bool] -or
         $offlineSnapshots -isnot [array] -or
         $offlineVerified -isnot [bool] -or
@@ -1730,13 +2262,130 @@ function Read-StrictShowRunIdentityEvidence {
 
     $displayMapSha256 = Get-RequiredPropertyValue -InputObject $display -Name 'mapSha256' -Reason $reason
     $displayPrimary = Get-RequiredPropertyValue -InputObject $display -Name 'primary' -Reason $reason
-    $displaySecondary = Get-RequiredPropertyValue -InputObject $display -Name 'secondary' -Reason $reason
+    $displaySecondary = $null
+    if ($expectedDisplayNames -ccontains 'secondary') {
+        $displaySecondary = Get-RequiredPropertyValue -InputObject $display -Name 'secondary' -Reason $reason
+    }
     if (
         -not (Test-HashValue -Value $displayMapSha256) -or
         $displayMapSha256 -cne $ExpectedDisplayMapSha256 -or
         $displayPrimary -isnot [pscustomobject] -or
-        $displaySecondary -isnot [pscustomobject]
+        ($expectedDisplayNames -ccontains 'secondary' -and $displaySecondary -isnot [pscustomobject])
     ) {
+        throw $reason
+    }
+
+    if ($ExpectedDisplayMapSchema -eq 1) {
+        if ($acceptanceScope -ceq 'single-display-preview') {
+            throw $reason
+        }
+    }
+    elseif ($ExpectedDisplayMapSchema -eq 2) {
+        $routing = Get-RequiredPropertyValue -InputObject $evidence -Name 'routing' -Reason $reason
+        if ($routing -isnot [pscustomobject]) {
+            throw $reason
+        }
+        Assert-ExactPropertySet `
+            -InputObject $routing `
+            -ExpectedNames @(
+                'mode',
+                'layoutSha256',
+                'mapSha256',
+                'topologySha256',
+                'selectedRoles',
+                'skippedRoles',
+                'unassignedDisplayCount',
+                'standbyUsed',
+                'topologyStopped'
+            ) `
+            -Reason $reason
+        $routingMode = Get-RequiredPropertyValue -InputObject $routing -Name 'mode' -Reason $reason
+        $layoutSha256 = Get-RequiredPropertyValue -InputObject $routing -Name 'layoutSha256' -Reason $reason
+        $routingMapSha256 = Get-RequiredPropertyValue -InputObject $routing -Name 'mapSha256' -Reason $reason
+        $topologySha256 = Get-RequiredPropertyValue -InputObject $routing -Name 'topologySha256' -Reason $reason
+        $selectedRolesValue = Get-RequiredPropertyValue -InputObject $routing -Name 'selectedRoles' -Reason $reason
+        $skippedRolesValue = Get-RequiredPropertyValue -InputObject $routing -Name 'skippedRoles' -Reason $reason
+        $unassignedDisplayCount = Get-RequiredPropertyValue -InputObject $routing -Name 'unassignedDisplayCount' -Reason $reason
+        $standbyUsed = Get-RequiredPropertyValue -InputObject $routing -Name 'standbyUsed' -Reason $reason
+        $topologyStopped = Get-RequiredPropertyValue -InputObject $routing -Name 'topologyStopped' -Reason $reason
+        if (
+            $routingMode -isnot [string] -or
+            $routingMode -cne [string]$ExpectedDisplayMap.mode -or
+            -not (Test-HashValue -Value $layoutSha256) -or
+            $layoutSha256 -cne $ExpectedDisplayLayoutSha256 -or
+            -not (Test-HashValue -Value $routingMapSha256) -or
+            $routingMapSha256 -cne $ExpectedDisplayMapSha256 -or
+            -not (Test-HashValue -Value $topologySha256) -or
+            $topologySha256 -cne [string]$ExpectedDisplayMap.topologySha256 -or
+            $selectedRolesValue -isnot [array] -or
+            $skippedRolesValue -isnot [array] -or
+            -not (Test-SafeDisplayJsonInteger -Value $unassignedDisplayCount) -or
+            [long]$unassignedDisplayCount -lt 0 -or
+            $standbyUsed -isnot [bool] -or
+            $topologyStopped -isnot [bool]
+        ) {
+            throw $reason
+        }
+        $selectedRoles = @($routing.selectedRoles)
+        $skippedRoles = @($routing.skippedRoles)
+        $expectedSoftIds = if ($routingMode -ceq 'production-3') {
+            @('SCREEN-1', 'SCREEN-2', 'SCREEN-3')
+        }
+        else {
+            @('SCREEN-1')
+        }
+        [string[]]$expectedSkippedRoles = @()
+        if ($routingMode -ceq 'single-display-preview') {
+            $expectedSkippedRoles = @('SCREEN-2', 'SCREEN-3')
+        }
+        if (
+            $selectedRoles.Count -ne $expectedSoftIds.Count -or
+            $selectedRoles.Count + [long]$unassignedDisplayCount -gt 16 -or
+            [string]::Join(',', $skippedRoles) -cne [string]::Join(',', $expectedSkippedRoles) -or
+            $standbyUsed -ne ($routingMode -ceq 'production-3')
+        ) {
+            throw $reason
+        }
+        for ($index = 0; $index -lt $expectedSoftIds.Count; $index += 1) {
+            $expectedBinding = Get-ExpectedDisplayBinding `
+                -DisplayMap $ExpectedDisplayMap `
+                -SoftId $expectedSoftIds[$index] `
+                -Reason $reason
+            Assert-ShowEvidenceRoutingRole `
+                -Role $selectedRoles[$index] `
+                -ExpectedBinding $expectedBinding `
+                -ExpectedSoftId $expectedSoftIds[$index] `
+                -Reason $reason
+        }
+        $primaryBinding = Get-ExpectedDisplayBinding `
+            -DisplayMap $ExpectedDisplayMap `
+            -SoftId 'SCREEN-1' `
+            -Reason $reason
+        Assert-ShowEvidenceCompatibilityDisplay `
+            -Display $displayPrimary `
+            -ExpectedBinding $primaryBinding `
+            -Reason $reason
+        if ($routingMode -ceq 'production-3') {
+            if ($acceptanceScope -ceq 'single-display-preview') {
+                throw $reason
+            }
+            $secondaryBinding = Get-ExpectedDisplayBinding `
+                -DisplayMap $ExpectedDisplayMap `
+                -SoftId 'SCREEN-2' `
+                -Reason $reason
+            Assert-ShowEvidenceCompatibilityDisplay `
+                -Display $displaySecondary `
+                -ExpectedBinding $secondaryBinding `
+                -Reason $reason
+        }
+        elseif (
+            $acceptanceScope -cne 'single-display-preview' -or
+            $physicalProjectorsTested
+        ) {
+            throw $reason
+        }
+    }
+    else {
         throw $reason
     }
 
@@ -2301,23 +2950,61 @@ $displayMapSnapshot = Read-BoundedJsonSnapshot `
     -MaximumBytes 65536 `
     -Reason 'display-map-invalid'
 $displayMap = $displayMapSnapshot.Value
-Assert-ExactPropertySet `
-    -InputObject $displayMap `
-    -ExpectedNames @('schema', 'mappingStatus', 'expectedDisplayCount', 'primary', 'secondary') `
-    -Reason 'display-map-invalid'
-if (
-    -not (Test-ExactJsonInteger -Value (Get-RequiredPropertyValue -InputObject $displayMap -Name 'schema' -Reason 'display-map-invalid') -Expected 1) -or
-    (Get-RequiredPropertyValue -InputObject $displayMap -Name 'mappingStatus' -Reason 'display-map-invalid') -cne 'confirmed' -or
-    -not (Test-ExactJsonInteger -Value (Get-RequiredPropertyValue -InputObject $displayMap -Name 'expectedDisplayCount' -Reason 'display-map-invalid') -Expected 2)
-) {
-    throw 'display-map-not-confirmed'
-}
-$primaryDisplay = Get-RequiredPropertyValue -InputObject $displayMap -Name 'primary' -Reason 'display-map-invalid'
-$secondaryDisplay = Get-RequiredPropertyValue -InputObject $displayMap -Name 'secondary' -Reason 'display-map-invalid'
-Assert-ConfirmedDisplayRole -Role $primaryDisplay -Reason 'display-map-invalid'
-Assert-ConfirmedDisplayRole -Role $secondaryDisplay -Reason 'display-map-invalid'
-if ($primaryDisplay.displayId -ceq $secondaryDisplay.displayId) {
+$displayMapSchema = Get-RequiredPropertyValue -InputObject $displayMap -Name 'schema' -Reason 'display-map-invalid'
+if (-not (Test-JsonInteger -Value $displayMapSchema)) {
     throw 'display-map-invalid'
+}
+$displayLayoutPath = Join-Path $repositoryRoot 'show\display-layout.json'
+$displayLayoutSnapshot = $null
+if ([long]$displayMapSchema -eq 1) {
+    Assert-ExactPropertySet `
+        -InputObject $displayMap `
+        -ExpectedNames @('schema', 'mappingStatus', 'expectedDisplayCount', 'primary', 'secondary') `
+        -Reason 'display-map-invalid'
+    if (
+        -not (Test-ExactJsonInteger -Value (Get-RequiredPropertyValue -InputObject $displayMap -Name 'schema' -Reason 'display-map-invalid') -Expected 1) -or
+        (Get-RequiredPropertyValue -InputObject $displayMap -Name 'mappingStatus' -Reason 'display-map-invalid') -cne 'confirmed' -or
+        -not (Test-ExactJsonInteger -Value (Get-RequiredPropertyValue -InputObject $displayMap -Name 'expectedDisplayCount' -Reason 'display-map-invalid') -Expected 2)
+    ) {
+        throw 'display-map-not-confirmed'
+    }
+    $primaryDisplay = Get-RequiredPropertyValue -InputObject $displayMap -Name 'primary' -Reason 'display-map-invalid'
+    $secondaryDisplay = Get-RequiredPropertyValue -InputObject $displayMap -Name 'secondary' -Reason 'display-map-invalid'
+    Assert-ConfirmedDisplayRole -Role $primaryDisplay -Reason 'display-map-invalid'
+    Assert-ConfirmedDisplayRole -Role $secondaryDisplay -Reason 'display-map-invalid'
+    if ($primaryDisplay.displayId -ceq $secondaryDisplay.displayId) {
+        throw 'display-map-invalid'
+    }
+}
+elseif ([long]$displayMapSchema -eq 2) {
+    Assert-NoDuplicateJsonPropertyNamesForReason `
+        -Text $displayMapSnapshot.Text `
+        -Reason 'display-map-v2-duplicate-property' `
+        -MaximumDepth 16
+    Assert-RequiredLeaf -Path $displayLayoutPath -Reason 'display-layout-invalid'
+    Assert-NoReparseTraversal -Path $displayLayoutPath -Reason 'display-layout-invalid'
+    $displayLayoutSnapshot = Read-BoundedJsonSnapshot `
+        -Path $displayLayoutPath `
+        -MaximumBytes 16384 `
+        -Reason 'display-layout-invalid'
+    Assert-NoDuplicateJsonPropertyNamesForReason `
+        -Text $displayLayoutSnapshot.Text `
+        -Reason 'display-layout-duplicate-property' `
+        -MaximumDepth 16
+    Assert-DisplayLayoutV1 -Layout $displayLayoutSnapshot.Value -Reason 'display-layout-invalid'
+    Assert-DisplayMapV2 `
+        -Map $displayMap `
+        -ExpectedLayoutSha256 $displayLayoutSnapshot.FileSha256 `
+        -Reason 'display-map-invalid'
+}
+else {
+    throw 'display-map-invalid'
+}
+$expectedDisplayLayoutSha256 = if ($null -eq $displayLayoutSnapshot) {
+    $displayMapSnapshot.FileSha256
+}
+else {
+    $displayLayoutSnapshot.FileSha256
 }
 
 $controllerPackage = Join-Path $repositoryRoot 'apps\controller'
@@ -2535,6 +3222,15 @@ if (
     throw 'frozen-poem-hash-mismatch'
 }
 
+$displayLayoutClaimSpecification = $null
+if ($null -ne $displayLayoutSnapshot) {
+    $displayLayoutClaimSpecification = [pscustomobject]@{
+        Path = $displayLayoutPath
+        ExpectedBytes = [long]$displayLayoutSnapshot.ByteLength
+        MaximumBytes = 16384L
+        ExpectedSha256 = $displayLayoutSnapshot.FileSha256
+    }
+}
 $launchClaimSpecifications = @(
     New-FrozenInputClaimSpecification `
         -Path $electronExecutable `
@@ -2616,6 +3312,9 @@ $launchClaimSpecifications = @(
         ExpectedSha256 = $lockedCoreHash
     }
 )
+if ($null -ne $displayLayoutClaimSpecification) {
+    $launchClaimSpecifications += $displayLayoutClaimSpecification
+}
 $launchClaims = Open-FrozenInputClaims -Specifications $launchClaimSpecifications
 foreach ($launchClaim in $launchClaims) {
     $frozenInputClaims.Add($launchClaim)
@@ -2681,6 +3380,31 @@ while ($true) {
         $controller.Dispose()
     }
 
+    if ($controllerExitCode -eq 2) {
+        $configurationRequiredDirty = $false
+        foreach ($runtimeArtifact in @(
+            $terminalMarkerPath,
+            $evidencePath,
+            $leasePath,
+            $incidentPath,
+            $watchdogAttemptsPath
+        )) {
+            if (Test-Path -LiteralPath $runtimeArtifact) {
+                $configurationRequiredDirty = $true
+                break
+            }
+        }
+        if ($configurationRequiredDirty) {
+            exit $incidentExitCode
+        }
+        Write-LauncherReceipt `
+            -ControllerRunId $controllerRunId `
+            -ControllerProcessId $controllerProcessId `
+            -ControllerExitCode $controllerExitCode `
+            -Termination 'configuration-required'
+        exit 2
+    }
+
     if ($Mode -ceq 'ValidateOnly') {
         Write-LauncherReceipt `
             -ControllerRunId $controllerRunId `
@@ -2722,6 +3446,9 @@ while ($true) {
                 -ControllerRunId $controllerRunId `
                 -ExpectedMode $evidenceMode `
                 -ExpectedDisplayMapSha256 $displayMapSnapshot.FileSha256 `
+                -ExpectedDisplayMapSchema ([long]$displayMapSchema) `
+                -ExpectedDisplayMap $displayMap `
+                -ExpectedDisplayLayoutSha256 $expectedDisplayLayoutSha256 `
                 -ExpectedArtifactTag $expectedTag `
                 -ExpectedArtifactCommit $expectedCommit `
                 -ExpectedArtifactLayoutEngine $lockedLayoutEngine `

@@ -385,7 +385,8 @@ function createHost(options: {
   const dependencies: ShowRunCoordinatorDependencies = {
     mode: command.mode === "Soak3" ? "Soak3" : "Show",
     originalPoemSha256,
-    validate: async () => undefined,
+    validate: async () => ({ outcome: "validated" as const }),
+    createTopologyGuard: () => undefined,
     openSecondary: async () => {
       const surface = new MemorySurface();
       surfaces.push(surface);
@@ -1274,6 +1275,10 @@ const expectedProcessControlTopology = new Map<
 >([
   ["Preflight:setup", { getProcess: [], stopProcess: [] }],
   [
+    "Display Capture and Confirmation:configure",
+    { getProcess: [], stopProcess: [] },
+  ],
+  [
     "Display Capture and Confirmation:capture",
     { getProcess: [], stopProcess: [] },
   ],
@@ -2088,6 +2093,10 @@ describe("Task 9 recovery operations", () => {
 
     const sectionContracts = {
       "Display Capture and Confirmation": [
+        "`configure-displays.ps1`",
+        "manual configure -> ValidateOnly -> Show",
+        "single-display-preview",
+        "SCREEN-1 only",
         "`start-g2-rehearsal.ps1 Capture`",
         "`start-g2-rehearsal.ps1 Confirm`",
         "fresh external map",
@@ -2257,7 +2266,10 @@ describe("Task 9 recovery operations", () => {
     const displayBlocks = powershellBlocks(
       sections.get("Display Capture and Confirmation")!,
     );
-    expect([...displayBlocks.keys()]).toEqual(["capture", "confirm"]);
+    expect([...displayBlocks.keys()]).toEqual(["configure", "capture", "confirm"]);
+    expect(normalizedPowershell(displayBlocks.get("configure")!)).toContain(
+      'pwsh -NoProfile -File "$repo\\scripts\\configure-displays.ps1" -RehearsalRoot $root -DisplayMapPath $map',
+    );
     expect(normalizedPowershell(displayBlocks.get("capture")!)).toContain(
       'pwsh -NoProfile -File "$repo\\scripts\\start-g2-rehearsal.ps1" -Mode Capture -RehearsalRoot $root -DisplayMapPath $map',
     );
@@ -2793,6 +2805,7 @@ describe("Task 9 recovery operations", () => {
     const blocks = allPowershellBlocks(readFileSync(runbookPath, "utf8"));
     expect([...blocks.keys()]).toEqual([
       "Preflight:setup",
+      "Display Capture and Confirmation:configure",
       "Display Capture and Confirmation:capture",
       "Display Capture and Confirmation:confirm",
       "ValidateOnly:launch",
@@ -2811,6 +2824,19 @@ describe("Task 9 recovery operations", () => {
     expectJanVimFaultInteropTopology(blocks, summaries);
 
     const launchers = new Map<string, string[]>([
+      [
+        "Display Capture and Confirmation:configure",
+        [
+          "pwsh",
+          "-NoProfile",
+          "-File",
+          '"$repo\\scripts\\configure-displays.ps1"',
+          "-RehearsalRoot",
+          "$root",
+          "-DisplayMapPath",
+          "$map",
+        ],
+      ],
       [
         "Display Capture and Confirmation:capture",
         [
@@ -2883,7 +2909,7 @@ describe("Task 9 recovery operations", () => {
       [...summaries.values()].flatMap((summary) =>
         commandsNamed(summary, "pwsh"),
       ),
-    ).toHaveLength(6);
+    ).toHaveLength(7);
 
     expectProcessControlTopology(summaries);
 

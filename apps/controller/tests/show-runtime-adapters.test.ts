@@ -22,6 +22,7 @@ import type {
   ShowSecondarySurface,
 } from "../src/show-run-coordinator.ts";
 import { parseShowRunEvidence } from "../src/show-run-evidence.ts";
+import { hashDisplayGeometry } from "../src/display-router.ts";
 import {
   controllerStartedAtUtc,
   createShowLoopId,
@@ -689,6 +690,15 @@ function createValidationHarness(options: {
     replaceRuntimeCoreBytes: (value: Uint8Array) => {
       files.set(
         win32.join(repositoryRoot, "runtime", "janvim", "janvim-core.exe"),
+        Buffer.from(value),
+      );
+    },
+    replaceDisplayMapBytes: (value: Uint8Array) => {
+      files.set(displayMapPath, Buffer.from(value));
+    },
+    replaceDisplayLayoutBytes: (value: Uint8Array) => {
+      files.set(
+        win32.join(repositoryRoot, "show", "display-layout.json"),
         Buffer.from(value),
       );
     },
@@ -1796,6 +1806,15 @@ function createStartupHarness(options: {
         Buffer.from(value),
       );
     },
+    replaceDisplayMapBytes: (value: Uint8Array) => {
+      files.set(displayMapPath, Buffer.from(value));
+    },
+    replaceDisplayLayoutBytes: (value: Uint8Array) => {
+      files.set(
+        win32.join(repositoryRoot, "show", "display-layout.json"),
+        Buffer.from(value),
+      );
+    },
   };
 }
 
@@ -2727,6 +2746,129 @@ describe("real Task 9 show runtime adapters", () => {
     expect(standby?.isDestroyed()).toBe(true);
   });
 
+  it("publishes strict schema-2 production routing evidence while retaining legacy display hashes", async () => {
+    const map = g4ProductionMap();
+    const harness = createStartupHarness({
+      displayMapBytes: Buffer.from(`${JSON.stringify(map)}\n`),
+      liveDisplays: [...g4Displays, {
+        id: "display-Z",
+        bounds: { x: 5760, y: 0, width: 1280, height: 720 },
+        workArea: { x: 5760, y: 0, width: 1280, height: 680 },
+        scaleFactor: 1.5,
+        rotation: 270,
+      }],
+    });
+    const coordinator = harness.adapters.createCoordinator(showCommand("Show"));
+
+    await expect(coordinator.boot()).resolves.toEqual({ ready: true });
+    await coordinator.requestEmergencyStop("sigint");
+
+    expect(harness.evidenceWrites).toHaveLength(1);
+    const evidence = harness.evidenceWrites[0]!.value as ReturnType<
+      typeof parseShowRunEvidence
+    > & { routing: { selectedRoles: Array<{ softId: string; geometrySha256: string }> } };
+    expect(evidence).toMatchObject({
+      acceptanceScope: "monitor-simulation",
+      physicalProjectorsTested: false,
+      routing: {
+        mode: "production-3",
+        layoutSha256: map.layoutSha256,
+        mapSha256: createHash("sha256")
+          .update(Buffer.from(`${JSON.stringify(map)}\n`))
+          .digest("hex"),
+        topologySha256: map.topologySha256,
+        skippedRoles: [],
+        unassignedDisplayCount: 1,
+        standbyUsed: true,
+        topologyStopped: false,
+      },
+    });
+    expect(evidence.routing.selectedRoles.map((role) => role.softId)).toEqual([
+      "SCREEN-1",
+      "SCREEN-2",
+      "SCREEN-3",
+    ]);
+    expect(evidence.routing.selectedRoles.map((role) => role.geometrySha256)).toEqual(
+      map.bindings.map((binding) => binding.geometrySha256),
+    );
+    expect(evidence.display.primary.geometrySha256).toBe(
+      hashDisplayGeometry({
+        displayId: "display-A",
+        bounds: g4Displays[0].bounds,
+        scaleFactor: g4Displays[0].scaleFactor,
+      }),
+    );
+    expect(evidence.display.secondary?.geometrySha256).toBe(
+      hashDisplayGeometry({
+        displayId: "display-B",
+        bounds: g4Displays[1].bounds,
+        scaleFactor: g4Displays[1].scaleFactor,
+      }),
+    );
+  });
+
+  it("publishes one-display preview evidence without a fabricated secondary role", async () => {
+    const map = g4PreviewMap();
+    const harness = createStartupHarness({
+      displayMapBytes: Buffer.from(`${JSON.stringify(map)}\n`),
+      liveDisplays: [g4Displays[0]],
+    });
+    const coordinator = harness.adapters.createCoordinator(showCommand("Show"));
+
+    await expect(coordinator.boot()).resolves.toEqual({ ready: true });
+    await coordinator.requestEmergencyStop("sigint");
+
+    expect(harness.evidenceWrites).toHaveLength(1);
+    const evidence = harness.evidenceWrites[0]!.value as ReturnType<
+      typeof parseShowRunEvidence
+    > & { display: Record<string, unknown>; routing: Record<string, unknown> };
+    expect(evidence.acceptanceScope).toBe("single-display-preview");
+    expect(evidence.physicalProjectorsTested).toBe(false);
+    expect(evidence.display).not.toHaveProperty("secondary");
+    expect(evidence.routing).toMatchObject({
+      mode: "single-display-preview",
+      selectedRoles: [expect.objectContaining({ softId: "SCREEN-1" })],
+      skippedRoles: ["SCREEN-2", "SCREEN-3"],
+      unassignedDisplayCount: 0,
+      standbyUsed: false,
+      topologyStopped: false,
+    });
+  });
+
+  it.each(["map", "layout"] as const)(
+    "rejects frozen schema-2 %s mutation before publishing evidence",
+    async (target) => {
+      const mapBytes = Buffer.from(`${JSON.stringify(g4ProductionMap())}\n`);
+      const harness = createStartupHarness({
+        displayMapBytes: mapBytes,
+        liveDisplays: g4Displays,
+      });
+      const coordinator = harness.adapters.createCoordinator(showCommand("Show"));
+      await expect(coordinator.boot()).resolves.toEqual({ ready: true });
+      const dependencies = (
+        coordinator as unknown as { dependencies: ShowRunCoordinatorDependencies }
+      ).dependencies;
+
+      if (target === "map") {
+        harness.replaceDisplayMapBytes(Buffer.concat([mapBytes, Buffer.from(" ")]));
+      } else {
+        harness.replaceDisplayLayoutBytes(
+          Buffer.concat([displayLayout, Buffer.from(" ")]),
+        );
+      }
+
+      await expect(
+        dependencies.finalizeEvidence(
+          { ok: false, reason: "operator-stop" },
+          coordinator.diagnostics(),
+          new AbortController().signal,
+        ),
+      ).rejects.toThrow(/frozen|snapshot|changed/i);
+      expect(harness.evidenceWrites).toHaveLength(0);
+      await coordinator.requestEmergencyStop("sigint");
+    },
+  );
+
   it("ignores unassigned display changes but stops once on an assigned topology change", async () => {
     const operator = {
       id: "display-Z",
@@ -2794,6 +2936,10 @@ describe("real Task 9 show runtime adapters", () => {
     }
     expect(harness.spawnInvocationCount()).toBe(1);
     expect(harness.browserWindows).toHaveLength(2);
+    expect(harness.evidenceWrites).toHaveLength(1);
+    expect(harness.evidenceWrites[0]!.value).toMatchObject({
+      routing: { topologyStopped: true },
+    });
     expect(harness.terminalWrites).toHaveLength(1);
   });
 

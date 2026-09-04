@@ -4,6 +4,11 @@ import { dirname, join } from "node:path";
 
 import { z } from "zod";
 
+import {
+  hashDisplayGeometryV2,
+  type DisplayRotation,
+  type SoftDisplayId,
+} from "./display-routing-contract.js";
 import { hashDisplayGeometry, type Rectangle } from "./display-router.js";
 import { G2_PROTECTED_ROOTS } from "./g2-command.js";
 import type { ResourceSummary } from "./resource-sampler.js";
@@ -78,12 +83,37 @@ export type RunAggregateEvidence = {
   acceptanceOutcome: EvidenceAcceptance;
 };
 
+export type RoutingRoleEvidence = {
+  softId: SoftDisplayId;
+  displayId: string;
+  bounds: Rectangle;
+  workingArea: Rectangle;
+  scaleFactor: number;
+  rotation: DisplayRotation;
+  geometrySha256: string;
+};
+
+export type DisplayRoutingEvidence = {
+  mode: "production-3" | "single-display-preview";
+  layoutSha256: string;
+  mapSha256: string;
+  topologySha256: string;
+  selectedRoles: readonly RoutingRoleEvidence[];
+  skippedRoles: readonly SoftDisplayId[];
+  unassignedDisplayCount: number;
+  standbyUsed: boolean;
+  topologyStopped: boolean;
+};
+
 export type ShowRunEvidenceRecord = {
   schema: 2;
   runId: string;
   controllerRunId: string;
   mode: "Soak3" | "Show";
-  acceptanceScope: "monitor-simulation" | "physical-projectors";
+  acceptanceScope:
+    | "monitor-simulation"
+    | "physical-projectors"
+    | "single-display-preview";
   physicalProjectorsTested: boolean;
   display: {
     mapSha256: string;
@@ -95,7 +125,7 @@ export type ShowRunEvidenceRecord = {
       rotation: number;
       geometrySha256: string;
     };
-    secondary: {
+    secondary?: {
       id: string;
       bounds: Rectangle;
       workingArea: Rectangle;
@@ -104,6 +134,7 @@ export type ShowRunEvidenceRecord = {
       geometrySha256: string;
     };
   };
+  routing?: DisplayRoutingEvidence;
   artifact: {
     tag: "v0.10.1-gmk.4.punctuation.2";
     commit: "abbd5a5b942b202e7fe4324bcd3ddab47c672cb9";
@@ -213,12 +244,89 @@ const displaySchema = z
   .object({
     mapSha256: hashSchema,
     primary: displayRoleSchema,
-    secondary: displayRoleSchema,
+    secondary: displayRoleSchema.optional(),
   })
   .strict()
-  .refine((display) => display.primary.id !== display.secondary.id, {
+  .refine(
+    (display) =>
+      display.secondary === undefined ||
+      display.primary.id !== display.secondary.id,
+    {
     path: ["secondary", "id"],
     message: "display IDs must be distinct",
+    },
+  );
+
+const routingDisplayIdSchema = z
+  .string()
+  .min(1)
+  .refine(
+    (value) => Buffer.byteLength(value, "utf8") <= 256,
+    "routing display ID must be at most 256 UTF-8 bytes",
+  );
+
+const routingRoleSchema = z
+  .object({
+    softId: z.enum(["SCREEN-1", "SCREEN-2", "SCREEN-3"]),
+    displayId: routingDisplayIdSchema,
+    bounds: rectangleSchema,
+    workingArea: rectangleSchema,
+    scaleFactor: z.number().positive().finite(),
+    rotation: z.union([
+      z.literal(0),
+      z.literal(90),
+      z.literal(180),
+      z.literal(270),
+    ]),
+    geometrySha256: hashSchema,
+  })
+  .strict()
+  .superRefine((role, context) => {
+    if (hashDisplayGeometryV2(role) !== role.geometrySha256) {
+      context.addIssue({
+        code: "custom",
+        path: ["geometrySha256"],
+        message: "routing display geometry hash mismatch",
+      });
+    }
+  });
+
+const routingSchema = z
+  .object({
+    mode: z.enum(["production-3", "single-display-preview"]),
+    layoutSha256: hashSchema,
+    mapSha256: hashSchema,
+    topologySha256: hashSchema,
+    selectedRoles: z.array(routingRoleSchema).max(3),
+    skippedRoles: z
+      .array(z.enum(["SCREEN-1", "SCREEN-2", "SCREEN-3"]))
+      .max(3),
+    unassignedDisplayCount: safeNonnegativeIntegerSchema.max(16),
+    standbyUsed: z.boolean(),
+    topologyStopped: z.boolean(),
+  })
+  .strict()
+  .superRefine((routing, context) => {
+    const addIssue = (path: Array<string | number>, message: string): void => {
+      context.addIssue({ code: "custom", path, message });
+    };
+    const softIds = routing.selectedRoles.map((role) => role.softId);
+    const displayIds = routing.selectedRoles.map((role) => role.displayId);
+    if (new Set(softIds).size !== softIds.length) {
+      addIssue(["selectedRoles"], "routing soft roles must be unique");
+    }
+    if (new Set(displayIds).size !== displayIds.length) {
+      addIssue(["selectedRoles"], "routing display IDs must be unique");
+    }
+    if (new Set(routing.skippedRoles).size !== routing.skippedRoles.length) {
+      addIssue(["skippedRoles"], "routing skipped roles must be unique");
+    }
+    if (
+      routing.selectedRoles.length + routing.unassignedDisplayCount >
+      16
+    ) {
+      addIssue([], "routing topology must contain at most 16 displays");
+    }
   });
 
 const artifactSchema = z
@@ -560,9 +668,14 @@ const showRunEvidenceSchema = z
     runId: z.string().regex(RUN_ID_PATTERN),
     controllerRunId: z.string().regex(CONTROLLER_RUN_ID_PATTERN),
     mode: z.enum(["Soak3", "Show"]),
-    acceptanceScope: z.enum(["monitor-simulation", "physical-projectors"]),
+    acceptanceScope: z.enum([
+      "monitor-simulation",
+      "physical-projectors",
+      "single-display-preview",
+    ]),
     physicalProjectorsTested: z.boolean(),
     display: displaySchema,
+    routing: routingSchema.optional(),
     artifact: artifactSchema,
     content: contentSchema,
     offlineSnapshots: z.array(networkSnapshotSchema).max(8),
@@ -579,6 +692,136 @@ const showRunEvidenceSchema = z
     const addIssue = (path: Array<string | number>, message: string): void => {
       context.addIssue({ code: "custom", path, message });
     };
+
+    if (record.routing === undefined) {
+      if (record.display.secondary === undefined) {
+        addIssue(
+          ["display", "secondary"],
+          "legacy evidence requires a secondary display",
+        );
+      }
+      if (record.acceptanceScope === "single-display-preview") {
+        addIssue(
+          ["acceptanceScope"],
+          "single-display preview requires routing evidence",
+        );
+      }
+    } else {
+      const routing = record.routing;
+      if (routing.mapSha256 !== record.display.mapSha256) {
+        addIssue(
+          ["routing", "mapSha256"],
+          "routing map identity must match display evidence",
+        );
+      }
+      if (routing.mode === "production-3") {
+        const expectedRoles = ["SCREEN-1", "SCREEN-2", "SCREEN-3"];
+        if (
+          routing.selectedRoles.length !== expectedRoles.length ||
+          routing.selectedRoles.some(
+            (role, index) => role.softId !== expectedRoles[index],
+          )
+        ) {
+          addIssue(
+            ["routing", "selectedRoles"],
+            "production routing requires SCREEN-1, SCREEN-2, and SCREEN-3",
+          );
+        }
+        if (routing.skippedRoles.length !== 0) {
+          addIssue(
+            ["routing", "skippedRoles"],
+            "production routing cannot skip display roles",
+          );
+        }
+        if (!routing.standbyUsed) {
+          addIssue(
+            ["routing", "standbyUsed"],
+            "production routing requires the standby surface",
+          );
+        }
+        if (record.display.secondary === undefined) {
+          addIssue(
+            ["display", "secondary"],
+            "production routing requires secondary compatibility evidence",
+          );
+        } else {
+          if (
+            routing.selectedRoles[0]?.displayId !== record.display.primary.id
+          ) {
+            addIssue(
+              ["routing", "selectedRoles", 0, "displayId"],
+              "SCREEN-1 must match the primary compatibility display",
+            );
+          }
+          if (
+            routing.selectedRoles[1]?.displayId !== record.display.secondary.id
+          ) {
+            addIssue(
+              ["routing", "selectedRoles", 1, "displayId"],
+              "SCREEN-2 must match the secondary compatibility display",
+            );
+          }
+        }
+        if (record.acceptanceScope === "single-display-preview") {
+          addIssue(
+            ["acceptanceScope"],
+            "production routing cannot claim preview scope",
+          );
+        }
+      } else {
+        if (
+          routing.selectedRoles.length !== 1 ||
+          routing.selectedRoles[0]?.softId !== "SCREEN-1"
+        ) {
+          addIssue(
+            ["routing", "selectedRoles"],
+            "preview routing requires only SCREEN-1",
+          );
+        }
+        if (
+          routing.skippedRoles.length !== 2 ||
+          routing.skippedRoles[0] !== "SCREEN-2" ||
+          routing.skippedRoles[1] !== "SCREEN-3"
+        ) {
+          addIssue(
+            ["routing", "skippedRoles"],
+            "preview routing must skip SCREEN-2 and SCREEN-3",
+          );
+        }
+        if (routing.standbyUsed) {
+          addIssue(
+            ["routing", "standbyUsed"],
+            "preview routing cannot use the standby surface",
+          );
+        }
+        if (record.display.secondary !== undefined) {
+          addIssue(
+            ["display", "secondary"],
+            "preview evidence cannot fabricate a secondary display",
+          );
+        }
+        if (
+          routing.selectedRoles[0]?.displayId !== record.display.primary.id
+        ) {
+          addIssue(
+            ["routing", "selectedRoles", 0, "displayId"],
+            "preview SCREEN-1 must match the primary display",
+          );
+        }
+        if (record.acceptanceScope !== "single-display-preview") {
+          addIssue(
+            ["acceptanceScope"],
+            "preview routing requires single-display-preview scope",
+          );
+        }
+        if (record.physicalProjectorsTested) {
+          addIssue(
+            ["physicalProjectorsTested"],
+            "preview routing cannot claim physical projectors",
+          );
+        }
+      }
+    }
 
     const loopIds = new Set(record.loops.map((loop) => loop.loopId));
     if (loopIds.size !== record.loops.length) {

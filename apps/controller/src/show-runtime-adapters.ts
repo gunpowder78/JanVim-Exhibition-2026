@@ -41,6 +41,7 @@ import { BridgeServer } from "./bridge-server.js";
 import {
   createFullscreenWindowPlan,
   createSecondaryWindowPlan,
+  hashDisplayGeometry,
   resolveDisplayRoute,
   type DisplayConfigurationReason,
   type DisplayMapConfig,
@@ -49,6 +50,7 @@ import {
 } from "./display-router.js";
 import {
   assertDisplayMapBytesWithinLimit,
+  hashDisplayGeometryV2,
   parseDisplayLayout,
   parseDisplayMap,
   type DisplayLayout,
@@ -374,6 +376,7 @@ function createCoordinator(
     showLogSecrets(host.repositoryRoot),
   );
   let inputs: ValidatedShowInputs | undefined;
+  let startupNetworkPending = false;
   let activeRendererPid: number | undefined;
   let activeJanVimPid: number | undefined;
 
@@ -390,6 +393,7 @@ function createCoordinator(
       const validation = await validateShowInputs(host, command);
       if (validation.outcome === "configuration-required") return validation;
       inputs = validation;
+      startupNetworkPending = true;
       for (const feature of ["formula", "image", "matrix"] as const) {
         if (!inputs.manifest.cues.some((cue) => cue.kind === feature)) {
           logger.writeJson("controller", {
@@ -505,7 +509,11 @@ function createCoordinator(
     },
     sampleNetwork: async () => {
       requireInputs();
-      return sampleRequiredNetwork(host, command);
+      if (startupNetworkPending) {
+        startupNetworkPending = false;
+        return sampleRequiredNetwork(host, command);
+      }
+      return sampleNetwork(host);
     },
     finalizeEvidence: async (result, diagnostics, signal) => {
       if (
@@ -936,11 +944,106 @@ function buildShowEvidence(
     if (match === undefined) throw new Error(`Missing frozen input: ${label}`);
     return match;
   };
-  if (inputs.displayMap.schema !== 1) {
-    throw new Error("schema-2-show-evidence-requires-routing-record");
-  }
   const primaryLive = requireDisplayRole(inputs.displayRoute, "SCREEN-1");
-  const secondaryLive = requireDisplayRole(inputs.displayRoute, "SCREEN-2");
+  let display: ShowRunEvidenceRecord["display"];
+  let routing: ShowRunEvidenceRecord["routing"];
+  let acceptanceScope: ShowRunEvidenceRecord["acceptanceScope"] =
+    "monitor-simulation";
+  if (inputs.displayMap.schema === 1) {
+    const secondaryLive = requireDisplayRole(inputs.displayRoute, "SCREEN-2");
+    display = {
+      mapSha256: file("display-map").sha256,
+      primary: {
+        id: inputs.displayMap.primary.displayId,
+        bounds: { ...primaryLive.bounds },
+        workingArea: { ...primaryLive.workingArea },
+        scaleFactor: primaryLive.scaleFactor,
+        rotation: primaryLive.rotation,
+        geometrySha256: inputs.displayMap.primary.geometrySha256,
+      },
+      secondary: {
+        id: inputs.displayMap.secondary.displayId,
+        bounds: { ...secondaryLive.bounds },
+        workingArea: { ...secondaryLive.workingArea },
+        scaleFactor: secondaryLive.scaleFactor,
+        rotation: secondaryLive.rotation,
+        geometrySha256: inputs.displayMap.secondary.geometrySha256,
+      },
+    };
+  } else {
+    const map = inputs.displayMap;
+    const selectedSoftIds = (
+      map.mode === "production-3"
+        ? ["SCREEN-1", "SCREEN-2", "SCREEN-3"]
+        : ["SCREEN-1"]
+    ) as readonly SoftDisplayId[];
+    const selectedRoles = selectedSoftIds.map((softId) => {
+      const live = requireDisplayRole(inputs.displayRoute, softId);
+      return {
+        softId,
+        displayId: String(live.displayId),
+        bounds: { ...live.bounds },
+        workingArea: { ...live.workingArea },
+        scaleFactor: live.scaleFactor,
+        rotation: live.rotation,
+        geometrySha256: hashDisplayGeometryV2(live),
+      };
+    });
+    const primary = {
+      id: String(primaryLive.displayId),
+      bounds: { ...primaryLive.bounds },
+      workingArea: { ...primaryLive.workingArea },
+      scaleFactor: primaryLive.scaleFactor,
+      rotation: primaryLive.rotation,
+      geometrySha256: hashDisplayGeometry({
+        displayId: String(primaryLive.displayId),
+        bounds: primaryLive.bounds,
+        scaleFactor: primaryLive.scaleFactor,
+      }),
+    };
+    if (map.mode === "production-3") {
+      const secondaryLive = requireDisplayRole(inputs.displayRoute, "SCREEN-2");
+      display = {
+        mapSha256: file("display-map").sha256,
+        primary,
+        secondary: {
+          id: String(secondaryLive.displayId),
+          bounds: { ...secondaryLive.bounds },
+          workingArea: { ...secondaryLive.workingArea },
+          scaleFactor: secondaryLive.scaleFactor,
+          rotation: secondaryLive.rotation,
+          geometrySha256: hashDisplayGeometry({
+            displayId: String(secondaryLive.displayId),
+            bounds: secondaryLive.bounds,
+            scaleFactor: secondaryLive.scaleFactor,
+          }),
+        },
+      };
+    } else {
+      acceptanceScope = "single-display-preview";
+      display = {
+        mapSha256: file("display-map").sha256,
+        primary,
+      };
+    }
+    const layoutIdentity = inputs.layoutSnapshot?.files[0]?.sha256;
+    if (layoutIdentity === undefined) {
+      throw new Error("schema-2-show-evidence-layout-unavailable");
+    }
+    routing = {
+      mode: map.mode,
+      layoutSha256: layoutIdentity,
+      mapSha256: file("display-map").sha256,
+      topologySha256: map.topologySha256,
+      selectedRoles,
+      skippedRoles: [...inputs.displayRoute.skippedRoles],
+      unassignedDisplayCount: inputs.displayRoute.unassignedDisplays.length,
+      standbyUsed: map.mode === "production-3",
+      topologyStopped:
+        diagnostics.shutdown.requestedReason ===
+        "emergency-display-topology-changed",
+    };
+  }
   const offlineSnapshots = diagnostics.offlineSnapshots.map((snapshot) => ({
     ...snapshot,
   }));
@@ -990,27 +1093,10 @@ function buildShowEvidence(
     runId: command.runId,
     controllerRunId: command.controllerRunId,
     mode: command.mode,
-    acceptanceScope: "monitor-simulation",
+    acceptanceScope,
     physicalProjectorsTested: false,
-    display: {
-      mapSha256: file("display-map").sha256,
-      primary: {
-        id: inputs.displayMap.primary.displayId,
-        bounds: { ...primaryLive.bounds },
-        workingArea: { ...primaryLive.workingArea },
-        scaleFactor: primaryLive.scaleFactor,
-        rotation: primaryLive.rotation,
-        geometrySha256: inputs.displayMap.primary.geometrySha256,
-      },
-      secondary: {
-        id: inputs.displayMap.secondary.displayId,
-        bounds: { ...secondaryLive.bounds },
-        workingArea: { ...secondaryLive.workingArea },
-        scaleFactor: secondaryLive.scaleFactor,
-        rotation: secondaryLive.rotation,
-        geometrySha256: inputs.displayMap.secondary.geometrySha256,
-      },
-    },
+    display,
+    ...(routing === undefined ? {} : { routing }),
     artifact: {
       tag: "v0.10.1-gmk.4.punctuation.2",
       commit: "abbd5a5b942b202e7fe4324bcd3ddab47c672cb9",

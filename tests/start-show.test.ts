@@ -27,6 +27,10 @@ import {
   parseShowRunEvidence,
   TASK9_ARTIFACT_IDENTITY,
 } from "../apps/controller/src/show-run-evidence.ts";
+import {
+  hashDisplayGeometryV2,
+  hashDisplayTopology,
+} from "../apps/controller/src/display-routing-contract.ts";
 
 const repositoryRoot = process.cwd();
 const productionScript = join(repositoryRoot, "scripts", "start-show.ps1");
@@ -353,6 +357,7 @@ interface LauncherFixture {
   artifactLock: string;
   janvimExecutable: string;
   checkedInMap: string;
+  displayLayout: string;
   cleanup(): void;
 }
 
@@ -377,7 +382,13 @@ interface RunOptions {
     | "marker-and-lease-success"
     | "marker-and-lease-failure"
     | "mismatched-lease"
-    | "unprovable-lease";
+    | "unprovable-lease"
+    | "configuration-required-clean"
+    | "configuration-required-terminal"
+    | "configuration-required-evidence"
+    | "configuration-required-lease"
+    | "configuration-required-incident"
+    | "configuration-required-watchdog";
   controllerExit?: number;
   controllerOutputBytes?: number;
   closeOutputBytes?: number;
@@ -394,6 +405,8 @@ interface RunOptions {
     | "runtime-verifier"
     | "close-helper"
     | "runtime-core"
+    | "display-map"
+    | "display-layout"
     | "typescript-parser"
     | "typescript-package-metadata";
   parserMutation?: "none" | "attempt-before-graph-verifier";
@@ -431,6 +444,7 @@ interface RunOptions {
   janvimExecutableRelativePath?: string;
   janvimExecutableSha256?: string;
   janvimHwnd?: string;
+  evidenceUnassignedDisplayCount?: number;
   controllerSleepMs?: number;
   timeoutMs?: number;
 }
@@ -532,6 +546,7 @@ $rehearsalRoot = Get-ShowFlag -Name 'rehearsal-root'
 $terminalPath = Join-Path $rehearsalRoot 'controller-terminal.json'
 $leasePath = Join-Path $rehearsalRoot 'run-lease.json'
 $evidencePath = Join-Path $rehearsalRoot 'show-run.json'
+$incidentPath = Join-Path $rehearsalRoot 'controller-incident.json'
 if ($env:SHOW_TEST_INPUT_MUTATION -ceq 'attempt-display-map-append') {
     try {
         [IO.File]::AppendAllText((Get-ShowFlag -Name 'display-map'), ' ')
@@ -562,6 +577,48 @@ function Write-TerminalMarker {
         reason = $Reason
     }
     [IO.File]::WriteAllText($terminalPath, (($value | ConvertTo-Json -Depth 8) + [Environment]::NewLine))
+}
+
+function Get-LegacyDisplayGeometrySha256 {
+    param([Parameter(Mandatory = $true)][pscustomobject]$Display)
+
+    $bounds = $Display.bounds
+    $displayIdJson = ConvertTo-Json -Compress -InputObject ([string]$Display.displayId)
+    $scaleText = ([double]$Display.scaleFactor).ToString(
+        'R',
+        [Globalization.CultureInfo]::InvariantCulture
+    ).ToLowerInvariant()
+    $scaleText = $scaleText -replace 'e\+', 'e'
+    $scaleText = $scaleText -replace 'e(-?)0+([0-9]+)$', 'e$1$2'
+    $canonical = '[{0},{1},{2},{3},{4},{5}]' -f @(
+        $displayIdJson,
+        [long]$bounds.x,
+        [long]$bounds.y,
+        [long]$bounds.width,
+        [long]$bounds.height,
+        $scaleText
+    )
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    try {
+        $bytes = [Text.Encoding]::UTF8.GetBytes($canonical)
+        return [Convert]::ToHexString($sha256.ComputeHash($bytes)).ToLowerInvariant()
+    }
+    finally {
+        $sha256.Dispose()
+    }
+}
+
+function New-CompatibilityDisplayEvidence {
+    param([Parameter(Mandatory = $true)][pscustomobject]$Display)
+
+    return [ordered]@{
+        id = $Display.displayId
+        bounds = $Display.bounds
+        workingArea = $Display.workingArea
+        scaleFactor = $Display.scaleFactor
+        rotation = $Display.rotation
+        geometrySha256 = Get-LegacyDisplayGeometrySha256 -Display $Display
+    }
 }
 
 function Write-ShowEvidence {
@@ -642,15 +699,76 @@ function Write-ShowEvidence {
     }
     $completedLoops = if ($showMode -ceq 'soak3') { 3 } else { 0 }
     $offlineSampleCount = if ($showMode -ceq 'soak3') { 5 } else { 1 }
-    $evidence = [ordered]@{
-        schema = 2
-        runId = $runId
-        controllerRunId = if ($Mutation -ceq 'controller') { 'wrong-controller-run' } else { $controllerRunId }
-        mode = if ($showMode -ceq 'show') { 'Show' } else { 'Soak3' }
-        acceptanceScope = 'monitor-simulation'
-        physicalProjectorsTested = $false
-        display = [ordered]@{
-            mapSha256 = if ($Mutation -ceq 'display') { '0' * 64 } else { (Get-FileHash -Algorithm SHA256 -LiteralPath $displayMapPath).Hash.ToLowerInvariant() }
+    $displayMapSha256 = if ($Mutation -ceq 'display') {
+        '0' * 64
+    }
+    else {
+        (Get-FileHash -Algorithm SHA256 -LiteralPath $displayMapPath).Hash.ToLowerInvariant()
+    }
+    $routing = $null
+    if ([long]$displayMap.schema -eq 2) {
+        $softIds = if ($displayMap.mode -ceq 'production-3') {
+            @('SCREEN-1', 'SCREEN-2', 'SCREEN-3')
+        }
+        else {
+            @('SCREEN-1')
+        }
+        $selectedRoles = @($softIds | ForEach-Object {
+            $softId = $_
+            $matches = @($displayMap.bindings | Where-Object { $_.softId -ceq $softId })
+            if ($matches.Count -ne 1) {
+                throw 'fake-schema2-binding-invalid'
+            }
+            $binding = $matches[0]
+            [ordered]@{
+                softId = $binding.softId
+                displayId = $binding.displayId
+                bounds = $binding.bounds
+                workingArea = $binding.workingArea
+                scaleFactor = $binding.scaleFactor
+                rotation = $binding.rotation
+                geometrySha256 = $binding.geometrySha256
+            }
+        })
+        $primaryBinding = @($displayMap.bindings | Where-Object { $_.softId -ceq 'SCREEN-1' })[0]
+        $display = [ordered]@{
+            mapSha256 = $displayMapSha256
+            primary = New-CompatibilityDisplayEvidence -Display $primaryBinding
+        }
+        if ($displayMap.mode -ceq 'production-3') {
+            $secondaryBinding = @($displayMap.bindings | Where-Object { $_.softId -ceq 'SCREEN-2' })[0]
+            $display.secondary = New-CompatibilityDisplayEvidence -Display $secondaryBinding
+        }
+        [string[]]$skippedRoleValues = @()
+        if ($displayMap.mode -ceq 'single-display-preview') {
+            $skippedRoleValues = @('SCREEN-2', 'SCREEN-3')
+        }
+        $routing = [ordered]@{
+            mode = $displayMap.mode
+            layoutSha256 = $displayMap.layoutSha256
+            mapSha256 = $displayMapSha256
+            topologySha256 = $displayMap.topologySha256
+            selectedRoles = $selectedRoles
+            skippedRoles = $skippedRoleValues
+            unassignedDisplayCount = if ([string]::IsNullOrWhiteSpace($env:SHOW_TEST_EVIDENCE_UNASSIGNED_COUNT)) {
+                @($displayMap.unassignedDisplays).Count
+            }
+            else {
+                [int]$env:SHOW_TEST_EVIDENCE_UNASSIGNED_COUNT
+            }
+            standbyUsed = $displayMap.mode -ceq 'production-3'
+            topologyStopped = $false
+        }
+        $acceptanceScope = if ($displayMap.mode -ceq 'single-display-preview') {
+            'single-display-preview'
+        }
+        else {
+            'monitor-simulation'
+        }
+    }
+    else {
+        $display = [ordered]@{
+            mapSha256 = $displayMapSha256
             primary = [ordered]@{
                 id = $displayMap.primary.displayId
                 bounds = $displayMap.primary.bounds
@@ -668,6 +786,16 @@ function Write-ShowEvidence {
                 geometrySha256 = $displayMap.secondary.geometrySha256
             }
         }
+        $acceptanceScope = 'monitor-simulation'
+    }
+    $evidence = [ordered]@{
+        schema = 2
+        runId = $runId
+        controllerRunId = if ($Mutation -ceq 'controller') { 'wrong-controller-run' } else { $controllerRunId }
+        mode = if ($showMode -ceq 'show') { 'Show' } else { 'Soak3' }
+        acceptanceScope = $acceptanceScope
+        physicalProjectorsTested = $false
+        display = $display
         artifact = [ordered]@{
             tag = $lock.tag
             commit = $lock.commit
@@ -715,6 +843,9 @@ function Write-ShowEvidence {
         }
         loggingIncomplete = $false
         operatorNotes = @()
+    }
+    if ($null -ne $routing) {
+        $evidence.routing = $routing
     }
     if ($Mutation -ceq 'partial') {
         $evidence.Remove('shutdown')
@@ -866,6 +997,29 @@ switch ($behavior) {
     'unprovable-lease' {
         Write-RunLease -Mismatch $false -Unprovable $true
         exit 9
+    }
+    'configuration-required-clean' {
+        exit 2
+    }
+    'configuration-required-terminal' {
+        Write-TerminalMarker -ControllerProcessId $controllerPid -Outcome 'intentional-failure' -Reason 'display-configuration-required'
+        exit 2
+    }
+    'configuration-required-evidence' {
+        Write-ShowEvidence -Mutation 'none'
+        exit 2
+    }
+    'configuration-required-lease' {
+        Write-RunLease -Mismatch $false -Unprovable $true
+        exit 2
+    }
+    'configuration-required-incident' {
+        [IO.File]::WriteAllText($incidentPath, '{"schema":1}' + [Environment]::NewLine)
+        exit 2
+    }
+    'configuration-required-watchdog' {
+        [IO.File]::WriteAllText($env:SHOW_TEST_WATCHDOG_ATTEMPTS, '{"schema":1}' + [Environment]::NewLine)
+        exit 2
     }
     default {
         exit [int]$env:SHOW_TEST_CONTROLLER_EXIT
@@ -1073,6 +1227,73 @@ function confirmedDisplayMap(): {
   };
 }
 
+type Schema2PhysicalDisplay = {
+  displayId: string;
+  label: string;
+  bounds: { x: number; y: number; width: number; height: number };
+  workingArea: { x: number; y: number; width: number; height: number };
+  scaleFactor: number;
+  rotation: 0 | 90 | 180 | 270;
+  geometrySha256: string;
+};
+
+type Schema2DisplayMapFixture = {
+  schema: number;
+  mappingStatus: string;
+  mode: "production-3" | "single-display-preview";
+  layoutSha256: string;
+  capturedAtUtc: string;
+  topologySha256: string;
+  bindings: Array<Schema2PhysicalDisplay & { softId: string }>;
+  unassignedDisplays: Schema2PhysicalDisplay[];
+};
+
+function schema2PhysicalDisplay(
+  displayId: string,
+  label: string,
+  x: number,
+  scaleFactor = 1,
+  rotation: 0 | 90 | 180 | 270 = 0,
+): Schema2PhysicalDisplay {
+  const display = {
+    displayId,
+    label,
+    bounds: { x, y: 0, width: 1920, height: 1080 },
+    workingArea: { x, y: 0, width: 1920, height: 1040 },
+    scaleFactor,
+    rotation,
+  };
+  return { ...display, geometrySha256: hashDisplayGeometryV2(display) };
+}
+
+function schema2DisplayMap(
+  displayLayoutPath: string,
+  mode: "production-3" | "single-display-preview" = "production-3",
+): Schema2DisplayMapFixture {
+  const physical = [
+    schema2PhysicalDisplay("display-A", "Projector A", 0),
+    schema2PhysicalDisplay("display-B", "Projector B", 1920, 1.25, 90),
+    schema2PhysicalDisplay("display-C", "Projector C", 3840, 1, 180),
+  ];
+  const bindings = (mode === "production-3" ? physical : physical.slice(0, 1)).map(
+    (display, index) => ({ ...display, softId: `SCREEN-${index + 1}` }),
+  );
+  const unassignedDisplays =
+    mode === "production-3"
+      ? [schema2PhysicalDisplay("display-Z", "Operator monitor", 5760, 1.5, 270)]
+      : [];
+  return {
+    schema: 2,
+    mappingStatus: "confirmed",
+    mode,
+    layoutSha256: sha256(displayLayoutPath),
+    capturedAtUtc: "2026-09-04T00:00:00.000Z",
+    topologySha256: hashDisplayTopology([...bindings, ...unassignedDisplays]),
+    bindings,
+    unassignedDisplays,
+  };
+}
+
 function writeText(path: string, value: string): void {
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, value, "utf8");
@@ -1211,6 +1432,7 @@ function makeLauncherFixture(): LauncherFixture {
   writeText(janvimExecutable, "immutable fake runtime payload\n");
   writeText(checkedInMap, '{"schema":1,"mappingStatus":"unconfirmed"}\n');
   const showConfig = copyFixtureFile("show/janvim-show.toml", root);
+  const displayLayout = copyFixtureFile("show/display-layout.json", root);
   const poem = copyFixtureFile("content/fixture/poem.txt", root);
   const manifest = copyFixtureFile("content/fixture/show.manifest.json", root);
   const contentLock = copyFixtureFile("content/p0.1/content-lock.json", root);
@@ -1381,6 +1603,7 @@ function makeLauncherFixture(): LauncherFixture {
     artifactLock,
     janvimExecutable,
     checkedInMap,
+    displayLayout,
     cleanup: () => {
       if (
         win32.dirname(externalRoot).toLowerCase() !==
@@ -1461,6 +1684,8 @@ function runLauncher(
     "runtime-verifier": fixture.verifyRuntime,
     "close-helper": fixture.closeHelper,
     "runtime-core": fixture.janvimExecutable,
+    "display-map": fixture.externalMap,
+    "display-layout": fixture.displayLayout,
     "typescript-parser": fixture.parserImplementation,
     "typescript-package-metadata": fixture.parserPackageManifest,
   }[launchMutation];
@@ -1567,6 +1792,10 @@ function runLauncher(
           options.janvimExecutableSha256 ?? "0".repeat(64),
         SHOW_TEST_JANVIM_HWND:
           options.janvimHwnd ?? "0x0000000000001234",
+        SHOW_TEST_EVIDENCE_UNASSIGNED_COUNT:
+          options.evidenceUnassignedDisplayCount === undefined
+            ? ""
+            : String(options.evidenceUnassignedDisplayCount),
       },
     },
   );
@@ -2136,6 +2365,328 @@ async function startFakeJanVim(fixture: LauncherFixture): Promise<{
 }
 
 describe("offline show launcher and external watchdog", () => {
+  it.each(["production-3", "single-display-preview"] as const)(
+    "accepts an independently validated schema-2 %s map",
+    (mode) => {
+      const fixture = makeLauncherFixture();
+      try {
+        writeText(
+          fixture.externalMap,
+          `${JSON.stringify(schema2DisplayMap(fixture.displayLayout, mode), null, 2)}\n`,
+        );
+        const result = runLauncher(
+          fixture,
+          launcherArguments(fixture, "ValidateOnly"),
+          { behavior: "matching-success" },
+        );
+
+        expect(result.status, output(result)).toBe(0);
+        expect(invocations(fixture)).toHaveLength(1);
+      } finally {
+        fixture.cleanup();
+      }
+    },
+    30_000,
+  );
+
+  it("accepts bounded current unassigned-display evidence independently of captured extras", () => {
+    const fixture = makeLauncherFixture();
+    try {
+      writeText(
+        fixture.externalMap,
+        `${JSON.stringify(schema2DisplayMap(fixture.displayLayout), null, 2)}\n`,
+      );
+      const result = runLauncher(
+        fixture,
+        launcherArguments(fixture, "Show"),
+        {
+          behavior: "matching-success",
+          evidenceUnassignedDisplayCount: 0,
+        },
+      );
+
+      expect(result.status, output(result)).toBe(0);
+      expect(invocations(fixture)).toHaveLength(1);
+      const evidence = JSON.parse(
+        readFileSync(fixture.evidencePath, "utf8"),
+      ) as { routing: { unassignedDisplayCount: number } };
+      expect(evidence.routing.unassignedDisplayCount).toBe(0);
+    } finally {
+      fixture.cleanup();
+    }
+  }, 30_000);
+
+  it.each(["ValidateOnly", "Show"] as const)(
+    "preserves one clean controller exit 2 as configuration-required in %s",
+    (mode) => {
+      const fixture = makeLauncherFixture();
+      try {
+        writeText(
+          fixture.externalMap,
+          `${JSON.stringify(schema2DisplayMap(fixture.displayLayout), null, 2)}\n`,
+        );
+        const result = runLauncher(fixture, launcherArguments(fixture, mode), {
+          behavior: "configuration-required-clean",
+          timeoutMs: 15_000,
+        });
+        const receipt = JSON.parse(
+          result.stdout.trim().split(/\r?\n/u).at(-1) ?? "{}",
+        ) as Record<string, unknown>;
+
+        expect(result.status, output(result)).toBe(2);
+        expect(invocations(fixture)).toHaveLength(1);
+        expect(receipt).toMatchObject({
+          schema: 1,
+          mode,
+          runId: fixture.runId,
+          exitCode: 2,
+          termination: "configuration-required",
+        });
+        for (const path of [
+          fixture.terminalMarker,
+          fixture.evidencePath,
+          fixture.leasePath,
+          fixture.incidentPath,
+          fixture.watchdogAttempts,
+        ]) {
+          expect(existsSync(path), path).toBe(false);
+        }
+      } finally {
+        fixture.cleanup();
+      }
+    },
+    30_000,
+  );
+
+  it.each([
+    ["terminal", "configuration-required-terminal"],
+    ["evidence", "configuration-required-evidence"],
+    ["lease", "configuration-required-lease"],
+    ["incident", "configuration-required-incident"],
+    ["watchdog", "configuration-required-watchdog"],
+  ] as const)(
+    "converts dirty configuration-required exit 2 with %s state into integrity exit 70",
+    (_state, behavior) => {
+      const fixture = makeLauncherFixture();
+      try {
+        const result = runLauncher(
+          fixture,
+          launcherArguments(fixture, "Show"),
+          { behavior, timeoutMs: 15_000 },
+        );
+
+        expect(result.status, output(result)).toBe(70);
+        expect(invocations(fixture)).toHaveLength(1);
+      } finally {
+        fixture.cleanup();
+      }
+    },
+    30_000,
+  );
+
+  it("rejects duplicate properties and every bounded schema-2 map contract before Electron", () => {
+    const cases: Array<{
+      name: string;
+      mutate: (fixture: LauncherFixture, map: Schema2DisplayMapFixture) => void;
+    }> = [
+      {
+        name: "duplicate JSON property",
+        mutate: (fixture, map) => {
+          const text = JSON.stringify(map).replace('{"schema":2', '{"schema":2,"schema":2');
+          writeText(fixture.externalMap, `${text}\n`);
+        },
+      },
+      {
+        name: "unknown field",
+        mutate: (fixture, map) => {
+          writeText(fixture.externalMap, `${JSON.stringify({ ...map, extra: true })}\n`);
+        },
+      },
+      {
+        name: "UTF-8 display ID cap",
+        mutate: (fixture, map) => {
+          map.bindings[0]!.displayId = "界".repeat(86);
+          writeText(fixture.externalMap, `${JSON.stringify(map)}\n`);
+        },
+      },
+      {
+        name: "UTF-8 label cap",
+        mutate: (fixture, map) => {
+          map.bindings[0]!.label = "界".repeat(171);
+          writeText(fixture.externalMap, `${JSON.stringify(map)}\n`);
+        },
+      },
+      {
+        name: "unsafe rectangle",
+        mutate: (fixture, map) => {
+          map.bindings[0]!.bounds.x = Number.MAX_SAFE_INTEGER + 1;
+          writeText(fixture.externalMap, `${JSON.stringify(map)}\n`);
+        },
+      },
+      {
+        name: "invalid scale",
+        mutate: (fixture, map) => {
+          map.bindings[0]!.scaleFactor = 0;
+          writeText(fixture.externalMap, `${JSON.stringify(map)}\n`);
+        },
+      },
+      {
+        name: "invalid rotation",
+        mutate: (fixture, map) => {
+          map.bindings[0]!.rotation = 45 as 0;
+          writeText(fixture.externalMap, `${JSON.stringify(map)}\n`);
+        },
+      },
+      {
+        name: "more than sixteen displays",
+        mutate: (fixture, map) => {
+          map.unassignedDisplays = Array.from({ length: 14 }, (_, index) =>
+            schema2PhysicalDisplay(`extra-${index}`, `Extra ${index}`, 6000 + index * 100),
+          );
+          writeText(fixture.externalMap, `${JSON.stringify(map)}\n`);
+        },
+      },
+      {
+        name: "duplicate active role",
+        mutate: (fixture, map) => {
+          map.bindings[1]!.softId = "SCREEN-1";
+          writeText(fixture.externalMap, `${JSON.stringify(map)}\n`);
+        },
+      },
+      {
+        name: "duplicate physical display",
+        mutate: (fixture, map) => {
+          map.bindings[1]!.displayId = map.bindings[0]!.displayId;
+          writeText(fixture.externalMap, `${JSON.stringify(map)}\n`);
+        },
+      },
+      {
+        name: "wrong mode cardinality",
+        mutate: (fixture, map) => {
+          map.bindings.pop();
+          writeText(fixture.externalMap, `${JSON.stringify(map)}\n`);
+        },
+      },
+      {
+        name: "wrong layout hash",
+        mutate: (fixture, map) => {
+          map.layoutSha256 = "0".repeat(64);
+          writeText(fixture.externalMap, `${JSON.stringify(map)}\n`);
+        },
+      },
+      {
+        name: "wrong geometry hash",
+        mutate: (fixture, map) => {
+          map.bindings[0]!.geometrySha256 = "0".repeat(64);
+          writeText(fixture.externalMap, `${JSON.stringify(map)}\n`);
+        },
+      },
+      {
+        name: "wrong topology hash",
+        mutate: (fixture, map) => {
+          map.topologySha256 = "0".repeat(64);
+          writeText(fixture.externalMap, `${JSON.stringify(map)}\n`);
+        },
+      },
+      {
+        name: "scalar layout roles",
+        mutate: (fixture, map) => {
+          const layout = JSON.parse(readFileSync(fixture.displayLayout, "utf8")) as Record<string, unknown>;
+          layout.roles = (layout.roles as unknown[])[0];
+          writeText(fixture.displayLayout, `${JSON.stringify(layout)}\n`);
+          map.layoutSha256 = sha256(fixture.displayLayout);
+          writeText(fixture.externalMap, `${JSON.stringify(map)}\n`);
+        },
+      },
+      {
+        name: "scalar layout modes",
+        mutate: (fixture, map) => {
+          const layout = JSON.parse(readFileSync(fixture.displayLayout, "utf8")) as Record<string, unknown>;
+          layout.modes = (layout.modes as unknown[])[0];
+          writeText(fixture.displayLayout, `${JSON.stringify(layout)}\n`);
+          map.layoutSha256 = sha256(fixture.displayLayout);
+          writeText(fixture.externalMap, `${JSON.stringify(map)}\n`);
+        },
+      },
+      {
+        name: "scalar layout active roles",
+        mutate: (fixture, map) => {
+          const layout = JSON.parse(readFileSync(fixture.displayLayout, "utf8")) as {
+            modes: Array<Record<string, unknown>>;
+          };
+          layout.modes[0]!.activeRoles = "SCREEN-1,SCREEN-2,SCREEN-3";
+          writeText(fixture.displayLayout, `${JSON.stringify(layout)}\n`);
+          map.layoutSha256 = sha256(fixture.displayLayout);
+          writeText(fixture.externalMap, `${JSON.stringify(map)}\n`);
+        },
+      },
+      {
+        name: "scalar layout skipped roles",
+        mutate: (fixture, map) => {
+          const layout = JSON.parse(readFileSync(fixture.displayLayout, "utf8")) as {
+            modes: Array<Record<string, unknown>>;
+          };
+          layout.modes[1]!.skippedRoles = "SCREEN-2,SCREEN-3";
+          writeText(fixture.displayLayout, `${JSON.stringify(layout)}\n`);
+          map.layoutSha256 = sha256(fixture.displayLayout);
+          writeText(fixture.externalMap, `${JSON.stringify(map)}\n`);
+        },
+      },
+      {
+        name: "scalar map bindings",
+        mutate: (fixture, map) => {
+          writeText(
+            fixture.externalMap,
+            `${JSON.stringify({ ...map, bindings: map.bindings[0] })}\n`,
+          );
+        },
+      },
+      {
+        name: "scalar map unassigned displays",
+        mutate: (fixture, map) => {
+          writeText(
+            fixture.externalMap,
+            `${JSON.stringify({
+              ...map,
+              unassignedDisplays: map.unassignedDisplays[0],
+            })}\n`,
+          );
+        },
+      },
+      {
+        name: "oversized map",
+        mutate: (fixture) => {
+          writeFileSync(fixture.externalMap, Buffer.alloc(64 * 1024 + 1, 0x20));
+        },
+      },
+      {
+        name: "oversized layout",
+        mutate: (fixture, map) => {
+          writeFileSync(fixture.displayLayout, Buffer.alloc(16 * 1024 + 1, 0x20));
+          map.layoutSha256 = sha256(fixture.displayLayout);
+          writeText(fixture.externalMap, `${JSON.stringify(map)}\n`);
+        },
+      },
+    ];
+
+    for (const testCase of cases) {
+      const fixture = makeLauncherFixture();
+      try {
+        const map = schema2DisplayMap(fixture.displayLayout);
+        testCase.mutate(fixture, map);
+        const result = runLauncher(
+          fixture,
+          launcherArguments(fixture, "ValidateOnly"),
+          { behavior: "matching-success" },
+        );
+        expect(result.status, `${testCase.name}: ${output(result)}`).not.toBe(0);
+        expect(invocations(fixture), testCase.name).toHaveLength(0);
+      } finally {
+        fixture.cleanup();
+      }
+    }
+  }, 120_000);
+
   it("interprets one pinned bounded content lock instead of one manifest hash", () => {
     const source = readFileSync(productionScript, "utf8");
     expect(source).toMatch(/\$expectedContentLockSha256\s*=\s*'[0-9a-f]{64}'/u);
@@ -3377,6 +3928,56 @@ describe("offline show launcher and external watchdog", () => {
       }
     },
     20_000,
+  );
+
+  it.each([
+    ["display map", "display-map"],
+    ["display layout", "display-layout"],
+  ] as const)(
+    "holds the schema-2 %s claim across the watchdog relaunch gap",
+    (_label, launchMutation) => {
+      const fixture = makeLauncherFixture();
+      try {
+        writeText(
+          fixture.externalMap,
+          `${JSON.stringify(schema2DisplayMap(fixture.displayLayout), null, 2)}\n`,
+        );
+        const target =
+          launchMutation === "display-map"
+            ? fixture.externalMap
+            : fixture.displayLayout;
+        const originalSha256 = sha256(target);
+        const result = runLauncher(
+          fixture,
+          launcherArguments(fixture, "Show"),
+          {
+            behavior: "crash-then-success",
+            launchMutation,
+            timeoutMs: 15_000,
+          },
+        );
+        const mutationDiagnostic = existsSync(fixture.launchMutationLog)
+          ? readFileSync(fixture.launchMutationLog, "utf8").trim()
+          : "launch-mutation-log-missing";
+        const incidentDiagnostic = existsSync(fixture.incidentPath)
+          ? readFileSync(fixture.incidentPath, "utf8").trim()
+          : "incident-missing";
+        const evidenceDiagnostic = existsSync(fixture.evidencePath)
+          ? readFileSync(fixture.evidencePath, "utf8").trim()
+          : "evidence-missing";
+
+        expect(
+          result.status,
+          `${output(result)}\n${mutationDiagnostic}\n${incidentDiagnostic}\n${evidenceDiagnostic}`,
+        ).toBe(0);
+        expect(invocations(fixture)).toHaveLength(2);
+        expect(mutationDiagnostic).toMatch(/^blocked:800700(?:05|20)$/u);
+        expect(sha256(target)).toBe(originalSha256);
+      } finally {
+        fixture.cleanup();
+      }
+    },
+    30_000,
   );
 
   it("does not trust a terminal marker with the wrong controller PID", () => {
