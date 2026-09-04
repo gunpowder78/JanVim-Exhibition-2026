@@ -1,0 +1,5 @@
++ WindowsPlatform {
+    startupFiles {
+        ^[]
+    }
+}

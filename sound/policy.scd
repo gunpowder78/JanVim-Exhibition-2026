@@ -1,6 +1,6 @@
 (
-{ |session|
-    var paths, lengths, notes, int32Max;
+{ |session, initialCounters|
+    var paths, lengths, notes, counterKeys, int32Max, validSeed;
     var state, lastSeq, lastHeartbeat, lastCursor, lastFlock;
     var acceptedPlucks, acceptedFlocks, rejected, rateDropped;
     var finiteFloat, saturatingIncrement, reject, stop, timeout;
@@ -15,17 +15,40 @@
     ];
     lengths = [4, 4, 7, 6, 4];
     notes = [48, 50, 52, 55, 57, 60, 62, 64, 67, 69, 72];
+    counterKeys = [\acceptedPlucks, \acceptedFlocks, \rejected, \rateDropped];
     int32Max = 2147483647;
+
+    if(initialCounters.notNil) {
+        if(initialCounters.isKindOf(Event).not) {
+            Error("initialCounters must be an Event").throw;
+        };
+        validSeed = initialCounters.keys.every { |key| counterKeys.includes(key) };
+        if(validSeed.not) {
+            Error("initialCounters contains an unknown counter").throw;
+        };
+        counterKeys.do { |key|
+            if(initialCounters.includesKey(key)) {
+                validSeed = initialCounters.at(key);
+                if(
+                    validSeed.isInteger.not or: {
+                        validSeed < 0 or: { validSeed > int32Max }
+                    }
+                ) {
+                    Error("initialCounters values must be int32 counters").throw;
+                };
+            };
+        };
+    };
 
     state = \idle;
     lastSeq = 0;
     lastHeartbeat = nil;
     lastCursor = nil;
     lastFlock = nil;
-    acceptedPlucks = 0;
-    acceptedFlocks = 0;
-    rejected = 0;
-    rateDropped = 0;
+    acceptedPlucks = if(initialCounters.isNil) { 0 } { initialCounters.at(\acceptedPlucks) ? 0 };
+    acceptedFlocks = if(initialCounters.isNil) { 0 } { initialCounters.at(\acceptedFlocks) ? 0 };
+    rejected = if(initialCounters.isNil) { 0 } { initialCounters.at(\rejected) ? 0 };
+    rateDropped = if(initialCounters.isNil) { 0 } { initialCounters.at(\rateDropped) ? 0 };
 
     finiteFloat = { |value|
         value.isFloat and: {

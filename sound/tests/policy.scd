@@ -1,6 +1,6 @@
 (
-var assert, assertEqual, assertNear, assertNil, session, policyPath, factory;
-var p, action, snapshot, mutableSnapshot, nan;
+var assert, assertEqual, assertNear, assertNil, assertThrows, session, policyPath, factory;
+var p, action, snapshot, nan;
 
 assert = { |condition, message|
     if(condition.not) { Error("ASSERTION FAILED: " ++ message).throw };
@@ -16,6 +16,12 @@ assertNear = { |actual, expected, tolerance, message|
 
 assertNil = { |actual, message|
     assert.value(actual.isNil, message ++ " (actual: " ++ actual ++ ")");
+};
+
+assertThrows = { |function, message|
+    var threw = false;
+    try { function.value } { threw = true };
+    assert.value(threw, message);
 };
 
 session = "0123456789abcdef0123456789abcdef";
@@ -115,6 +121,16 @@ try {
     assertNil.value(p.at(\handle).value(["/janvim/sound/v1/start", session, 3, 53.0], 53.0), "start must not resurrect stopped policy");
 
     p = factory.value(session);
+    p.at(\handle).value(["/janvim/sound/v1/start", session, 1, 300.0], 300.0);
+    p.at(\handle).value(["/janvim/sound/v1/cursor", session, 2, 301.9, 0.5, 0.5, 0.5], 301.9);
+    assertNil.value(p.at(\handle).value(["/janvim/sound/v1/cursor", session, 3, 301.99, 0.5, 0.5, 0.5], 301.99), "cursor just before expiry must be rate-dropped");
+    action = p.at(\tick).value(302.0);
+    assertEqual.value(action.at(\reason), \heartbeatTimeout, "rate-dropped packet must not refresh lease");
+    snapshot = p.at(\snapshot).value;
+    assertEqual.value(snapshot.at(\lastSeq), 3, "rate-dropped packet before expiry must advance sequence");
+    assertEqual.value(snapshot.at(\rateDropped), 1, "rate-dropped packet before expiry must be counted");
+
+    p = factory.value(session);
     p.at(\handle).value(["/janvim/sound/v1/start", session, 1, 60.0], 60.0);
     action = p.at(\handle).value(["/janvim/sound/v1/heartbeat", session, 2, 62.0], 62.0);
     assertEqual.value(action.at(\type), \stop, "late heartbeat must trigger timeout before admission");
@@ -141,12 +157,37 @@ try {
     // Snapshot is bounded and detached from mutable policy state.
     snapshot = p.at(\snapshot).value;
     assertEqual.value(snapshot.size, 6, "snapshot must expose only bounded counters/state");
-    mutableSnapshot = snapshot.copy;
-    mutableSnapshot.put(\lastSeq, 999999);
-    mutableSnapshot.put(\rejected, 999999);
+    snapshot.put(\lastSeq, 999999);
+    snapshot.put(\rejected, 999999);
     snapshot = p.at(\snapshot).value;
     assertEqual.value(snapshot.at(\lastSeq), 2, "snapshot mutation must not change policy sequence");
     assert.value(snapshot.at(\rejected) < 999999, "snapshot mutation must not change policy counters");
+
+    // Validated counter seeds make int32 saturation reachable without billion-iteration tests.
+    assertThrows.value({ factory.value(session, "not-an-event") }, "counter seed must be an Event");
+    assertThrows.value({ factory.value(session, (acceptedPlucks: -1)) }, "counter seed must be nonnegative");
+    assertThrows.value({ factory.value(session, (acceptedPlucks: 1.0)) }, "counter seed must use Integers");
+    assertThrows.value({ factory.value(session, (unknownCounter: 0)) }, "counter seed must reject unknown keys");
+    p = factory.value(session, (
+        acceptedPlucks: 2147483646,
+        acceptedFlocks: 2147483646,
+        rejected: 2147483646,
+        rateDropped: 2147483646
+    ));
+    p.at(\handle).value(["/janvim/sound/v1/start", session, 1, 200.0], 200.0);
+    p.at(\handle).value(["/janvim/sound/v1/heartbeat", session, 2.0, 200.0], 200.0);
+    p.at(\handle).value(["/janvim/sound/v1/heartbeat", session, 2.0, 200.0], 200.0);
+    p.at(\handle).value(["/janvim/sound/v1/cursor", session, 2, 200.0, 0.5, 0.5, 0.5], 200.0);
+    p.at(\handle).value(["/janvim/sound/v1/cursor", session, 3, 200.01, 0.5, 0.5, 0.5], 200.01);
+    p.at(\handle).value(["/janvim/sound/v1/cursor", session, 4, 200.02, 0.5, 0.5, 0.5], 200.02);
+    p.at(\handle).value(["/janvim/sound/v1/cursor", session, 5, 200.125, 0.5, 0.5, 0.5], 200.125);
+    p.at(\handle).value(["/janvim/sound/v1/flock", session, 6, 200.2, 0.5, 0.5], 200.2);
+    p.at(\handle).value(["/janvim/sound/v1/flock", session, 7, 200.25, 0.5, 0.5], 200.25);
+    snapshot = p.at(\snapshot).value;
+    assertEqual.value(snapshot.at(\acceptedPlucks), 2147483647, "acceptedPlucks must saturate at int32 max");
+    assertEqual.value(snapshot.at(\acceptedFlocks), 2147483647, "acceptedFlocks must saturate at int32 max");
+    assertEqual.value(snapshot.at(\rejected), 2147483647, "rejected must saturate at int32 max");
+    assertEqual.value(snapshot.at(\rateDropped), 2147483647, "rateDropped must saturate at int32 max");
 
     // Ten hours of fake-clock heartbeat activity is finite and wall-clock independent.
     p = factory.value(session);
