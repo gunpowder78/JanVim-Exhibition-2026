@@ -428,10 +428,17 @@ type SaveDisplayMapRequest = {
   Review the complete diff against the design, security boundaries, KISS scope, legacy rollback,
   and test evidence. Address every Critical/Important finding through one reviewed fix wave.
 
-- [ ] **Step 5: Stop at human G4 acceptance**
+- [x] **Step 5: Record returned human G4 acceptance**
 
   Ask for one bounded manual window covering: three numbered identify cards; explicit role save;
   simultaneous JanVim/Narrative/《见山》 standby; ignored extra display if available; assigned
   display change causing one safe stop and no restart loop; fresh remap/restart; exactly-one-display
   JanVim-only preview; offline run; and forced JanVim recovery. Keep physical acceptance unclaimed
   until the returned receipts and observations pass.
+
+  Completed on 2026-09-05 with three extended displays plus a separate exactly-one-display
+  preview. The operator confirmed every available check, including the safe topology stop, manual
+  remap/restart, offline Soak3, and exact-identity JanVim recovery. No fourth display was available,
+  so the optional unassigned-extra-display observation was not exercised. Durable evidence remains
+  explicitly classified `monitor-simulation` with `physicalProjectorsTested: false`; venue
+  projector calibration and physical-projector acceptance remain a separate deployment activity.
