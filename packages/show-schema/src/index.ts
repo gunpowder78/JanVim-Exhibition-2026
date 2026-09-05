@@ -8,6 +8,9 @@ import {
 } from "./renderer-event.js";
 import type { Cue, EditorAction } from "./renderer-event.js";
 
+export { parseAgentCursorObservation } from "./agent-cursor.js";
+export type { AgentCursorObservation } from "./agent-cursor.js";
+
 export {
   parseRendererEvent,
   parseRendererToControllerEvent,

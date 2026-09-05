@@ -3,7 +3,7 @@ import { createConnection, type Socket } from "node:net";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import type { AgentAck, AgentCommand } from "../../../packages/show-schema/src/index";
+import type { AgentAck, AgentCommand, AgentCursorObservation } from "../../../packages/show-schema/src/index";
 import { BridgeServer } from "../src/bridge-server.ts";
 
 const TOKEN = "fixture-token-2026-bridge";
@@ -88,6 +88,7 @@ describe("loopback bridge server", () => {
   const servers: BridgeServer[] = [];
   const sockets: Socket[] = [];
   const readers: LineReader[] = [];
+  let barrierSequence = 0;
 
   afterEach(async () => {
     for (const reader of readers.splice(0)) reader.dispose();
@@ -95,11 +96,12 @@ describe("loopback bridge server", () => {
     await Promise.all(servers.splice(0).map(async (server) => server.close()));
   });
 
-  async function startServer(): Promise<BridgeServer> {
+  async function startServer(now?: () => number): Promise<BridgeServer> {
     const server = new BridgeServer({
       token: TOKEN,
       acknowledgementTimeoutMs: 500,
       handshakeTimeoutMs: 500,
+      now,
     });
     servers.push(server);
     await server.listen();
@@ -123,6 +125,195 @@ describe("loopback bridge server", () => {
     await server.waitForAgent(500);
     return { socket, reader };
   }
+
+  function cursor(command: AgentCommand, overrides = {}): AgentCursorObservation {
+    return { schema: 1, type: "cursor", loopId: command.loopId, cueId: command.cueId,
+      seq: 1, elapsedMs: 10, row: 0, cellCol: 2,
+      viewRow: 0, viewCol: 2, rows: 20, cols: 80, ...overrides };
+  }
+
+  function moveCommand(cueId = "move-1"): AgentCommand {
+    return { ...statusCommand(cueId), action: { type: "move", keys: "l", repeat: 1 } };
+  }
+
+  // An ACK for an independent status command is a socket-order barrier, not a time delay.
+  async function sendFrames(server: BridgeServer, socket: Socket, reader: LineReader,
+    frames: string[]): Promise<void> {
+    const barrier = statusCommand(`barrier-${++barrierSequence}`);
+    const pending = server.dispatch(barrier);
+    await reader.read(1);
+    socket.write([...frames, JSON.stringify(appliedAck(barrier)), ""].join("\n"));
+    await expect(pending).resolves.toEqual(appliedAck(barrier));
+  }
+
+  it("delivers a cursor while its movement command stays pending until the matching ACK", async () => {
+    const server = await startServer(() => 100);
+    const events: AgentCursorObservation[] = [];
+    server.onCursor((event) => { events.push(event); });
+    const { socket, reader } = await connectAgent(server);
+    const command = moveCommand();
+    const pending = server.dispatch(command);
+    let settled = false;
+    void pending.then(() => { settled = true; }, () => { settled = true; });
+    await reader.read(1);
+    await sendFrames(server, socket, reader, [JSON.stringify(cursor(command))]);
+    expect(events).toEqual([cursor(command)]);
+    expect(settled).toBe(false);
+    expect(server.diagnostics().pendingCommands).toBe(1);
+    socket.write(`${JSON.stringify(appliedAck(command))}\n`);
+    await expect(pending).resolves.toEqual(appliedAck(command));
+    expect(reader.lineCount).toBe(2);
+  });
+
+  it("drops malformed and oversized cursor frames and observer exceptions without losing ACKs", async () => {
+    const server = await startServer(() => 100);
+    let calls = 0;
+    server.onCursor(() => { calls += 1; throw new Error("observer failure"); });
+    const { socket, reader } = await connectAgent(server);
+    const command = moveCommand();
+    const pending = server.dispatch(command);
+    await reader.read(1);
+    const malformed = [
+      { ...cursor(command), row: -1 }, { ...cursor(command), rows: 0 },
+      { ...cursor(command), viewCol: 80 }, { ...cursor(command), seq: 0 },
+      { ...cursor(command), elapsedMs: 2_001 }, { ...cursor(command), extra: true },
+      { type: "cursor" }, { ...cursor(command), cellCol: null },
+    ].map((value) => JSON.stringify(value));
+    malformed.push(JSON.stringify(cursor(command)).replace('"cellCol":2', '"cellCol":1e999'));
+    malformed.push(`${JSON.stringify(cursor(command))}${" ".repeat(1_024)}`);
+    await sendFrames(server, socket, reader, [...malformed, JSON.stringify(cursor(command))]);
+    expect(calls).toBe(1);
+    expect(server.diagnostics().authenticatedConnections).toBe(1);
+    socket.write(`${JSON.stringify(appliedAck(command))}\n`);
+    await expect(pending).resolves.toEqual(appliedAck(command));
+  });
+
+  it("requires authentication before accepting cursor frames", async () => {
+    const server = await startServer();
+    const events: AgentCursorObservation[] = [];
+    server.onCursor((event) => { events.push(event); });
+    const socket = await connectRaw(server);
+    const closed = once(socket, "close");
+    socket.write(`${JSON.stringify(cursor(moveCommand()))}\n`);
+    await closed;
+    expect(events).toEqual([]);
+    expect(server.diagnostics().authenticatedConnections).toBe(0);
+  });
+
+  it("admits only pending move, insert and select observations from the current session", async () => {
+    let now = 0;
+    const server = await startServer(() => now);
+    const events: AgentCursorObservation[] = [];
+    server.onCursor((event) => { events.push(event); });
+    const { socket, reader } = await connectAgent(server);
+    const actions: AgentCommand["action"][] = [
+      { type: "status" }, { type: "reset" }, { type: "escape" }, { type: "shutdown" },
+      { type: "replace", rangeId: "opening", text: "文" },
+      { type: "prepare", poem: "山", expectedSha256: BUFFER_HASH },
+      { type: "move", keys: "l", repeat: 1 },
+      { type: "insert", text: "文", charsPerSecond: 8 }, { type: "select", rangeId: "opening" },
+    ];
+    for (const [index, action] of actions.entries()) {
+      now += 125;
+      const command = { ...statusCommand(`kind-${index}`), action };
+      const pending = server.dispatch(command);
+      await reader.read(1);
+      await sendFrames(server, socket, reader, [
+        JSON.stringify(cursor(command, { loopId: "old-loop", seq: 999 })),
+        JSON.stringify(cursor(command, { cueId: "absent-cue", seq: 999 })),
+        JSON.stringify(cursor(command, { seq: index + 1 })),
+      ]);
+      socket.write(`${JSON.stringify(appliedAck(command))}\n`);
+      await expect(pending).resolves.toEqual(appliedAck(command));
+      await sendFrames(server, socket, reader, [JSON.stringify(cursor(command, { seq: 999 }))]);
+    }
+    expect(events.map((event) => event.cueId)).toEqual(["kind-6", "kind-7", "kind-8"]);
+    const closed = once(socket, "close");
+    socket.destroy();
+    await closed;
+    const next = await connectAgent(server);
+    now += 125;
+    const command = moveCommand("new-session");
+    const pending = server.dispatch(command);
+    await next.reader.read(1);
+    await sendFrames(server, next.socket, next.reader, [JSON.stringify(cursor(command))]);
+    next.socket.write(`${JSON.stringify(appliedAck(command))}\n`);
+    await expect(pending).resolves.toEqual(appliedAck(command));
+    expect(events.at(-1)).toEqual(cursor(command));
+  });
+
+  it("uses a monotonic clock for 125ms spacing, sequence order and conservative age bounds", async () => {
+    let now = 1_000;
+    const server = await startServer(() => now);
+    const events: AgentCursorObservation[] = [];
+    server.onCursor((event) => { events.push(event); });
+    const { socket, reader } = await connectAgent(server);
+    const command = moveCommand();
+    const pending = server.dispatch(command);
+    await reader.read(1);
+    const send = async (at: number, seq: number, elapsedMs: number): Promise<void> => {
+      now = at;
+      await sendFrames(server, socket, reader, [JSON.stringify(cursor(command, { seq, elapsedMs }))]);
+    };
+    await send(1_000, 1, 0);
+    await send(1_124, 2, 124); // Too soon: dropped, never queued.
+    await send(1_125, 3, 125);
+    await send(1_250, 3, 250); // Duplicate.
+    await send(1_250, 2, 250); // Out of order.
+    await send(1_626, 4, 125); // 501ms old.
+    await send(1_626, 5, 126); // Exactly 500ms old.
+    await send(1_751, 6, 852); // 101ms in the future.
+    await send(1_751, 7, 851); // Exactly 100ms in the future.
+    expect(events.map((event) => event.seq)).toEqual([1, 3, 5, 7]);
+    socket.write(`${JSON.stringify(appliedAck(command))}\n`);
+    await expect(pending).resolves.toEqual(appliedAck(command));
+  });
+
+  it("owns one disposable cursor listener, absorbs async rejection and never awaits observers", async () => {
+    let now = 0;
+    const server = await startServer(() => now);
+    const events: AgentCursorObservation[] = [];
+    const listener = (event: AgentCursorObservation): void => { events.push(event); };
+    const dispose = server.onCursor(listener);
+    expect(() => server.onCursor(listener)).toThrow(/cursor listener.*capacity|cursor listener.*limit/i);
+    dispose();
+    const disposeReplacement = server.onCursor(listener);
+    dispose(); // An old disposer must not remove the new registration.
+    const { socket, reader } = await connectAgent(server);
+    const command = moveCommand();
+    const pending = server.dispatch(command);
+    await reader.read(1);
+    await sendFrames(server, socket, reader, [JSON.stringify(cursor(command))]);
+    expect(events).toHaveLength(1);
+    disposeReplacement();
+    now = 125;
+    await sendFrames(server, socket, reader, [JSON.stringify(cursor(command, { seq: 2, elapsedMs: 125 }))]);
+    expect(events).toHaveLength(1);
+    const disposeAsync = server.onCursor(async () => { throw new Error("async observer failure"); });
+    now = 250;
+    await sendFrames(server, socket, reader, [JSON.stringify(cursor(command, { seq: 3, elapsedMs: 250 }))]);
+    disposeAsync();
+    server.onCursor(() => new Promise<void>(() => {}));
+    now = 375;
+    await sendFrames(server, socket, reader, [JSON.stringify(cursor(command, { seq: 4, elapsedMs: 375 }))]);
+    socket.write(`${JSON.stringify(appliedAck(command))}\n`);
+    await expect(pending).resolves.toEqual(appliedAck(command));
+    await server.close();
+    expect(() => server.onCursor(listener)).toThrow(/closing/i);
+    expect(server.diagnostics().pendingTimers).toBe(0);
+  });
+
+  it.each(["{broken-json\n", `${" ".repeat(4_097)}\n`])(
+    "retains connection-level framing protection after authentication %#", async (frame) => {
+      const server = await startServer();
+      const { socket, reader } = await connectAgent(server);
+      const pending = server.dispatch(moveCommand());
+      const rejected = expect(pending).rejects.toThrow(/connection closed/i);
+      await reader.read(1);
+      socket.write(frame);
+      await rejected;
+    },
+  );
 
   it("binds an ephemeral IPv4 port only on 127.0.0.1", async () => {
     const server = await startServer();

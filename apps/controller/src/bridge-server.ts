@@ -5,8 +5,10 @@ import { TextDecoder } from "node:util";
 import {
   parseAgentAck,
   parseAgentCommand,
+  parseAgentCursorObservation,
   type AgentAck,
   type AgentCommand,
+  type AgentCursorObservation,
 } from "@janvim-exhibition/show-schema";
 
 const LISTEN_HOST = "127.0.0.1";
@@ -17,6 +19,8 @@ const MAX_DUPLICATE_WAITERS = 4;
 const MAX_ACKNOWLEDGEMENTS = 512;
 const MAX_READY_WAITERS = 8;
 const MAX_AGENT_DISCONNECT_LISTENERS = 8;
+const MAX_CURSOR_BYTES = 1_024;
+const CURSOR_INTERVAL_MS = 125;
 const TOKEN_PATTERN = /^[A-Za-z0-9._-]{16,}$/;
 const decoder = new TextDecoder("utf-8", { fatal: true });
 
@@ -24,6 +28,7 @@ export interface BridgeServerOptions {
   token: string;
   acknowledgementTimeoutMs?: number;
   handshakeTimeoutMs?: number;
+  now?: () => number;
 }
 
 export interface BridgeAddress {
@@ -48,6 +53,8 @@ type AgentDisconnectRegistration = {
 };
 
 interface PendingCommand {
+  actionType: AgentCommand["action"]["type"];
+  dispatchedAtMs: number;
   promise: Promise<AgentAck>;
   resolve: (acknowledgement: AgentAck) => void;
   reject: (error: Error) => void;
@@ -63,6 +70,8 @@ interface ReadyWaiter {
 
 interface Session {
   authenticated: boolean;
+  lastCursorSeq: number;
+  lastCursorAtMs: number;
   buffer: Buffer;
   handshakeTimer: TrackedTimer;
   onData: (chunk: Buffer) => void;
@@ -75,6 +84,7 @@ export class BridgeServer {
   private readonly token: string;
   private readonly acknowledgementTimeoutMs: number;
   private readonly handshakeTimeoutMs: number;
+  private readonly now: () => number;
   private readonly sessions = new Map<Socket, Session>();
   private readonly pending = new Map<string, PendingCommand>();
   private readonly acknowledgements = new Map<string, AgentAck>();
@@ -82,6 +92,7 @@ export class BridgeServer {
   private readonly readyWaiters = new Set<ReadyWaiter>();
   private readonly agentDisconnectListeners = new Set<AgentDisconnectRegistration>();
   private agentSocket?: Socket;
+  private cursorListener?: { listener: (event: AgentCursorObservation) => void; busy: boolean };
   private closing = false;
 
   public constructor(options: BridgeServerOptions) {
@@ -90,6 +101,7 @@ export class BridgeServer {
     }
 
     this.token = options.token;
+    this.now = options.now ?? (() => performance.now());
     this.acknowledgementTimeoutMs = boundedPositiveTimeout(
       options.acknowledgementTimeoutMs,
       2_000,
@@ -206,6 +218,8 @@ export class BridgeServer {
     }, this.acknowledgementTimeoutMs);
 
     this.pending.set(key, {
+      actionType: command.action.type,
+      dispatchedAtMs: this.now(),
       promise,
       resolve: resolvePromise,
       reject: rejectPromise,
@@ -237,6 +251,16 @@ export class BridgeServer {
     };
   }
 
+  public onCursor(listener: (event: AgentCursorObservation) => void): () => void {
+    if (this.closing) throw new Error("Bridge server is closing");
+    if (this.cursorListener !== undefined) throw new Error("Bridge cursor listener capacity reached");
+    const registration = { listener, busy: false };
+    this.cursorListener = registration;
+    return () => {
+      if (this.cursorListener === registration) this.cursorListener = undefined;
+    };
+  }
+
   public diagnostics(): BridgeDiagnostics {
     let authenticatedConnections = 0;
     let sessionListeners = 0;
@@ -261,6 +285,7 @@ export class BridgeServer {
   public async close(): Promise<void> {
     if (this.closing && !this.server.listening) return;
     this.closing = true;
+    this.cursorListener = undefined;
     this.agentDisconnectListeners.clear();
     this.rejectReadyWaiters(new Error("Bridge server closed"));
     this.rejectAllPending(new Error("Bridge server closed"));
@@ -294,6 +319,8 @@ export class BridgeServer {
 
     const session = {} as Session;
     session.authenticated = false;
+    session.lastCursorSeq = 0;
+    session.lastCursorAtMs = -Infinity;
     session.buffer = Buffer.alloc(0);
     session.onData = (chunk) => this.receive(socket, chunk);
     session.onError = () => {};
@@ -352,6 +379,14 @@ export class BridgeServer {
       return true;
     }
 
+    if (typeof value === "object" && value !== null && "type" in value && value.type === "cursor") {
+      // A damaged optional observation cannot reject the command's separate ACK.
+      if (socket === this.agentSocket && bytes.byteLength <= MAX_CURSOR_BYTES) {
+        this.receiveCursor(session, value);
+      }
+      return true;
+    }
+
     let acknowledgement: AgentAck;
     try {
       acknowledgement = parseAgentAck(value);
@@ -368,6 +403,36 @@ export class BridgeServer {
     this.rememberAcknowledgement(key, acknowledgement);
     pending.resolve(acknowledgement);
     return true;
+  }
+
+  private receiveCursor(session: Session, value: unknown): void {
+    let event: AgentCursorObservation;
+    try {
+      event = parseAgentCursorObservation(value);
+    } catch {
+      return;
+    }
+    const pending = this.pending.get(commandKey(event.loopId, event.cueId));
+    if (pending === undefined || !["move", "insert", "select"].includes(pending.actionType)) return;
+    if (event.seq <= session.lastCursorSeq) return;
+    session.lastCursorSeq = event.seq;
+    const now = this.now();
+    const ageMs = now - (pending.dispatchedAtMs + event.elapsedMs);
+    if (!Number.isFinite(ageMs) || ageMs > 500 || ageMs < -100) return;
+    if (now - session.lastCursorAtMs < CURSOR_INTERVAL_MS) return;
+    session.lastCursorAtMs = now;
+    const registration = this.cursorListener;
+    if (registration === undefined || registration.busy) return;
+    // No cue awaits the observer; even an accidentally async observer has one bounded slot.
+    registration.busy = true;
+    try {
+      void Promise.resolve(registration.listener(event)).then(
+        () => { registration.busy = false; },
+        () => { registration.busy = false; },
+      );
+    } catch {
+      registration.busy = false;
+    }
   }
 
   private cleanupSession(socket: Socket, reason: Error): void {

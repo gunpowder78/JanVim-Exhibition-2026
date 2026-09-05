@@ -78,6 +78,199 @@ local function buffer_text(buffer_number)
   return table.concat(vim.api.nvim_buf_get_lines(buffer_number, 0, -1, true), "\n")
 end
 
+-- Only time is simulated: mutations, movement, buffer reads and viewport APIs stay real.
+local function fake_clock()
+  local clock = { ms = 0, events = {} }
+  function clock.now()
+    return clock.ms
+  end
+  function clock.defer(callback, delay_ms)
+    local event = { callback = callback, at = clock.ms + delay_ms, cancelled = false }
+    local handle = { closed = false }
+    function handle:stop() event.cancelled = true end
+    function handle:is_closing() return self.closed end
+    function handle:close() self.closed = true end
+    table.insert(clock.events, event)
+    return handle
+  end
+  function clock:drain()
+    local count = 0
+    while #self.events > 0 do
+      count = count + 1
+      expect(count <= 1024, "fake scheduler exceeded its finite bound")
+      local event = table.remove(self.events, 1)
+      self.ms = math.max(self.ms, event.at)
+      if not event.cancelled then event.callback() end
+    end
+  end
+  function clock:dispatch(agent, value)
+    local ack
+    agent:dispatch(value, function(result) ack = result end)
+    self:drain()
+    return assert(ack, "action did not ACK")
+  end
+  return clock
+end
+
+run("cursor observer reports actual Chinese display cells during move and slow insertion", function()
+  local clock = fake_clock()
+  local samples = {}
+  local agent = new_agent({ now = clock.now, defer = clock.defer,
+    on_cursor = function(event) table.insert(samples, event) end })
+  prepare(agent)
+  equal(#samples, 0)
+  local move_ack = clock:dispatch(agent, command("move-cells", { type = "move", keys = "l", ["repeat"] = 1 }))
+  equal(move_ack.outcome, "applied")
+  equal(move_ack.cursor, { row = 0, col = 3 }) -- ACK still uses byte columns.
+  equal(#samples, 1, "real movement did not emit a cursor observation")
+  equal(samples[1], { schema = 1, type = "cursor", loopId = "loop-agent", cueId = "move-cells",
+    seq = 1, elapsedMs = 0, row = 0, cellCol = 2, viewRow = 0, viewCol = 2,
+    rows = vim.api.nvim_win_get_height(0),
+    cols = vim.api.nvim_win_get_width(0) - vim.fn.getwininfo(vim.api.nvim_get_current_win())[1].textoff })
+  clock.ms = 125
+  local insert_ack = clock:dispatch(agent, command("insert-cells", {
+    type = "insert", text = "文山水", charsPerSecond = 8 }))
+  equal(insert_ack.outcome, "applied")
+  equal(buffer_text(assert(agent:buffer_number())), "白文山水日依山尽\n黄河入海流")
+  equal(#samples, 3)
+  equal({ samples[2].cellCol, samples[2].elapsedMs, samples[2].seq }, { 4, 125, 2 })
+  equal({ samples[3].cellCol, samples[3].elapsedMs, samples[3].seq }, { 6, 250, 3 })
+  equal(samples[3].cueId, "insert-cells")
+  agent:dispose()
+end)
+
+run("cursor observer drops throttled movement without replay and rebases reset and stationary actions", function()
+  local clock = fake_clock()
+  local samples = {}
+  local agent = new_agent({ now = clock.now, defer = clock.defer,
+    on_cursor = function(event) table.insert(samples, event) end })
+  prepare(agent)
+  local function move(cue, key)
+    return clock:dispatch(agent, command(cue, { type = "move", keys = key, ["repeat"] = 1 }))
+  end
+  move("stationary-first", "h")
+  equal(#samples, 0)
+  move("first-movement", "l")
+  clock.ms = 124
+  move("throttled", "l")
+  equal(#samples, 1, "source must enforce 125ms spacing")
+  equal(#clock.events, 0, "observation must not schedule replay")
+  clock.ms = 125
+  move("admitted", "l")
+  equal(#samples, 2)
+  equal(samples[2].cellCol, 6)
+  clock:dispatch(agent, command("status-observation", { type = "status" }))
+  local reset_ack = clock:dispatch(agent, command("reset-observation", { type = "reset" }))
+  equal(reset_ack.bufferSha256, POEM_HASH)
+  clock.ms = 250
+  move("stationary-reset", "h")
+  equal(#samples, 2)
+  move("after-reset", "l")
+  equal(#samples, 3)
+  equal(samples[3].cellCol, 2)
+  equal(samples[3].seq, 3)
+  clock:dispatch(agent, command("prepare-observation", { type = "prepare", poem = POEM, expectedSha256 = POEM_HASH }))
+  equal(#samples, 3)
+  agent:dispose()
+  clock:drain()
+  equal(#samples, 3)
+end)
+
+run("cursor observer samples actual move chunks and selection endpoints", function()
+  local clock = fake_clock()
+  local samples = {}
+  local agent = new_agent({ now = clock.now,
+    defer = function(callback, delay_ms) return clock.defer(callback, math.max(delay_ms, 125)) end,
+    on_cursor = function(event) table.insert(samples, event) end })
+  local poem = string.rep("山", 60)
+  clock:dispatch(agent, command("prepare-chunks", { type = "prepare", poem = poem, expectedSha256 = vim.fn.sha256(poem) }))
+  local ack = clock:dispatch(agent, command("move-chunks", { type = "move", keys = "l", ["repeat"] = 33 }))
+  equal(ack.outcome, "applied")
+  equal(#samples, 3, "each admitted real chunk must be observable")
+  equal({ samples[1].cellCol, samples[2].cellCol, samples[3].cellCol }, { 32, 64, 66 })
+  local select_ack = clock:dispatch(agent, command("select-endpoints", { type = "select", rangeId = "opening" }))
+  equal(select_ack.outcome, "applied")
+  equal(#samples, 5)
+  equal({ samples[4].cellCol, samples[5].cellCol }, { 0, 8 })
+  equal(samples[5].elapsedMs, 125)
+  agent:dispose()
+end)
+
+run("cursor observer uses the active logical viewport and never hashes or activates per sample", function()
+  local clock = fake_clock()
+  local samples = {}
+  local agent = new_agent({ now = clock.now, defer = clock.defer,
+    on_cursor = function(event) table.insert(samples, event) end })
+  local poem = string.rep(string.rep("山", 120) .. "\n", 50) .. "末"
+  clock:dispatch(agent, command("prepare-viewport", { type = "prepare", poem = poem, expectedSha256 = vim.fn.sha256(poem) }))
+  local observer = assert(agent.cursor_observer, "optional observer is missing")
+  local show_buffer = assert(agent:buffer_number())
+  vim.api.nvim_win_set_cursor(0, { 11, 6 })
+  observer:begin(command("viewport", { type = "move", keys = "l", ["repeat"] = 1 }), show_buffer)
+  local original_wrap = vim.wo.wrap
+  vim.wo.wrap = false
+  vim.api.nvim_win_set_cursor(0, { 12, 9 })
+  vim.fn.winrestview({ topline = 10, leftcol = 4 })
+  local original_status = agent.show_buffer.status
+  agent.show_buffer.status = function() error("sampling called status") end
+  observer:sample(show_buffer)
+  agent.show_buffer.status = original_status
+  equal(#samples, 1)
+  equal({ samples[1].row, samples[1].cellCol, samples[1].viewRow, samples[1].viewCol }, { 11, 6, 2, 2 })
+  clock.ms = 125
+  vim.api.nvim_win_set_cursor(0, { 50, 300 })
+  vim.fn.winrestview({ topline = 1, leftcol = 0 })
+  observer:sample(show_buffer)
+  equal(#samples, 2)
+  equal(samples[2].viewRow, samples[2].rows - 1)
+  equal(samples[2].viewCol, samples[2].cols - 1)
+  local foreign = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_buf_set_lines(foreign, 0, -1, true, { "FOREIGN-SENTINEL" })
+  vim.api.nvim_set_current_buf(foreign)
+  clock.ms = 250
+  observer:sample(show_buffer)
+  equal(vim.api.nvim_get_current_buf(), foreign)
+  equal(buffer_text(foreign), "FOREIGN-SENTINEL")
+  equal(#samples, 2)
+  vim.wo.wrap = original_wrap
+  agent:dispose()
+  vim.api.nvim_buf_delete(foreign, { force = true })
+end)
+
+run("cursor callback failures preserve real writes ACKs reset hashes and timer cleanup", function()
+  local clock = fake_clock()
+  local calls = 0
+  local agent = new_agent({ now = clock.now, defer = clock.defer, on_cursor = function()
+    calls = calls + 1
+    error("injected observer failure")
+  end })
+  prepare(agent)
+  local ack = clock:dispatch(agent, command("throw-insert", { type = "insert", text = "文山水", charsPerSecond = 8 }))
+  equal(ack.outcome, "applied")
+  expect(calls > 0, "failure isolation was not exercised")
+  equal(buffer_text(assert(agent:buffer_number())), "文山水白日依山尽\n黄河入海流")
+  local reset_ack = clock:dispatch(agent, command("throw-reset", { type = "reset" }))
+  equal(reset_ack.outcome, "applied")
+  equal(reset_ack.bufferSha256, POEM_HASH)
+  agent:dispatch(command("cancel-insert", { type = "insert", text = "文山", charsPerSecond = 8 }), function() end)
+  local before_dispose = calls
+  agent:dispose()
+  clock:drain()
+  equal(calls, before_dispose)
+  equal(next(agent.timers), nil)
+  equal(agent:buffer_number(), nil)
+end)
+
+run("disabled observation leaves movement and insertion available without an observer", function()
+  local clock = fake_clock()
+  local agent = new_agent({ now = clock.now, defer = clock.defer })
+  prepare(agent)
+  equal(agent.cursor_observer, nil)
+  equal(clock:dispatch(agent, command("disabled-move", { type = "move", keys = "l", ["repeat"] = 1 })).outcome, "applied")
+  equal(clock:dispatch(agent, command("disabled-insert", { type = "insert", text = "文", charsPerSecond = 8 })).outcome, "applied")
+  agent:dispose()
+end)
+
 run("prepare creates a nameless nofile buffer and never touches a source poem", function()
   local source_path = vim.fn.tempname() .. "-source-poem.txt"
   local source = assert(io.open(source_path, "wb"))
@@ -488,7 +681,15 @@ local function new_connection_fixture(options)
   end
 
   function fake_tcp:write(payload, callback)
+    if options.fail_cursor_write and vim.json.decode(payload).type == "cursor" then
+      error("injected observational write failure")
+    end
     table.insert(writes, { payload = payload, callback = callback })
+    return true
+  end
+
+  function fake_tcp:get_write_queue_size()
+    return self.queue_size or 0
   end
 
   function fake_tcp:read_start(callback)
@@ -544,6 +745,8 @@ local function new_connection_fixture(options)
       end,
     },
     agent = options.agent,
+    cursor_observer = options.cursor_observer,
+    now = options.now,
     schedule_wrap = options.schedule_wrap or function(callback)
       return callback
     end,
@@ -569,6 +772,84 @@ local function new_connection_fixture(options)
     deferred = deferred,
   }
 end
+
+run("init cursor opt-in requires exactly environment 1 or an explicit test option", function()
+  local previous = vim.env.JANVIM_EXHIBITION_CURSOR_OBSERVER
+  local ok, err = xpcall(function()
+    for _, value in ipairs({ "", "0", "true", "1" }) do
+      vim.env.JANVIM_EXHIBITION_CURSOR_OBSERVER = value
+      local fixture = new_connection_fixture()
+      local enabled = fixture.connection.agent.cursor_observer ~= nil
+      fixture.connection:close()
+      equal(enabled, value == "1")
+    end
+    vim.env.JANVIM_EXHIBITION_CURSOR_OBSERVER = "0"
+    local explicit = new_connection_fixture({ cursor_observer = true })
+    local enabled = explicit.connection.agent.cursor_observer ~= nil
+    explicit.connection:close()
+    equal(enabled, true)
+  end, debug.traceback)
+  vim.env.JANVIM_EXHIBITION_CURSOR_OBSERVER = previous
+  if not ok then error(err, 0) end
+end)
+
+run("init keeps one cursor write in flight and ACKs never wait for its completion", function()
+  local clock = fake_clock()
+  local fixture = new_connection_fixture({ cursor_observer = true, now = clock.now, defer = clock.defer })
+  local function send(value)
+    fixture.fake_tcp.reader(nil, vim.json.encode(value) .. "\n")
+    clock:drain()
+  end
+  send(command("wire-prepare", { type = "prepare", poem = POEM, expectedSha256 = POEM_HASH }))
+  assert(fixture.writes[2].callback)(nil)
+  send(command("wire-move-1", { type = "move", keys = "l", ["repeat"] = 1 }))
+  equal(#fixture.writes, 4, "cursor and ACK must both be written before observer write completion")
+  local observation = vim.json.decode(fixture.writes[3].payload)
+  equal(observation.type, "cursor")
+  equal(observation.cellCol, 2)
+  expect(#fixture.writes[3].payload - 1 <= 1024, "cursor exceeded wire budget")
+  equal(vim.json.decode(fixture.writes[4].payload).outcome, "applied")
+  assert(fixture.writes[4].callback)(nil)
+  clock.ms = 125
+  send(command("wire-move-2", { type = "move", keys = "l", ["repeat"] = 1 }))
+  equal(#fixture.writes, 5, "congestion must discard the second observation")
+  equal(vim.json.decode(fixture.writes[5].payload).cueId, "wire-move-2")
+  assert(fixture.writes[5].callback)(nil)
+  clock.ms = 750
+  assert(fixture.writes[3].callback)(nil)
+  equal(#fixture.writes, 5, "congestion release must not replay an old observation")
+  fixture.fake_tcp.queue_size = 1
+  send(command("wire-move-3", { type = "move", keys = "l", ["repeat"] = 1 }))
+  equal(#fixture.writes, 6, "transport backpressure must discard observation")
+  assert(fixture.writes[6].callback)(nil)
+  fixture.fake_tcp.queue_size = 0
+  clock.ms = 875
+  send(command("wire-move-4", { type = "move", keys = "l", ["repeat"] = 1 }))
+  equal(vim.json.decode(fixture.writes[7].payload).type, "cursor")
+  equal(vim.json.decode(fixture.writes[8].payload).outcome, "applied")
+  fixture.connection:close()
+  assert(fixture.writes[7].callback)("late callback")
+  clock:drain()
+  equal(#fixture.writes, 8)
+  equal(fixture.connection:diagnostics().queuedCommands, 0)
+end)
+
+run("init observational write failures leave the command and transport usable", function()
+  local clock = fake_clock()
+  local fixture = new_connection_fixture({ cursor_observer = true, now = clock.now,
+    defer = clock.defer, fail_cursor_write = true })
+  fixture.fake_tcp.reader(nil, vim.json.encode(command("failure-prepare", {
+    type = "prepare", poem = POEM, expectedSha256 = POEM_HASH })) .. "\n")
+  assert(fixture.writes[2].callback)(nil)
+  fixture.fake_tcp.reader(nil, vim.json.encode(command("failure-move", {
+    type = "move", keys = "l", ["repeat"] = 1 })) .. "\n")
+  clock:drain()
+  equal(vim.json.decode(fixture.writes[3].payload).outcome, "applied")
+  equal(vim.json.decode(fixture.writes[3].payload).cursor.col, 3)
+  assert(fixture.writes[3].callback)(nil)
+  equal(fixture.fake_tcp.closed, false)
+  fixture.connection:close()
+end)
 
 run("init uses the full JanVim viewport on the dark theme", function()
   vim.g.janvim_margin_left = nil

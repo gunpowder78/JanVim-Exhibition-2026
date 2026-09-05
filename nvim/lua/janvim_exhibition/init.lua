@@ -70,6 +70,8 @@ function M.setup(options)
     receive_buffer = "",
     queue = {},
     busy = false,
+    cursor_write_busy = false,
+    cursor_write_failed = false,
     connected = false,
     transport_closed = false,
     disposed = false,
@@ -84,15 +86,41 @@ function M.setup(options)
     backend_exit_scheduled = false,
   }, Connection)
 
+  local observe_cursor = options.cursor_observer == true or vim.env.JANVIM_EXHIBITION_CURSOR_OBSERVER == "1"
   self.agent = options.agent or actions.new({
     token = token,
     ranges = options.ranges,
+    now = options.now,
+    defer = defer,
+    on_cursor = observe_cursor and function(event) self:send_cursor(event) end or nil,
     close_connection = function()
       self.shutdown_requested = true
     end,
   })
   self:start()
   return self
+end
+
+function Connection:send_cursor(event)
+  if self.transport_closed or not self.connected or self.cursor_write_busy or self.cursor_write_failed then return end
+  local ok = pcall(function()
+    if self.tcp:get_write_queue_size() > 0 then return end
+    local encoded = vim.json.encode(event)
+    if #encoded > 1024 then return end
+    self.cursor_write_busy = true
+    local request = self.tcp:write(encoded .. "\n", self.schedule_wrap(function(write_error)
+      self.cursor_write_busy = false
+      if write_error then self.cursor_write_failed = true end
+    end))
+    if not request then
+      self.cursor_write_busy = false
+      self.cursor_write_failed = true
+    end
+  end)
+  if not ok then
+    self.cursor_write_busy = false
+    self.cursor_write_failed = true
+  end
 end
 
 function Connection:start()
@@ -256,6 +284,7 @@ function Connection:close_transport()
   self.connected = false
   self.busy = false
   self.queue = {}
+  self.cursor_write_busy = false
   self.receive_buffer = ""
   self:stop_connect_timer()
 

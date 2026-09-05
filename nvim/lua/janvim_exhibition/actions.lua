@@ -82,7 +82,7 @@ function Agent.new(options)
   options = options or {}
   assert(type(options.token) == "string" and #options.token >= 16, "agent token is required")
 
-  return setmetatable({
+  local self = setmetatable({
     token = options.token,
     show_buffer = ShowBuffer.new({ ranges = options.ranges }),
     input = options.input or vim.api.nvim_input,
@@ -100,6 +100,13 @@ function Agent.new(options)
     timers = {},
     disposed = false,
   }, Agent)
+  if type(options.on_cursor) == "function" then
+    self.cursor_observer = require("janvim_exhibition.cursor_observer").new({
+      now = self.now,
+      on_cursor = options.on_cursor,
+    })
+  end
+  return self
 end
 
 function Agent:dispatch(value, callback)
@@ -144,6 +151,9 @@ function Agent:dispatch(value, callback)
       return
     end
     completed = true
+    if self.cursor_observer then
+      pcall(self.cursor_observer.clear, self.cursor_observer)
+    end
 
     local pending = self.pending[key]
     self.pending[key] = nil
@@ -159,6 +169,9 @@ function Agent:dispatch(value, callback)
     end
   end
 
+  if self.cursor_observer then
+    pcall(self.cursor_observer.begin, self.cursor_observer, command, self:buffer_number())
+  end
   local ok = xpcall(function()
     self:execute(command, finish)
   end, debug.traceback)
@@ -210,6 +223,9 @@ function Agent:move(key, repeat_count, finish)
     return
   end
 
+  if self.cursor_observer then
+    pcall(self.cursor_observer.rebase, self.cursor_observer, activated)
+  end
   self.normal_input(fixed_escape())
   local remaining = repeat_count
   local function feed_chunk()
@@ -222,6 +238,9 @@ function Agent:move(key, repeat_count, finish)
 
     local count = math.min(remaining, MOVE_CHUNK_SIZE)
     self.normal_input(string.rep(key, count))
+    if self.cursor_observer then
+      pcall(self.cursor_observer.sample, self.cursor_observer, self:buffer_number())
+    end
     remaining = remaining - count
     self:later(feed_chunk, 0)
   end
@@ -245,6 +264,9 @@ function Agent:insert(text, chars_per_second, finish)
   local cursor = vim.api.nvim_win_get_cursor(0)
   local insertion_row = cursor[1] - 1
   local insertion_col = cursor[2]
+  if self.cursor_observer then
+    pcall(self.cursor_observer.rebase, self.cursor_observer, activated)
+  end
   self.input("i")
   local started_at_ms = self.now()
   local index = 1
@@ -271,6 +293,9 @@ function Agent:insert(text, chars_per_second, finish)
       vim.api.nvim_win_set_cursor(0, { insertion_row + 1, insertion_col })
       insertion_col = insertion_col + #character
     end
+    if self.cursor_observer then
+      pcall(self.cursor_observer.sample, self.cursor_observer, self:buffer_number())
+    end
     local target_ms = started_at_ms + index * interval
     index = index + 1
     local delay_ms = math.max(0, math.ceil(target_ms - self.now()))
@@ -291,8 +316,14 @@ function Agent:select_range(range_id, finish)
     return
   end
 
+  if self.cursor_observer then
+    pcall(self.cursor_observer.rebase, self.cursor_observer, activated)
+  end
   self.normal_input(fixed_escape())
   vim.api.nvim_win_set_cursor(0, { range.start_row + 1, range.start_col })
+  if self.cursor_observer then
+    pcall(self.cursor_observer.sample, self.cursor_observer, self:buffer_number())
+  end
   self.normal_input("v")
   self:later(function()
     local lines = vim.api.nvim_buf_get_lines(activated, 0, -1, true)
@@ -304,6 +335,9 @@ function Agent:select_range(range_id, finish)
     end
     local line = lines[end_row + 1] or ""
     vim.api.nvim_win_set_cursor(0, { end_row + 1, visual_end_column(line, end_col) })
+    if self.cursor_observer then
+      pcall(self.cursor_observer.sample, self.cursor_observer, self:buffer_number())
+    end
     finish("applied")
   end, 0)
 end
@@ -380,6 +414,9 @@ function Agent:dispose()
     return
   end
   self.disposed = true
+  if self.cursor_observer then
+    pcall(self.cursor_observer.dispose, self.cursor_observer)
+  end
   for handle, _ in pairs(self.timers) do
     pcall(function()
       handle:stop()
