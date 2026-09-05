@@ -13,6 +13,7 @@ export type ShowCommand = {
   runId: string;
   controllerRunId: string;
   networkPolicy: "OfflineRequired" | "DiagnosticConnected";
+  soundRunRoot?: string;
 };
 
 const JANVIM_PRODUCT_ROOT = "D:\\github\\JanVim";
@@ -27,6 +28,7 @@ const KNOWN_FLAGS = new Set([
   "run-id",
   "controller-run-id",
   "network-policy",
+  "sound-run-root",
 ]);
 
 export function selectElectronCommandFamily(
@@ -119,12 +121,19 @@ export function parseShowCommand(
     runId,
     controllerRunId,
     networkPolicy,
+    ...(flags.has("sound-run-root") ? { soundRunRoot: flags.get("sound-run-root")! } : {}),
   };
 }
 
 function parseFlags(argv: readonly string[]): Map<string, string> {
   const flags = new Map<string, string>();
   for (const argument of argv) {
+    // Malformed optional audio paths are disabled by the client, never by visual parsing.
+    if (argument.startsWith("--sound-run-root=")) {
+      if (flags.has("sound-run-root")) throw new Error("Duplicate show flag: --sound-run-root");
+      flags.set("sound-run-root", argument.slice("--sound-run-root=".length));
+      continue;
+    }
     const match = FLAG_PATTERN.exec(argument);
     if (match === null || !KNOWN_FLAGS.has(match[1]!)) {
       throw new Error(`Unexpected show argument: ${argument}`);

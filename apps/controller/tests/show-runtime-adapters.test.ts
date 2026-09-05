@@ -7,7 +7,8 @@ import { PassThrough } from "node:stream";
 
 import { describe, expect, it, vi } from "vitest";
 
-import type { AgentAck, AgentCommand } from "@janvim-exhibition/show-schema";
+import type { AgentAck, AgentCommand, AgentCursorObservation } from "@janvim-exhibition/show-schema";
+import { createShowSoundClient, type ShowSoundClient, type ShowSoundClientOptions } from "../src/show-sound-client.ts";
 
 import type { LogStorage } from "../src/bounded-log.ts";
 import type {
@@ -706,6 +707,9 @@ function createValidationHarness(options: {
 }
 
 function createStartupHarness(options: {
+  soundClient?: ShowSoundClient;
+  realSoundClient?: boolean;
+  inheritedObserver?: boolean;
   logStorage?: MemoryLogStorage;
   artifactLockBytes?: Buffer;
   displayMapBytes?: Buffer;
@@ -875,6 +879,8 @@ function createStartupHarness(options: {
   let activeBridges = 0;
   let maxActiveBridges = 0;
   const bridgeDisconnectListeners: Array<Set<() => void>> = [];
+  const cursorListeners = new Set<(event: AgentCursorObservation, timing: { ageMs: number }) => void>();
+  let soundClientsCreated = 0;
   const bridgeCloseAttempts: Array<{
     bridgeIndex: number;
     bounded: boolean;
@@ -1297,6 +1303,7 @@ function createStartupHarness(options: {
       VIMINIT: "source user.vim",
       NVIM_APPNAME: "user-config",
       XDG_CONFIG_HOME: "C:\\Users\\operator\\.config",
+      ...(options.inheritedObserver ? { janvim_exhibition_cursor_observer: "1" } : {}),
     },
     readFile: (path: string) => {
       const resolved = win32.resolve(path);
@@ -1478,6 +1485,10 @@ function createStartupHarness(options: {
       let listening = false;
       let closed = false;
       return {
+        onCursor: (listener: (event: AgentCursorObservation, timing: { ageMs: number }) => void) => {
+          cursorListeners.add(listener);
+          return () => { cursorListeners.delete(listener); };
+        },
         listen: async () => {
           expect(token).toBe("ab".repeat(24));
           trace.push(`bridge-listen:${bridgeIndex + 1}:start`);
@@ -1609,6 +1620,12 @@ function createStartupHarness(options: {
       return pending;
     },
     logStorage,
+    createSoundClient: (clientOptions: ShowSoundClientOptions) => {
+      soundClientsCreated += 1;
+      if (options.realSoundClient) return createShowSoundClient(clientOptions);
+      if (!options.soundClient) throw new Error("unexpected sound client");
+      return options.soundClient;
+    },
     nowMonotonic: () => timers.nowMonotonic(),
     timers,
     nowUtc: () => "2026-08-30T00:00:01.000Z",
@@ -1663,6 +1680,8 @@ function createStartupHarness(options: {
 
   return {
     adapters: createShowRuntimeAdapters(host),
+    cursorListeners,
+    soundClientsCreated: () => soundClientsCreated,
     timers,
     trace,
     logStorage,
@@ -1847,6 +1866,109 @@ async function createValidatedRuntimeSession(
 }
 
 describe("real Task 9 show runtime adapters", () => {
+  function soundProbe() {
+    const events: string[] = [];
+    const client: ShowSoundClient = {
+      start: () => { events.push("start"); },
+      beginLoop: (generation, loop) => { events.push(`loop:${generation}:${loop}`); },
+      observe: (event, timing) => { events.push(`observe:${event.seq}:age:${timing?.ageMs}`); },
+      reset: () => { events.push("reset"); },
+      stop: reason => { events.push(`stop:${reason}`); },
+    };
+    return { events, client };
+  }
+
+  it("optional sound stays inactive in ValidateOnly and strips inherited observation when absent", async () => {
+    const sound = soundProbe();
+    const harness = createStartupHarness({ soundClient: sound.client, inheritedObserver: true });
+    await harness.adapters.validate({ ...showCommand(), soundRunRoot: "invalid" });
+    const coordinator = await bootAndStartRuntimeHarness(harness);
+    expect(harness.soundClientsCreated()).toBe(0);
+    expect(harness.cursorListeners.size).toBe(0);
+    expect(Object.keys(harness.spawnCall!.options.env).some(name => name.toUpperCase() === "JANVIM_EXHIBITION_CURSOR_OBSERVER")).toBe(false);
+    await coordinator.requestEmergencyStop("sigint");
+    expect(sound.events).toEqual([]);
+  });
+
+  it.each(["Show", "Soak3"] as const)("optional sound wires one %s client and subscribes once; secondary recovery keeps it", async mode => {
+    const sound = soundProbe(); const harness = createStartupHarness({ soundClient: sound.client });
+    const coordinator = harness.adapters.createCoordinator({ ...showCommand(mode), mode, soundRunRoot: "external-run" });
+    await expect(coordinator.boot()).resolves.toEqual({ ready: true });
+    expect(sound.events).toEqual(["start", "reset"]);
+    expect(harness.spawnCall!.options.env.JANVIM_EXHIBITION_CURSOR_OBSERVER).toBe("1");
+    expect(harness.cursorListeners.size).toBe(1);
+    coordinator.handleRendererEvent({ schema: 1, type: "operator-action", action: "start" });
+    await settlePromises();
+    expect(sound.events.slice(-2)).toEqual(["reset", "loop:1:show-001-g1-l1"]);
+    const callback = [...harness.cursorListeners][0]!;
+    callback({ seq: 1 } as AgentCursorObservation, { ageMs: 400 });
+    expect(sound.events.at(-1)).toBe("observe:1:age:400");
+    harness.destroySecondary(); await settlePromises();
+    expect(sound.events.some(e => e.startsWith("stop:"))).toBe(false);
+    await harness.timers.fireTimeout(1000); await settlePromises();
+    expect(coordinator.diagnostics().generationId).toBe(2);
+    expect(sound.events).toContain("loop:2:show-001-g2-l1");
+    expect(harness.soundClientsCreated()).toBe(1); expect(harness.cursorListeners.size).toBe(1);
+    const beforeStop = sound.events.length;
+    const stopping = coordinator.requestEmergencyStop("sigint");
+    expect(sound.events[beforeStop]).toMatch(/^stop:/);
+    await stopping; expect(harness.cursorListeners.size).toBe(0);
+    const count = sound.events.length; callback({ seq: 2 } as AgentCursorObservation, { ageMs: 0 });
+    expect(sound.events).toHaveLength(count);
+  });
+
+  it.each(["child", "agent"] as const)("optional sound Stop is synchronous on %s fault while visuals retain recovery", async fault => {
+    const sound = soundProbe(); const harness = createStartupHarness({ soundClient: sound.client });
+    const coordinator = harness.adapters.createCoordinator({ ...showCommand("Show"), mode: "Show", soundRunRoot: "external-run" });
+    await coordinator.boot(); coordinator.handleRendererEvent({ schema: 1, type: "operator-action", action: "start" }); await settlePromises();
+    const beforeFault = sound.events.length;
+    if (fault === "child") harness.emitJanVimExit(); else harness.emitAgentDisconnect();
+    expect(sound.events[beforeFault]).toMatch(/^stop:/);
+    await settlePromises(); expect(coordinator.diagnostics().state).toBe("black-recovering");
+    harness.emitJanVimClose(); await settlePromises();
+    await harness.timers.fireTimeout(1000); await settlePromises();
+    expect(harness.soundClientsCreated()).toBe(1);
+    await coordinator.requestEmergencyStop("sigint"); expect(harness.cursorListeners.size).toBe(0);
+  });
+
+  it("optional sound stops during emergency while prepare is unresolved and late prepare cannot begin a loop", async () => {
+    const sound = soundProbe(); const harness = createStartupHarness({ soundClient: sound.client, deferLoopPrepare: true });
+    const coordinator = harness.adapters.createCoordinator({ ...showCommand("Show"), mode: "Show", soundRunRoot: "external-run" });
+    const dispose = harness.adapters.bindEmergencyLifecycle(reason => { void coordinator.requestEmergencyStop(reason); });
+    await coordinator.boot(); coordinator.handleRendererEvent({ schema: 1, type: "operator-action", action: "start" }); await settlePromises();
+    const beforeStop = sound.events.length;
+    harness.emitElectronQuit(); expect(sound.events[beforeStop]).toMatch(/^stop:/);
+    harness.releaseLoopPrepare(); await settlePromises(); await coordinator.completion; dispose();
+    expect(sound.events.filter(e => e.startsWith("loop:"))).toEqual([]);
+    expect(harness.cursorListeners.size).toBe(0);
+  });
+
+  it("optional sound cleanup covers validation failure before any session exists", async () => {
+    const sound = soundProbe(); const harness = createStartupHarness({ soundClient: sound.client, artifactLockBytes: Buffer.from("{}") });
+    const coordinator = harness.adapters.createCoordinator({ ...showCommand("Soak3"), mode: "Soak3", soundRunRoot: "external-run" });
+    await coordinator.boot(); await coordinator.requestEmergencyStop("electron-quit"); await coordinator.completion;
+    expect(sound.events.some(e => e.startsWith("stop:"))).toBe(true);
+    expect(harness.cursorListeners.size).toBe(0);
+  });
+
+  it("optional sound with an unavailable real client completes the same three silent visual loops", async () => {
+    const harness = createStartupHarness({ realSoundClient: true });
+    const coordinator = harness.adapters.createCoordinator({ ...showCommand("Soak3"), mode: "Soak3", soundRunRoot: "invalid-relative-root" });
+    await expect(coordinator.boot()).resolves.toEqual({ ready: true });
+    coordinator.handleRendererEvent({ schema: 1, type: "operator-action", action: "start" });
+    await settlePromises();
+    for (let loop = 0; loop < 3; loop++) {
+      for (const delta of [5001, 7001, 33001, 10001, 23001, 12001]) {
+        harness.timers.advanceBy(delta); await harness.timers.fireInterval(16); await settlePromises();
+      }
+    }
+    await expect(coordinator.completion).resolves.toMatchObject({ ok: true });
+    expect(coordinator.diagnostics().completedLoops).toBe(3);
+    expect(harness.agentCommands.filter(command => command.action.type === "reset")).toHaveLength(3);
+    expect(harness.soundClientsCreated()).toBe(1);
+    expect(harness.cursorListeners.size).toBe(0);
+  });
+
   it("binds renderer loss and window close to one surface lifetime", async () => {
     const harness = createStartupHarness();
     const coordinator = harness.adapters.createCoordinator(showCommand("Show"));
@@ -2292,7 +2414,7 @@ describe("real Task 9 show runtime adapters", () => {
       .filter(({ text }) => /\bfrom\s+["']node:net["']/u.test(text))
       .map(({ name }) => name)
       .sort();
-    expect(netImporters).toEqual(["bridge-server.ts", "run-lease.ts"]);
+    expect(netImporters).toEqual(["bridge-server.ts", "run-lease.ts", "show-sound-client.ts"]);
     const bridgeSource = sources.find(({ name }) => name === "bridge-server.ts")!.text;
     expect(bridgeSource).toContain('const LISTEN_HOST = "127.0.0.1"');
     const leaseSource = sources.find(({ name }) => name === "run-lease.ts")!.text;

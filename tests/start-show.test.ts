@@ -3732,6 +3732,18 @@ describe("offline show launcher and external watchdog", () => {
     }
   }, 15_000);
 
+  it.each(["external missing sound", 'bad"root', "bad\nroot"])("optional sound root %j cannot prevent visual launcher invocation", soundRoot => {
+    const fixture = makeLauncherFixture();
+    try {
+      const result = runLauncher(fixture, [...launcherArguments(fixture, "ValidateOnly"), "-SoundRunRoot", soundRoot], { controllerExit: 0 });
+      expect(result.status, output(result)).toBe(0);
+      const args = invocations(fixture)[0]!.arguments;
+      if (/["\r\n]/.test(soundRoot)) expect(args.some(arg => arg.startsWith("--sound-run-root="))).toBe(false);
+      else expect(args).toContain(`--sound-run-root=${soundRoot}`);
+      expect(existsSync(join(fixture.externalRoot, "control.json"))).toBe(false);
+    } finally { fixture.cleanup(); }
+  }, 20_000);
+
   it("allows DiagnosticConnected but forwards a non-accepting diagnostic policy", () => {
     const fixture = makeLauncherFixture();
     try {

@@ -35,6 +35,14 @@ function replaceFlag(arguments_: string[], name: string, value: string): string[
 }
 
 describe("Task 9 show command parser", () => {
+  it.each(["D:\\VirtualData\\JanVim-Exhibition-Rehearsals\\sound-one", "", "relative", 'bad"root', "bad\nroot"])(
+    "leaves optional sound root %j to audio-only validation",
+    (soundRunRoot) => {
+      expect(parseShowCommand([...validArguments(), `--sound-run-root=${soundRunRoot}`], repositoryRoot))
+        .toMatchObject({ mode: "Soak3", soundRunRoot });
+    },
+  );
+
   it("selects exactly one explicit G2, Task 9, or display-config command family", () => {
     expect(selectElectronCommandFamily(["--g2-mode=run"])).toBe("g2");
     expect(selectElectronCommandFamily(["--show-mode=soak3"])).toBe("show");

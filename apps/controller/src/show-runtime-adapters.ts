@@ -25,6 +25,7 @@ import {
   parseShowManifest,
   type AgentAck,
   type AgentCommand,
+  type AgentCursorObservation,
   type Cue,
   type RendererEvent,
   type RendererToControllerEvent,
@@ -37,7 +38,7 @@ import {
   type LogStorage,
   type RunLogStream,
 } from "./bounded-log.js";
-import { BridgeServer } from "./bridge-server.js";
+import { BridgeServer, type AgentCursorTiming } from "./bridge-server.js";
 import {
   createFullscreenWindowPlan,
   createSecondaryWindowPlan,
@@ -108,6 +109,7 @@ import {
 } from "./run-lease.js";
 import { RunTelemetry } from "./run-telemetry.js";
 import type { ShowCommand } from "./show-command.js";
+import { createShowSoundClient, type ShowSoundClient, type ShowSoundClientOptions } from "./show-sound-client.js";
 import type {
   RunShowCommand,
   ShowElectronCommandAdapters,
@@ -234,6 +236,7 @@ export interface ShowRuntimeAdapterHost
   secondaryEntryUrl?: string;
   bridgeHost?: string;
   logStorage?: LogStorage;
+  createSoundClient?(options: ShowSoundClientOptions): ShowSoundClient;
 }
 
 type ArtifactLock = z.infer<typeof artifactLockSchema>;
@@ -379,6 +382,16 @@ function createCoordinator(
   let startupNetworkPending = false;
   let activeRendererPid: number | undefined;
   let activeJanVimPid: number | undefined;
+  // One optional client belongs to the Show invocation, including recovery sessions.
+  const sound = command.soundRunRoot === undefined ? undefined :
+    (host.source.createSoundClient ?? createShowSoundClient)({
+      soundRunRoot: command.soundRunRoot,
+      runId: command.runId,
+      controllerRunId: command.controllerRunId,
+      nowMonotonic: host.nowMonotonic,
+      timers: host.timers,
+      diagnostic: reason => logger.writeJson("controller", { type: "sound-disabled", reason }),
+    });
 
   const requireInputs = (): ValidatedShowInputs => {
     if (inputs === undefined) throw new Error("show-inputs-not-validated");
@@ -393,6 +406,7 @@ function createCoordinator(
       const validation = await validateShowInputs(host, command);
       if (validation.outcome === "configuration-required") return validation;
       inputs = validation;
+      sound?.start();
       startupNetworkPending = true;
       for (const feature of ["formula", "image", "matrix"] as const) {
         if (!inputs.manifest.cues.some((cue) => cue.kind === feature)) {
@@ -479,6 +493,7 @@ function createCoordinator(
         inputs: current,
         paths,
         logger,
+        sound,
         onPid: (pid) => {
           activeJanVimPid = pid;
         },
@@ -556,11 +571,16 @@ function createCoordinator(
         signal,
       );
     },
-    flushLogs: async () => undefined,
+    flushLogs: async () => { sound?.stop("show-disposed"); },
     nextLoopId: (generationId, loopNumber) =>
       createShowLoopId(command.runId, generationId, loopNumber),
     nowMs: host.nowMonotonic,
-    log: (event) => logger.writeJson("controller", event),
+    log: (event) => {
+      // The first shutdown phase is synchronous, before waiting for startup/recovery.
+      // It also covers emergency shutdown before any session has been published.
+      if (event.type === "shutdown-phase") sound?.stop("show-shutdown");
+      logger.writeJson("controller", event);
+    },
   });
 
   return coordinator;
@@ -1279,6 +1299,7 @@ type ShowBrowserWindowAdapter = Omit<
 };
 
 interface ShowBridgeAdapter extends G2BridgeServerAdapter {
+  onCursor?(listener: (event: AgentCursorObservation, timing: AgentCursorTiming) => void): () => void;
   onAgentDisconnected(listener: () => void): () => void;
   diagnostics?(): {
     activeConnections: number;
@@ -1999,6 +2020,7 @@ class RuntimeShowSession implements ShowRunSession {
   private detachChildStreams: (() => void) | undefined;
   private finishChildStreams: (() => void) | undefined;
   private disposeBridgeDisconnect: (() => void) | undefined;
+  private disposeCursor: (() => void) | undefined;
 
   public constructor(
     private readonly options: {
@@ -2008,6 +2030,7 @@ class RuntimeShowSession implements ShowRunSession {
       inputs: ValidatedShowInputs;
       paths: ReturnType<typeof showRuntimePaths>;
       logger: RuntimeLogger;
+      sound?: ShowSoundClient;
       onPid(pid: number): void;
     },
   ) {
@@ -2088,6 +2111,7 @@ class RuntimeShowSession implements ShowRunSession {
         ) {
           return;
         }
+        this.options.sound?.stop("agent-disconnected");
         for (const listener of [...this.faultListeners]) {
           listener("agent-disconnected");
         }
@@ -2108,6 +2132,18 @@ class RuntimeShowSession implements ShowRunSession {
     this.bridgePort = address.port;
     this.options.logger.addSecret(token);
     bridgePublished = true;
+    if (this.options.sound !== undefined) {
+      try {
+        if (bridge.onCursor === undefined) this.options.sound.stop("cursor-observer-unavailable");
+        else this.disposeCursor = bridge.onCursor((event, timing) => {
+          if (this.bridge === bridge && this.isCurrentLifecycle(epoch) && !this.shutdownRequested) {
+            this.options.sound?.observe(event, timing);
+          }
+        });
+      } catch {
+        this.options.sound.stop("cursor-observer-unavailable");
+      }
+    }
   }
 
   public async launchJanVim(signal: AbortSignal): Promise<void> {
@@ -2121,6 +2157,9 @@ class RuntimeShowSession implements ShowRunSession {
     const baseEnvironment = privateChildEnvironment(
       this.options.host.baseEnvironment,
     );
+    if (this.options.command.soundRunRoot !== undefined) {
+      baseEnvironment.JANVIM_EXHIBITION_CURSOR_OBSERVER = "1";
+    }
     const launch = await launchJanVimProcess(
       {
         artifactLockPath: this.options.paths.artifactLock,
@@ -2306,6 +2345,7 @@ class RuntimeShowSession implements ShowRunSession {
   ): OneLoopRuntime {
     this.requireActive();
     let currentLoopId = loopId;
+    let loopStarted = false;
     const generationId = this.generationId;
     const editorCues = new Map(
       this.options.inputs.manifest.cues
@@ -2352,6 +2392,7 @@ class RuntimeShowSession implements ShowRunSession {
         },
         showReady: (nextLoopId) => {
           currentLoopId = nextLoopId;
+          if (loopStarted) this.options.sound?.beginLoop(generationId, nextLoopId);
         },
       },
       agent: {
@@ -2362,6 +2403,7 @@ class RuntimeShowSession implements ShowRunSession {
             acknowledgement.outcome === "failed" ||
             acknowledgement.outcome === "rejected"
           ) {
+            this.options.sound?.stop("critical-ack-failed");
             for (const listener of [...this.faultListeners]) {
               listener("critical-ack-failed");
             }
@@ -2385,7 +2427,10 @@ class RuntimeShowSession implements ShowRunSession {
       },
       generateLoopId: reserveNextLoopId,
     });
-    return new PreparedRuntime(runtime);
+    return new PreparedRuntime(runtime, () => {
+      loopStarted = true;
+      this.options.sound?.beginLoop(generationId, currentLoopId);
+    }, () => { this.options.sound?.reset(); });
   }
 
   public onFault(
@@ -2452,6 +2497,7 @@ class RuntimeShowSession implements ShowRunSession {
     retryLimit: 1,
   ): Promise<void> {
     this.requireActive();
+    this.options.sound?.stop("show-shutdown");
     this.shutdownRequested = true;
     const loopId = `${this.options.command.runId}-shutdown`;
     const cueId = `${loopId}-agent`;
@@ -2508,6 +2554,7 @@ class RuntimeShowSession implements ShowRunSession {
   }
 
   public async terminateExactJanVim(): Promise<void> {
+    this.options.sound?.stop("janvim-terminated");
     this.shutdownRequested = true;
     const child = this.child;
     const expectedStartedAtUtc = this.childStartedAtUtc;
@@ -2538,6 +2585,8 @@ class RuntimeShowSession implements ShowRunSession {
   }
 
   public async closeBridge(timeoutMs: 5_000): Promise<void> {
+    this.disposeCursor?.();
+    this.disposeCursor = undefined;
     const bridge = this.bridge;
     if (bridge === undefined) return;
     this.disposeBridgeDisconnect?.();
@@ -2547,9 +2596,12 @@ class RuntimeShowSession implements ShowRunSession {
   }
 
   public dispose(): void {
+    this.options.sound?.stop("session-disposed");
     if (this.disposed) return;
     this.disposed = true;
     this.lifecycleEpoch += 1;
+    this.disposeCursor?.();
+    this.disposeCursor = undefined;
     this.disposeBridgeDisconnect?.();
     this.disposeBridgeDisconnect = undefined;
     this.detachChildStreams?.();
@@ -2561,9 +2613,11 @@ class RuntimeShowSession implements ShowRunSession {
   }
 
   private async dispatch(command: AgentCommand): Promise<AgentAck> {
+    if (command.action.type === "prepare" || command.action.type === "reset") this.options.sound?.reset();
     try {
       return await this.requireBridge().dispatch(command);
     } catch (error) {
+      this.options.sound?.stop("agent-disconnected");
       for (const listener of [...this.faultListeners]) {
         listener("agent-disconnected");
       }
@@ -2617,6 +2671,7 @@ class RuntimeShowSession implements ShowRunSession {
   private observeChildExit(): void {
     if (this.childExited) return;
     this.childExited = true;
+    this.options.sound?.stop("janvim-exited");
     if (!this.shutdownRequested) {
       for (const listener of [...this.faultListeners]) listener("janvim-exited");
     }
@@ -2709,7 +2764,11 @@ class PreparedRuntime implements OneLoopRuntime {
   private preparation: Promise<boolean> | undefined;
   private lifecycleEpoch = 0;
 
-  public constructor(private readonly runtime: DeterministicShowLoop) {}
+  public constructor(
+    private readonly runtime: DeterministicShowLoop,
+    private readonly onStarted: () => void,
+    private readonly onStopped: () => void,
+  ) {}
 
   public get state(): DeterministicShowLoopState {
     return this.visibleState;
@@ -2734,6 +2793,7 @@ class PreparedRuntime implements OneLoopRuntime {
         this.visibleState = "safe-black";
         return false;
       }
+      this.onStarted();
       this.visibleState = this.runtime.state;
       return true;
     });
@@ -2762,6 +2822,7 @@ class PreparedRuntime implements OneLoopRuntime {
 
   public stop(): void {
     this.lifecycleEpoch += 1;
+    this.onStopped();
     this.runtime.stop();
     this.visibleState = "stopped";
   }
@@ -2779,6 +2840,7 @@ function privateChildEnvironment(
     "XDG_CONFIG_HOME",
     "XDG_DATA_HOME",
     "XDG_STATE_HOME",
+    "JANVIM_EXHIBITION_CURSOR_OBSERVER",
   ]);
   for (const name of Object.keys(environment)) {
     if (denied.has(name.toUpperCase())) delete environment[name];

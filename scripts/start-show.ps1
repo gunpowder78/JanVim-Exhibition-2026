@@ -16,7 +16,9 @@ param(
 
     [Parameter(Mandatory = $true)]
     [ValidateSet('OfflineRequired', 'DiagnosticConnected')]
-    [string]$NetworkPolicy
+    [string]$NetworkPolicy,
+
+    [string]$SoundRunRoot
 )
 
 $ErrorActionPreference = 'Stop'
@@ -3356,6 +3358,13 @@ while ($true) {
         "--controller-run-id=$controllerRunId"
         "--network-policy=$networkPolicyFlag"
     )
+    if ($PSBoundParameters.ContainsKey('SoundRunRoot')) {
+        if ($SoundRunRoot -match '["\r\n\x00]') {
+            Write-Warning 'Optional sound disabled: invalid argument.'
+        } else {
+            $electronArguments += "--sound-run-root=$SoundRunRoot"
+        }
+    }
     $electronCommandLineArguments = @($electronArguments | ForEach-Object {
         if ($_ -match '["\r\n]') {
             throw 'electron-argument-invalid'

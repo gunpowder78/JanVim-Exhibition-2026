@@ -165,6 +165,26 @@ describe("loopback bridge server", () => {
     expect(reader.lineCount).toBe(2);
   });
 
+  it("exports consumed sample age as local metadata without changing cursor frames or ACKs", async () => {
+    let now = 10_000;
+    const server = await startServer(() => now);
+    const received: Array<{ event: AgentCursorObservation; timing: unknown }> = [];
+    server.onCursor((event, timing) => { received.push({ event, timing }); });
+    const { socket, reader } = await connectAgent(server);
+    const command = moveCommand(); const pending = server.dispatch(command);
+    let settled = false; void pending.then(() => { settled = true; }, () => { settled = true; });
+    await reader.read(1);
+    now = 10_500;
+    await sendFrames(server, socket, reader, [JSON.stringify(cursor(command, { elapsedMs: 100 }))]);
+    expect(received).toEqual([{ event: cursor(command, { elapsedMs: 100 }), timing: { ageMs: 400 } }]);
+    expect(settled).toBe(false);
+    now = 10_625;
+    await sendFrames(server, socket, reader, [JSON.stringify(cursor(command, { seq: 2, elapsedMs: 725 }))]);
+    expect(received[1]).toEqual({ event: cursor(command, { seq: 2, elapsedMs: 725 }), timing: { ageMs: 0 } });
+    socket.write(`${JSON.stringify(appliedAck(command))}\n`);
+    await expect(pending).resolves.toEqual(appliedAck(command));
+  });
+
   it("drops malformed and oversized cursor frames and observer exceptions without losing ACKs", async () => {
     const server = await startServer(() => 100);
     let calls = 0;

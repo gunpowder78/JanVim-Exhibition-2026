@@ -37,6 +37,13 @@ export interface BridgeAddress {
   family: string;
 }
 
+// Local delivery metadata only; never added to the authenticated wire observation.
+export interface AgentCursorTiming {
+  readonly ageMs: number;
+}
+
+type CursorListener = (event: AgentCursorObservation, timing: AgentCursorTiming) => void;
+
 export interface BridgeDiagnostics {
   activeConnections: number;
   authenticatedConnections: number;
@@ -92,7 +99,7 @@ export class BridgeServer {
   private readonly readyWaiters = new Set<ReadyWaiter>();
   private readonly agentDisconnectListeners = new Set<AgentDisconnectRegistration>();
   private agentSocket?: Socket;
-  private cursorListener?: { listener: (event: AgentCursorObservation) => void; busy: boolean };
+  private cursorListener?: { listener: CursorListener; busy: boolean };
   private closing = false;
 
   public constructor(options: BridgeServerOptions) {
@@ -251,7 +258,7 @@ export class BridgeServer {
     };
   }
 
-  public onCursor(listener: (event: AgentCursorObservation) => void): () => void {
+  public onCursor(listener: CursorListener): () => void {
     if (this.closing) throw new Error("Bridge server is closing");
     if (this.cursorListener !== undefined) throw new Error("Bridge cursor listener capacity reached");
     const registration = { listener, busy: false };
@@ -426,7 +433,7 @@ export class BridgeServer {
     // No cue awaits the observer; even an accidentally async observer has one bounded slot.
     registration.busy = true;
     try {
-      void Promise.resolve(registration.listener(event)).then(
+      void Promise.resolve(registration.listener(event, { ageMs: Math.max(0, ageMs) })).then(
         () => { registration.busy = false; },
         () => { registration.busy = false; },
       );
