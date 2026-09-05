@@ -44,7 +44,9 @@ type AgentCursorObservation = {
   viewRow: number; viewCol: number; rows: number; cols: number;
 };
 // Export parseAgentCursorObservation(value: unknown): AgentCursorObservation.
-// BridgeServer.onCursor(listener: (event: AgentCursorObservation) => void): () => void.
+// Task 3 approved additive local metadata (wire/ACK unchanged):
+// export interface AgentCursorTiming { readonly ageMs: number }
+// BridgeServer.onCursor(listener: (event: AgentCursorObservation, timing: AgentCursorTiming) => void): () => void.
 ```
 
 IDs retain the existing command ID restrictions. Sequence is positive int32; row/cellCol are integers 0..1,000,000; viewport indices are nonnegative integers within rows/cols; rows/cols are integers 1..65,536. elapsedMs is finite 0..2,000 and measured from the current action's start, not a new show clock. Wire observation maximum is 1,024 UTF-8 bytes. Missing/extra fields and non-finite values reject observations.
@@ -132,7 +134,7 @@ Do not replace pluck SynthDefs, add flock simulation, change gain/device, or mod
 interface ShowSoundClient {
   start(): void; // bounded asynchronous connect; never awaited by cues
   beginLoop(generationId: number, loopId: string): void;
-  observe(event: AgentCursorObservation): void;
+  observe(event: AgentCursorObservation, timing?: AgentCursorTiming): void;
   reset(): void;
   stop(reason: string): void; // idempotent terminal request, bounded cleanup
 }
@@ -154,9 +156,9 @@ interface ShowSoundClient {
 
 **Files:** Create `sound/tests/real-cursor-chain.check.mjs` and `nvim/tests/real_cursor_fixture.lua`; create `docs/operations/2026-09-05-real-cursor-sound-handoff.md`; update `sound/README.md` and this plan's status/evidence. Add narrowly scoped integration fixes only with failing tests.
 
-- [ ] Write a failing chain test that starts actual Neovim headless with the candidate Lua, dispatches prepare/move/insert/reset via the production bridge, uses production sound-client + real-input listener + sender, and captures the production SC output silently. No user init, product source edits, global keyboard input, or fabricated cursor coordinates. A test utility may bundle the TS test entry with the existing toolchain; it is not a new production server. Keep actual Lua buffer APIs and telemetry through to the sound receiver.
-- [ ] Assert actual text/reset hash, actual observed logical coordinates, received pluck events, no simulated flock, no extra notes during stationary/reset intervals, and no notes after Stop. Use recorded samples to verify fade/silence, not only process exit. Run the controlled fixture with sound unavailable and prove the same text/ACK/reset completes. Record evidence as headless integration, not visual/human hearing acceptance.
-- [ ] Prepare ignored runtime/dependencies only in this candidate using existing locked runtime tooling; verify core/config hashes first. Do not copy or move a live private user root. Record exact versions and full-gate exit codes:
+- [x] Write a failing chain test that starts actual Neovim headless with the candidate Lua, dispatches prepare/move/insert/reset via the production bridge, uses production sound-client + real-input listener + sender, and captures the production SC output silently. No user init, product source edits, global keyboard input, or fabricated cursor coordinates. A test utility may bundle the TS test entry with the existing toolchain; it is not a new production server. Keep actual Lua buffer APIs and telemetry through to the sound receiver.
+- [x] Assert actual text/reset hash, actual observed logical coordinates, received pluck events, no simulated flock, no extra notes during stationary/reset intervals, and no notes after Stop. Use recorded samples to verify fade/silence, not only process exit. Run the controlled fixture with sound unavailable and prove the same text/ACK/reset completes. Record evidence as headless integration, not visual/human hearing acceptance.
+- [x] Prepare ignored runtime/dependencies only in this candidate using existing locked runtime tooling; verify core/config hashes first. Do not copy or move a live private user root. Record exact versions and full-gate exit codes:
 ```powershell
 npm ci
 npm run typecheck
@@ -170,13 +172,22 @@ git diff --check
 Get-FileHash -Algorithm SHA256 -LiteralPath apps/controller/dist/main/electron-main.js
 ```
 Long-running gates stream to unique external evidence files with finite process deadlines; preserve failures rather than overwriting them. No audible output during autonomous validation.
-- [ ] Add a short operator handoff with complete file-based commands: sound window starts `-Input RealCursor -Listen -Duration 900`, then the existing candidate show launcher with the exact new SoundRunRoot. Use fresh show evidence roots and the operator-confirmed current display map; never assume a historical display ID is still current. User listens to real long-text motion, one reset, then Stop; only after they confirm is hearing acceptance marked passed.
-- [ ] Final task report distinguishes automated passes from pending manual observation, records candidate source/bundle/core identities and unchanged fallback, and points to the separate 《见山》 coordination memo. Commit locally; do not push/merge or relabel old acceptance.
+- [x] Add a short operator handoff with complete file-based commands: sound window starts `-Input RealCursor -Listen -Duration 900`, then the existing candidate show launcher with the exact new SoundRunRoot. Use fresh show evidence roots and the operator-confirmed current display map; never assume a historical display ID is still current. User listens to real long-text motion, one reset, then Stop; only after they confirm is hearing acceptance marked passed.
+- [x] Final task report distinguishes automated passes from pending manual observation, records candidate source/bundle/core identities and unchanged fallback, and points to the separate 《见山》 coordination memo. Commit locally; do not push/merge or relabel old acceptance.
 
 ## Plan self-review and execution record
 
-- Task 1 → Task 3: identical AgentCursorObservation and `onCursor` contract; optional observation is additive, not an ACK replacement.
+- Task 1 → Task 3: AgentCursorObservation wire contract unchanged; approved local `AgentCursorTiming {ageMs}` is the second `onCursor`/`observe` argument. Real Bridge metadata must be forwarded; missing metadata is dropped, never replaced with fabricated age0. This supersedes the original event-only signature and remains additive, not an ACK replacement.
 - Task 2 → Task 3: exact attach/heartbeat/cursor/stop control frames above; one sound run and one owner, one OSC sender.
 - Task 1/2/3 → Task 4: actual Lua, production bridge/client/sender chain is required; mock movement does not satisfy acceptance.
 - Disabled audio, reset continuation, conservative fault stop, optional standalone startup, no birds, bounded resources and baseline preservation each have an implementation task plus verification.
-- Initial candidate preparation already completed `npm ci` and 33 existing sound checks. Full application/sound gates and all new-feature tests remain required at integrated head.
+- Initial candidate preparation completed `npm ci` and 33 existing sound checks; this was only the original baseline, superseded for integrated automated verification by the Task4 record below.
+
+### Task4 execution evidence — 2026-09-05
+
+- Task4 implemented against `565dc6dea120abe27c8624096e1cb4e23fc55959` on the isolated `feat/sound-real-cursor` candidate. Task1–3 implementation/review completion is recorded in the parent SDD ledger; original task checklists above are retained as their historical requirements.
+- Actual NVIM v0.10.1 + immutable JanVim runtime + candidate Lua observer → production Bridge/client/listener/sender/SC proved headlessly. Each audio-available/unavailable scenario completed12 identical text/ACK/reset results and13 real observations. Chinese cell2 versus ACK byte3, stationary/reset no new notes, resumed loop plucks, Stop latch and recorded post-fade silence all passed. Real `AgentCursorTiming {ageMs}` is forwarded, preserving the frozen source-age/nonregressing-stream behavior.
+- Final gates: npm ci/typecheck/build/lint/Lua/runtime all exit0; application57 files/1128 tests pass; complete sound69/69 pass,0 skipped. Existing lint does not cover TypeScript. Actual bundle540860 bytes, SHA-256 `2a166eff47428efe3759b07c26cddcc92b615a4b1bf61d440e6674d8baa97f70`; launcher/smoke constant maintenance had existing mismatch RED23/24, rebuilt consistency GREEN24/24. JanVim core/lock unchanged.
+- First overlapping complete gates were application1127/1128 (one5s path-test timeout) and sound62/69 (seven READY/ownership/PowerShell inspection failures). Unchanged serial focused checks then passed, followed by serial complete sound69/69 and application1128/1128. No timeout, ownership, watchdog, cap or assertion was weakened. Original failures remain evidence; serial success supports workload contention, not arbitrary-load stability. Earlier Task2 full sound62/68 remains a failed aggregate, followed by its own14/14 fixture fix.
+- Exact commands, all stdout/stderr and exit/deadline receipts: `D:/VirtualData/JanVim-Exhibition-Rehearsals/task4-gates-20260905-565dc6d`; detailed report `.superpowers/sdd/2026-09-05-real-cursor-sound/task-4-report.md`. Final serial chain roots are `sound-chain-production-d164e883-cc0f-4d29-a299-d5c9cafb096a` and `sound-chain-unavailable-evidence-f8b7c43c-4d89-4b1e-9f35-26a73eec6038` under the external rehearsal parent.
+- Local handoff: `docs/operations/2026-09-05-real-cursor-sound-handoff.md`, with saved ignored `operator.ps1`; explicit PRE-SHOW `songfeng-source`, new user-confirmed GUI display map, exact saved SoundRunRoot, manual `-Input RealCursor -Listen -Duration 900`. No profile selection/GUI/Listen during automated gates. Hearing, current dual-projector three loops, offline and forced-restart physical acceptance remain pending. Separate frozen Jianshan memo is unchanged; no bird code, push, merge or milestone relabeling.

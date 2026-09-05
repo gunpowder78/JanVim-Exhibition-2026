@@ -1,4 +1,9 @@
-# 声音最小闭环（模拟输入、隔离候选）
+# 声音闭环（模拟基线与真实光标候选）
+
+`feat/sound-real-cursor` 已接入可选真实逻辑光标输入；人工联动听音仍待确认。
+本地操作、PRE-SHOW 的 `songfeng-source` 长文选择、全新显示映射与运行目录见
+[真实光标候选交接](../docs/operations/2026-09-05-real-cursor-sound-handoff.md)。
+以下历史试听结果及 `sound-minimal-loop` 命令属于保全的模拟基线。
 
 状态：N1 退出淡出缺口已修正；2026-09-05 基本试听及混合段提前 Stop 人工试听均通过。
 现有可展览视觉版本不依赖此目录。
@@ -13,7 +18,10 @@ N1 修正：语言进程在 READY 后消失、但没有发送 `SOUND_COMPLETE` �
 ## 当前范围
 
 模拟光标特征 → 五声音阶拨弦；模拟鸟群特征 → 风声；共同停止淡出。
-真实 OSC、真实 SuperCollider 合成，但目前没有真实 JanVim / 《见山》输入。
+真实 OSC、真实 SuperCollider 合成。真实光标候选使用 `-Input RealCursor`，
+默认仍为无声；显式 `-Listen` 才启声。声音 READY 后由展演的可选 `-SoundRunRoot`
+绑定一个控制器，经实际 Lua 观察器、生产 Bridge/client/listener/sender 接入，
+不运行模拟时间线。未实现真实《见山》鸟群输入。
 鲸鸣、经典电子音色、宇宙洪荒声场和热噪等方向只做备忘，不在此次实现中。
 
 无需打开 SuperCollider IDE，也不需要新增依赖、ASIO 驱动、全局插件或 GUI。
@@ -106,3 +114,16 @@ UDP 报文防火墙；本原型不面向任意外部发送者或恶意本机进�
 
 详细实施证据与后续真实输入边界见
 [交接记录](../docs/operations/2026-09-05-sound-minimal-loop-handoff.md)。
+
+真实链路聚焦验证（先运行 `npm run typecheck` 产生现有 dist/src 模块）：
+
+```powershell
+node --test --test-concurrency=1 sound/tests/real-cursor-chain.check.mjs
+```
+
+该测试启动 NVIM v0.10.1，无 user init，加载不可变 runtime 的真实 JanVim Lua 模块，
+执行真实 buffer actions 并转发 Bridge 的 `AgentCursorTiming {ageMs}`；不制造坐标或假 age0。
+生产 SC 无硬件输出，读取已录制的 Stop 前非零及淡出后静音区间；比较声音可用/不可用时
+同一段文本、ACK、reset。静止/reset 检查无新增音符，允许尾音自然衰减。
+定点坐标、限频/过期等假时钟测试继续由既有 Lua/client/real-input suites 覆盖。
+本测试不替代双投影、现场离线/恢复或人工听音验收。
