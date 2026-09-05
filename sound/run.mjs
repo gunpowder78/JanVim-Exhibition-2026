@@ -356,12 +356,16 @@ async function killCreatedTree(child) {
   if (child.exitCode === null && child.signalCode === null) child.kill();
 }
 
+// In direct mode child/processExit refer to the requested executable (including
+// the IPC sender). In owned mode they refer to the lifetime host; identity is
+// the requested language process, captured by its native creation handle.
 export async function spawnManagedChild({
   args,
   cwd,
   env = process.env,
   executable,
   ipc = false,
+  ownedLifetime = false,
   maxLineBytes = 8192,
   maxLogBytes = 1024 * 1024,
   maxStreamBytes = 2 * 1024 * 1024,
@@ -371,13 +375,19 @@ export async function spawnManagedChild({
   stdoutPath,
   timeoutMs,
 }) {
+  if (ownedLifetime && (process.platform !== "win32" || ipc)) {
+    throw new Error("owned lifetime requires Windows without IPC");
+  }
   const stdoutLog = boundedLog(stdoutPath, maxLogBytes);
   const stderrLog = boundedLog(stderrPath, maxLogBytes);
-  const child = spawn(executable, args, {
+  const launchArgs = ownedLifetime ? ["-NoProfile", "-NonInteractive", "-File",
+    path.join(path.dirname(RUN_FILE), "owned-process.ps1"), "-LaunchBase64",
+    Buffer.from(JSON.stringify({ executable, args, cwd, timeoutMs })).toString("base64")] : args;
+  const child = spawn(ownedLifetime ? "pwsh.exe" : executable, launchArgs, {
     cwd,
     env,
     shell: false,
-    stdio: ipc ? ["ignore", "pipe", "pipe", "ipc"] : ["ignore", "pipe", "pipe"],
+    stdio: ipc ? ["ignore", "pipe", "pipe", "ipc"] : [ownedLifetime ? "pipe" : "ignore", "pipe", "pipe"],
     windowsHide: true,
   });
   const processExit = new Promise((resolve) => {
@@ -400,10 +410,21 @@ export async function spawnManagedChild({
   let stdoutBytes = 0;
   let stderrBytes = 0;
   let terminating = null;
+  let identity = null;
   const pending = { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
 
   const terminate = () => {
-    if (!terminating) terminating = killCreatedTree(child);
+    if (!terminating) terminating = ownedLifetime
+      ? (async () => {
+        child.stdin.destroy();
+        try {
+          await withTimeout(processExit, 4500, new Error("owned launcher graceful cleanup timed out"));
+        } catch {
+          child.kill(); // closing the launcher's Job handle reclaims its exact tree
+          await withTimeout(processExit, 1500, new Error("owned launcher cleanup timed out"));
+        }
+      })()
+      : killCreatedTree(child);
     return terminating;
   };
   const setLimit = (reason) => {
@@ -412,6 +433,7 @@ export async function spawnManagedChild({
       void terminate();
     }
   };
+  if (ownedLifetime) child.stdin.on("error", () => setLimit("lifetimePipe"));
 
   function consume(name, chunk, callback, log) {
     log.write(chunk);
@@ -437,6 +459,11 @@ export async function spawnManagedChild({
       const line = pending[name].toString("utf8").replace(/\r$/, "");
       pending[name] = Buffer.alloc(0);
       try {
+        if (ownedLifetime && name === "stdout" && line.startsWith("SOUND_OWNED_PROCESS ")) {
+          identity = JSON.parse(line.slice("SOUND_OWNED_PROCESS ".length));
+        }
+        if (ownedLifetime && name === "stdout" && line.startsWith("SOUND_READY ")) child.stdin.write("R");
+        if (ownedLifetime && name === "stdout" && line.startsWith("SOUND_COMPLETE ")) child.stdin.write("C");
         callback(line, performance.now());
       } catch {
         setLimit(`${name}Callback`);
@@ -475,7 +502,7 @@ export async function spawnManagedChild({
     });
   });
 
-  return { child, completion, processExit, terminate };
+  return { child, completion, processExit, terminate, get identity() { return identity; } };
 }
 
 const LANGUAGE_PORT = 57140;
@@ -620,7 +647,7 @@ async function runPowerShellJson(script, timeoutMs = 3000) {
   return output === "" ? null : JSON.parse(output);
 }
 
-async function inspectReadyProcesses(languagePid, readyServerPid) {
+async function inspectReadyProcesses(languagePid, readyServerPid, hostPid) {
   const result = await runPowerShellJson(`
     $ErrorActionPreference = 'Stop'
     function Identity([int]$id) {
@@ -650,15 +677,19 @@ async function inspectReadyProcesses(languagePid, readyServerPid) {
       ancestry = $ancestry
       ready = Identity ${readyServerPid}
       language = Identity ${languagePid}
+      host = Identity ${hostPid}
     } | ConvertTo-Json -Depth 6 -Compress
   `, 5000);
 
-  if (!result.owner || !result.ready || !result.language) {
+  if (!result.owner || !result.ready || !result.language || !result.host) {
     throw new Error("service process inspection returned an incomplete identity");
   }
   const ancestry = Array.isArray(result.ancestry) ? result.ancestry : [result.ancestry];
   if (
     result.language.pid !== languagePid ||
+    result.language.parentPid !== hostPid ||
+    result.host.pid !== hostPid ||
+    result.host.parentPid !== process.pid ||
     result.ready.pid !== readyServerPid ||
     !ancestry.some((identity) => identity.pid === readyServerPid) ||
     !ancestry.some((identity) => identity.pid === languagePid) ||
@@ -666,7 +697,7 @@ async function inspectReadyProcesses(languagePid, readyServerPid) {
   ) {
     throw new Error("private endpoint ancestry does not match the newly launched service tree");
   }
-  return { ancestry, language: result.language, owner: result.owner, ready: result.ready };
+  return { ancestry, language: result.language, owner: result.owner, ready: result.ready, host: result.host };
 }
 
 async function inspectProcess(pid) {
@@ -683,7 +714,7 @@ async function inspectProcess(pid) {
   `);
 }
 
-async function reclaimPinnedProcess(identity) {
+async function reclaimPinnedProcess(identity, timeoutMs = 4000) {
   const result = await runPowerShellJson(`
     $ErrorActionPreference = 'Stop'
     $p = Get-CimInstance Win32_Process -Filter "ProcessId = ${identity.pid}"
@@ -706,7 +737,7 @@ async function reclaimPinnedProcess(identity) {
       throw 'pinned process did not stop inside the bound'
     }
     [pscustomobject]@{ status = 'killed' } | ConvertTo-Json -Compress
-  `, 4000);
+  `, timeoutMs);
   return result.status;
 }
 
@@ -937,7 +968,7 @@ async function runInternalSender() {
 }
 
 function parseServiceRecord(line) {
-  const match = /^(SOUND_READY|SOUND_EVENT|SOUND_STATS|SOUND_COMPLETE) (\{.*\})$/.exec(line);
+  const match = /^(SOUND_READY|SOUND_EVENT|SOUND_STATS|SOUND_COMPLETE|SOUND_CAPTURE) (\{.*\})$/.exec(line);
   if (!match) return null;
   return { body: JSON.parse(match[2]), type: match[1] };
 }
@@ -1015,6 +1046,7 @@ async function runSupervisor(options) {
       args: serviceArgs,
       cwd: path.dirname(RUN_FILE),
       executable: SCLANG,
+      ownedLifetime: true,
       maxLineBytes: 8192,
       maxLogBytes: 1024 * 1024,
       maxStreamBytes: 2 * 1024 * 1024,
@@ -1068,8 +1100,8 @@ async function runSupervisor(options) {
           );
         }),
       ]),
-      35000,
-      new SupervisorError("serviceReadyTimeout", "service did not emit READY in 35 seconds"),
+      Math.max(1, 30000 - (performance.now() - startedPerformance)),
+      new SupervisorError("serviceReadyTimeout", "service did not emit READY within 30 seconds"),
     );
     if (
       readyRecord.languagePort !== LANGUAGE_PORT ||
@@ -1082,7 +1114,8 @@ async function runSupervisor(options) {
       throw new SupervisorError("invalidReady", "service READY fields did not match the invocation");
     }
 
-    pinned = await inspectReadyProcesses(service.child.pid, readyRecord.serverPid);
+    if (!service.identity) throw new Error("missing creation-time language identity");
+    pinned = await inspectReadyProcesses(service.identity.pid, readyRecord.serverPid, service.child.pid);
     const inspectionCompletedEpochMilliseconds = performance.timeOrigin + performance.now();
     sender = await spawnManagedChild({
       args: [RUN_FILE, "--internal-sender"],
@@ -1132,6 +1165,8 @@ async function runSupervisor(options) {
       capturePath: capturePath || null,
       duration: options.duration,
       language: pinned.language,
+      languageCreation: service.identity,
+      serviceHost: pinned.host,
       mode: options.mode,
       nodeExecutable: process.execPath,
       nodePid: process.pid,
@@ -1154,14 +1189,16 @@ async function runSupervisor(options) {
         runRoot,
         nodePid: process.pid,
         senderPid: sender.child.pid,
-        sclangPid: service.child.pid,
+        sclangPid: service.identity.pid,
+        serviceHostPid: service.child.pid,
         serverPid: pinned.owner.pid,
       })}\n`,
     );
     if (stopRequested) sendIpc(sender.child, { type: "stop" });
 
     const roles = [
-      { pid: service.child.pid, role: "sclang" },
+      { pid: service.identity.pid, role: "sclang" },
+      { pid: service.child.pid, role: "serviceHost" },
       { pid: sender.child.pid, role: "sender" },
       { pid: pinned.owner.pid, role: "scsynth" },
     ];
@@ -1218,8 +1255,9 @@ async function runSupervisor(options) {
     clearTimeout(senderFallbackTimer);
 
     if (serviceComplete === null) {
-      await delay(3600);
-      orphanReclaimed = (await reclaimPinnedProcess(pinned.owner)) === "killed";
+      // The launcher's Job already covers language loss from process creation.
+      await reclaimPinnedProcess(pinned.owner);
+      orphanReclaimed = true;
     } else {
       const endpointStatus = await reclaimPinnedProcess(pinned.owner);
       if (endpointStatus === "killed") {
@@ -1250,12 +1288,29 @@ async function runSupervisor(options) {
   } catch (error) {
     if (resourceTimer) clearInterval(resourceTimer);
     clearTimeout(senderFallbackTimer);
-    if (sender) await sender.terminate();
-    if (service) await service.terminate();
+    const cleanupDeadline = performance.now() + 8000;
+    const cleanupErrors = [];
+    const cleanupResults = await Promise.allSettled([
+      sender?.terminate(), service?.terminate(),
+    ]);
+    for (const result of cleanupResults) {
+      if (result.status === "rejected") cleanupErrors.push(result.reason.message);
+    }
+    try {
+      if (pinned) {
+        orphanReclaimed = (await reclaimPinnedProcess(pinned.owner,
+          Math.max(1, Math.min(4000, cleanupDeadline - performance.now())))) === "killed" || serviceComplete === null;
+      }
+      if (service) await withTimeout(service.completion,
+        Math.max(1, cleanupDeadline - performance.now()), new Error("service streams did not close"));
+    } catch (cleanupError) {
+      cleanupErrors.push(cleanupError.message);
+    }
     summary = {
       actualDurationSeconds: (performance.now() - startedPerformance) / 1000,
       capturePath: capturePath || null,
       clean: false,
+      ...(cleanupErrors.length ? { cleanupErrors } : {}),
       mode: options.mode,
       orphanReclaimed,
       reason: error.reason ?? "supervisorFailure",

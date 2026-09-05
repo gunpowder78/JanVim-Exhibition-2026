@@ -64,7 +64,7 @@
             Out.ar(0, In.ar(inBus, 2) * hardware.clip(0, 1));
         }),
 
-        SynthDef(\jvCapture, { |inBus = 18, bufnum = 0|
+        SynthDef(\jvCapture, { |inBus = 18, bufnum = 0, mark = 0|
             RecordBuf.ar(
                 In.ar(inBus, 2),
                 bufnum,
@@ -76,6 +76,11 @@
                 trigger: 1,
                 doneAction: Done.freeSelf
             );
+            // Same node/block lifetime as RecordBuf. Report a conservative prefix
+            // of acquired frames; the allocation's zero padding is not evidence.
+            SendReply.kr(Impulse.kr(20), "/jv/capture-position", [
+                (Sweep.kr(0, SampleRate.ir) - BlockSize.ir).max(0), mark
+            ]);
         })
     ]
 }

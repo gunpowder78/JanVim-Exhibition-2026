@@ -4,13 +4,14 @@ import { spawn } from "node:child_process";
 import console from "node:console";
 import dgram from "node:dgram";
 import { randomUUID } from "node:crypto";
-import { readFile, writeFile } from "node:fs/promises";
+import { cp, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 import process from "node:process";
 import test from "node:test";
 import { clearTimeout, setTimeout } from "node:timers";
 import { analyzeWav } from "./analyze-wav.mjs";
+import { recordedStop, requireRecordedSilence } from "./recorded-stop.mjs";
 
 const REHEARSAL_PARENT = "D:/VirtualData/JanVim-Exhibition-Rehearsals";
 const REPOSITORY_ROOT = path.resolve(".");
@@ -120,9 +121,9 @@ async function waitForCompletion(handle, timeoutMs = 30000) {
   }
 }
 
-function startNodeRun(runRoot, duration) {
+function startNodeRun(runRoot, duration, runScript = RUN_SCRIPT) {
   return spawnCaptured(process.execPath, [
-    RUN_SCRIPT,
+    runScript,
     "--mode",
     "silent",
     "--duration",
@@ -237,14 +238,33 @@ async function runFreshProof(label) {
   }
 }
 
-test("silent sender reaches policy and SynthDefs, rejects probes, and fades to silence", async () => {
+for (const omitMixerStop of [false, true]) {
+test(omitMixerStop
+  ? "omitted service mixer stop fails recorded silence before voice cleanup despite unused padding"
+  : "silent sender reaches policy and SynthDefs, rejects probes, and fades to silence", async () => {
   const observedStart = performance.now();
   const runRoot = freshRunRoot("integration");
-  const handle = startNodeRun(runRoot, 9);
+  let runScript = RUN_SCRIPT;
+  if (omitMixerStop) {
+    const variantRoot = freshRunRoot("omitted-stop-source");
+    await cp(path.join(REPOSITORY_ROOT, "sound"), variantRoot, { recursive: true, errorOnExist: true });
+    const servicePath = path.join(variantRoot, "service.scd");
+    const source = await readFile(servicePath, "utf8");
+    const stopStatement = "mixer !? { mixer.set(\\stop, 1) };";
+    assert.equal(source.split(stopStatement).length, 2, "mutation must omit exactly the service mixer stop");
+    await writeFile(servicePath, source.replace(stopStatement, "/* TEST NEGATIVE CONTROL: mixer stop omitted */"));
+    runScript = path.join(variantRoot, "run.mjs");
+  }
+  const handle = startNodeRun(runRoot, 9, runScript);
   try {
     const ready = await waitForJson(path.join(runRoot, "ready.json"), handle);
     assert.equal(ready.mode, "silent");
     assert.equal(ready.service.hardwareOutput, false);
+    assert.equal(ready.languageCreation.pid, ready.language.pid);
+    assert.ok(ready.language.executable.toLowerCase().endsWith("\\sclang.exe"));
+    assert.ok(ready.serviceHost, "owned lifetime host must have an explicit READY identity");
+    assert.equal(ready.language.parentPid, ready.serviceHost.pid);
+    assert.ok(ready.serviceHost.executable.toLowerCase().endsWith("\\pwsh.exe"));
     assert.ok(ready.receiver.capturedBeforeInspection);
     const startEvent = await waitForEvent(
       runRoot,
@@ -344,6 +364,12 @@ test("silent sender reaches policy and SynthDefs, rejects probes, and fades to s
     const summary = await waitForJson(path.join(runRoot, "summary.json"), handle);
     assert.equal(summary.clean, true);
     assert.ok(summary.resource.maxPlucks > 0 && summary.resource.maxPlucks <= 8);
+    assert.ok(summary.resource.maxWorkingSet.serviceHost > 0, "owned lifetime host must be sampled");
+    const resourceSamples = (await readFile(path.join(runRoot, "resources.ndjson"), "utf8"))
+      .trim().split(/\r?\n/).map((line) => JSON.parse(line));
+    assert.ok(resourceSamples.some(({children}) =>
+      children.some(({pid, role}) => role === "sclang" && pid === ready.language.pid) &&
+      children.some(({pid, role}) => role === "serviceHost" && pid === ready.serviceHost.pid)));
 
     const events = await readEvents(runRoot);
     const postStopStats = events.filter(
@@ -383,26 +409,36 @@ test("silent sender reaches policy and SynthDefs, rejects probes, and fades to s
     assert.equal(await readFile(path.join(runRoot, "sender.stderr.log"), "utf8"), "");
 
     const wav = await readFile(ready.capturePath);
-    const unsegmented = analyzeWav(wav);
     const toFrame = (seconds) => Math.round(seconds * 48000) / 48000;
     const startOffset = startEvent.elapsedSeconds - readyEvent.elapsedSeconds;
-    const stopOffset = stopEvent.elapsedSeconds - readyEvent.elapsedSeconds;
-    const postStopStart = toFrame(unsegmented.duration - 0.15);
-    assert.ok(postStopStart >= stopOffset + 1.5, "post-stop segment begins before the fade ends");
+    const captureEvidence = events.find((event) => event.type === "SOUND_CAPTURE")?.body;
+    const stopCapture = recordedStop(wav, captureEvidence);
+    if (omitMixerStop) {
+      assert.throws(() => requireRecordedSilence(stopCapture), /recorded post-fade audio is not silent/);
+      assert.ok(stopCapture.segments[1].peak > 0.001);
+      assert.ok(captureEvidence.allocatedFrames - captureEvidence.recordedFrames > 4800,
+        "negative control must retain unused allocation padding");
+      const padding = analyzeWav(wav, [{name: "padding",
+        start: (captureEvidence.allocatedFrames - 4800) / 48000,
+        end: captureEvidence.allocatedFrames / 48000}]);
+      assert.equal(padding.segments[0].peak, 0);
+    } else {
+      requireRecordedSilence(stopCapture);
+    }
     const capture = analyzeWav(wav, [
       { name: "pluck", start: toFrame(startOffset + 0.5), end: toFrame(startOffset + 2.75) },
       { name: "wind", start: toFrame(startOffset + 3.4), end: toFrame(startOffset + 5.75) },
       { name: "mixed", start: toFrame(startOffset + 6.4), end: toFrame(startOffset + 8.75) },
       {
         name: "postStop",
-        start: postStopStart,
-        end: toFrame(unsegmented.duration - 0.05),
+        start: stopCapture.segments[1].start,
+        end: stopCapture.segments[1].end,
       },
     ]);
     for (const name of ["pluck", "wind", "mixed"]) {
       assert.ok(capture.segments.find((segment) => segment.name === name).peak > 0.001, name);
     }
-    assert.equal(capture.segments.find((segment) => segment.name === "postStop").peak, 0);
+    if (!omitMixerStop) assert.equal(capture.segments.find((segment) => segment.name === "postStop").peak, 0);
     const pcm16Ceiling = 0.2 + 1 / 32768;
     assert.ok(
       capture.channels.every(
@@ -426,6 +462,10 @@ test("silent sender reaches policy and SynthDefs, rejects probes, and fades to s
           "actual UDP cursor between stopped-policy and final-cleanup statistics",
         stopReason: stopEvent.body.reason,
         postStopPeak: capture.segments.find((segment) => segment.name === "postStop").peak,
+        captureEvidence,
+        stopCapture,
+        omitMixerStop,
+        runScript,
         startAcceptedAt: startEvent.elapsedSeconds,
         stopAcceptedAt: stopEvent.elapsedSeconds,
       }, null, 2)}\n`,
@@ -435,25 +475,29 @@ test("silent sender reaches policy and SynthDefs, rejects probes, and fades to s
     await terminateOwnedTree(handle);
   }
 });
+}
 
 test("language interruption reclaims the pinned orphan and permits a fresh launch", async () => {
   const runRoot = freshRunRoot("language-interrupt");
   const handle = startNodeRun(runRoot, 30);
   try {
     await waitForJson(path.join(runRoot, "ready.json"), handle);
-    const language = await pinDirectChild(
-      handle.child.pid,
-      (candidate) => candidate.executable?.toLowerCase().endsWith("\\sclang.exe"),
-    );
+    const language = (await waitForJson(path.join(runRoot, "ready.json"), handle)).language;
+    const interruptedAt = performance.now();
     await stopPinnedProcess(language);
+    await assert.rejects(assertPortsReusable(), /EADDRINUSE/,
+      "post-READY interruption must retain the audio process through its DSP lease/fade");
     const result = await waitForCompletion(handle, 20000);
     assert.notEqual(result.exitCode, 0, result.stdout + result.stderr);
     const summary = await waitForJson(path.join(runRoot, "summary.json"), handle);
     assert.equal(summary.reason, "languageExit");
     assert.equal(summary.orphanReclaimed, true);
+    const cleanupMilliseconds = performance.now() - interruptedAt;
+    assert.ok(cleanupMilliseconds >= 3500 && cleanupMilliseconds < 8000,
+      `post-READY interruption cleanup took ${cleanupMilliseconds} ms`);
     await assertPortsReusable();
     const freshRunRoot = await runFreshProof("after-language-interrupt");
-    console.log(`LANGUAGE_INTERRUPTION_EVIDENCE ${JSON.stringify({ freshRunRoot, language, runRoot })}`);
+    console.log(`LANGUAGE_INTERRUPTION_EVIDENCE ${JSON.stringify({ cleanupMilliseconds, freshRunRoot, language, runRoot })}`);
   } finally {
     await terminateOwnedTree(handle);
   }

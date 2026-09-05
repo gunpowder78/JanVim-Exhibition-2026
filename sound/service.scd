@@ -11,6 +11,7 @@ var cleanupRoutine, cleanupTimeout, captureWriteDoneResponder, captureWriteFailu
 var checker, statsTask, durationTask, serverFailureResponder, oscKeys = Array.new;
 var voiceBus, finalBus, mixer, outputSynth, captureBuffer, captureSynth, windSynth;
 var captureFrames, pluckNodes = Array.new, livePlucks = 0, maxPlucks = 0, heartbeatControl = 0;
+var capturePositionResponder, recordedFrames = 0, stopFrame = 0;
 var pidIsRunning, cancelEndpointCheck, inspectEndpoint, stopTasks, removeResponders;
 var ownsServerProcess, ownsServer, finishWithoutServer, terminateOwnedProcess, finishService;
 var abortStartup, beginStop, installOsc, processAction, setupApplication;
@@ -245,6 +246,7 @@ finishWithoutServer = { |reason, clean, exitCode|
         phase = \complete;
         stopTasks.value;
         removeResponders.value;
+        capturePositionResponder !? { capturePositionResponder.free; capturePositionResponder = nil };
         if(server.statusWatcher.aliveThread.notNil) { server.stopAliveThread };
         server.remove;
         if(readyEmitted) { emitStats.value };
@@ -283,6 +285,14 @@ finishService = { |reason, initiallyClean|
                 endpointOwned = true;
                 cleanupRoutine = Routine {
                     var captureWriteResult = \notRequested;
+                    if(captureBuffer.notNil) {
+                        emit.value("SOUND_CAPTURE", "{" ++
+                            "\"allocatedFrames\":" ++ captureFrames.asString ++ "," ++
+                            "\"recordedFrames\":" ++ recordedFrames.asString ++ "," ++
+                            "\"stopFrame\":" ++ stopFrame.asString ++ "," ++
+                            "\"voicesFreedAfterFrame\":" ++ recordedFrames.asString ++ "}"
+                        );
+                    };
                     captureSynth !? { captureSynth.free };
                     outputSynth !? { outputSynth.free };
                     pluckNodes.do { |node| node.free };
@@ -378,8 +388,10 @@ beginStop = { |reason, clean = true|
         emitStats.value;
         stopTasks.value;
         removeResponders.value;
+        captureSynth !? { captureSynth.set(\mark, 1) };
         mixer !? { mixer.set(\stop, 1) };
-        AppClock.sched(1.5, {
+        // Keep sources and recorder alive through the measured post-fade window.
+        AppClock.sched(1.85, {
             finishService.value(reason, clean);
             nil
         });
@@ -510,6 +522,12 @@ setupApplication = {
                                 \inBus, finalBus.index,
                                 \bufnum, captureBuffer.bufnum
                             ]);
+                            capturePositionResponder = OSCFunc({ |msg|
+                                recordedFrames = msg.at(3).asInteger.clip(0, captureFrames);
+                                if(msg.at(4) == 1 and: { stopFrame == 0 }) {
+                                    stopFrame = recordedFrames;
+                                };
+                            }, "/jv/capture-position", server.addr, argTemplate: [captureSynth.nodeID]);
                             captureSynth.onFree { { captureSynth = nil }.defer };
                         } {
                             abortStartup.value("ownershipLost");
