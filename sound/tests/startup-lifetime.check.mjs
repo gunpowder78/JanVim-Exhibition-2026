@@ -9,6 +9,7 @@ import process from "node:process";
 import test from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
+import { createContext, Script } from "node:vm";
 import { prepareRunRoot, spawnManagedChild } from "../run.mjs";
 
 async function bounded(promise, milliseconds = 5000) {
@@ -28,6 +29,114 @@ async function reusable(port) {
     });
   } finally { socket.close(); }
 }
+
+// Execute the actual production-generated PowerShell, replacing only OS reads
+// with a finite identity graph. No SC, actual endpoint lookup or process kill.
+async function inspectFixture(t, scenario = "owned") {
+  const source = await readFile(path.resolve("sound/run.mjs"), "utf8");
+  const functions = source.match(/async function inspectReadyProcesses\([\s\S]+?(?=async function inspectProcess)/g);
+  assert.equal(functions?.length, 1, "one actual production inspection function");
+  let queries;
+  const runRoot = await prepareRunRoot(null);
+  const context = createContext({ SERVER_PORT: 57141, path, process: { pid: 100 },
+    runPowerShellJson: async (script, timeoutMs) => {
+      assert.equal(timeoutMs, 5000, "production inspection keeps its finite deadline");
+      const prelude = `
+        $ErrorActionPreference = 'Stop'
+        $scenario = '${scenario}'
+        $queries = [Collections.Generic.List[int]]::new()
+        $hits = @{}
+        function Get-NetUDPEndpoint {
+          param([int]$LocalPort)
+          if ($LocalPort -ne 57141) { throw 'wrong fixture endpoint' }
+          if ($scenario -eq 'no-owner') { return }
+          [pscustomobject]@{ LocalAddress='127.0.0.1'; OwningProcess=101 }
+          if ($scenario -eq 'two-owners') { [pscustomobject]@{ LocalAddress='127.0.0.1'; OwningProcess=999 } }
+        }
+        function Get-CimInstance {
+          param([string]$ClassName, [string]$Filter)
+          if ($ClassName -ne 'Win32_Process' -or $Filter -notmatch '^ProcessId = ([0-9]+)$') { throw 'unexpected fixture query' }
+          $identityPid = [int]$Matches[1]
+          $queries.Add($identityPid)
+          if ($queries.Count -gt 35) { throw 'inspection exceeded depth plus three fresh role queries' }
+          $hits[$identityPid] = 1 + $hits[$identityPid]
+          $parents = @{101=102;102=103;103=104;104=100;100=900}
+          if ($scenario -eq 'missing-ready-ancestor') { $parents[101]=103 }
+          if ($scenario -eq 'missing-language-ancestor') { $parents[102]=104 }
+          if ($scenario -eq 'depth-cap') { $parents[101]=900 }
+          $parentPid = if ($parents.ContainsKey($identityPid)) { $parents[$identityPid] }
+            elseif ($identityPid -ge 900 -and $identityPid -lt 930) { $identityPid+1 } else { 0 }
+          $row = [pscustomobject]@{ ProcessId=$identityPid; ParentProcessId=$parentPid;
+            CreationDate=([DateTime]::SpecifyKind([DateTime]'2026-09-05', [DateTimeKind]::Utc).AddMilliseconds($hits[$identityPid]));
+            ExecutablePath=if ($identityPid -eq 101) { 'C:/owned/scsynth.exe' } else { 'C:/owned/fixture.exe' } }
+          if ($scenario -eq 'wrong-owner-executable' -and $identityPid -eq 101) { $row.ExecutablePath='C:/foreign/node.exe' }
+          if ($hits[$identityPid] -gt 1) {
+            if (($scenario -eq 'missing-ready' -and $identityPid -eq 102) -or
+                ($scenario -eq 'missing-language' -and $identityPid -eq 103) -or
+                ($scenario -eq 'missing-host' -and $identityPid -eq 104)) { return }
+            if (($scenario -eq 'wrong-ready-pid' -and $identityPid -eq 102) -or
+                ($scenario -eq 'wrong-language-pid' -and $identityPid -eq 103) -or
+                ($scenario -eq 'wrong-host-pid' -and $identityPid -eq 104)) { $row.ProcessId=999 }
+            if (($scenario -eq 'wrong-language-parent' -and $identityPid -eq 103) -or
+                ($scenario -eq 'wrong-host-parent' -and $identityPid -eq 104)) { $row.ParentProcessId=999 }
+          }
+          $row
+        }
+      `;
+      const invocation = `${prelude}
+        try {
+          $inspection = & { ${script} }
+          [ordered]@{inspection=($inspection | ConvertFrom-Json); queries=@($queries)} | ConvertTo-Json -Depth 8 -Compress
+        } catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }
+      `;
+      const child = await spawnManagedChild({ executable: "pwsh.exe", args: ["-NoProfile", "-NonInteractive", "-Command", invocation],
+        cwd: runRoot, timeoutMs, maxLogBytes: 32768, maxStreamBytes: 32768,
+        stdoutPath: path.join(runRoot, "inspection.stdout.log"), stderrPath: path.join(runRoot, "inspection.stderr.log") });
+      t.after(() => child.terminate());
+      const result = await bounded(child.completion, 6500);
+      assert.equal(result.limitReason, null, "fake deterministic inspection must not hit a watchdog");
+      const stderr = await readFile(path.join(runRoot, "inspection.stderr.log"), "utf8");
+      if (result.exitCode !== 0) throw new Error(stderr.trim());
+      assert.equal(stderr, "");
+      const parsed = JSON.parse(await readFile(path.join(runRoot, "inspection.stdout.log"), "utf8"));
+      queries = parsed.queries;
+      return parsed.inspection;
+    },
+  });
+  new Script(functions[0]).runInContext(context, { timeout: 1000 });
+  return { run: () => new Script("inspectReadyProcesses(103, 102, 104)").runInContext(context, { timeout: 1000 }),
+    queries: () => queries, runRoot };
+}
+
+test("production startup ancestry stops at owned host while fresh role identities remain independent", async t => {
+  const fixture = await inspectFixture(t);
+  const result = await fixture.run();
+  assert.deepEqual(fixture.queries(), [101, 102, 103, 104, 102, 103, 104],
+    "external ancestors must never be queried after the known owned service host");
+  assert.deepEqual(result.ancestry.map(row => row.pid), [101, 102, 103, 104]);
+  for (const [role, index] of [["ready", 1], ["language", 2], ["host", 3]]) {
+    assert.notEqual(result[role].started, result.ancestry[index].started, `${role} must be queried afresh`);
+  }
+  t.diagnostic(`production PowerShell inspection evidence: ${fixture.runRoot}`);
+});
+
+test("production startup ancestry preserves every negative ownership admission", async t => {
+  for (const scenario of ["missing-ready", "missing-language", "missing-host", "wrong-ready-pid",
+    "wrong-language-pid", "wrong-host-pid", "wrong-language-parent", "wrong-host-parent",
+    "missing-ready-ancestor", "missing-language-ancestor", "wrong-owner-executable", "no-owner", "two-owners"]) {
+    await t.test(scenario, async sub => {
+      const fixture = await inspectFixture(sub, scenario);
+      await assert.rejects(fixture.run(), /incomplete identity|private endpoint ancestry|private endpoint does not have one owner/);
+    });
+  }
+});
+
+test("production startup ancestry still caps a foreign chain at 32 before rejecting it", async t => {
+  const fixture = await inspectFixture(t, "depth-cap");
+  await assert.rejects(fixture.run(), /private endpoint ancestry/);
+  assert.equal(fixture.queries().length, 35, "32 ancestors plus three separate fresh role queries");
+  assert.deepEqual(fixture.queries().slice(-3), [102, 103, 104]);
+});
 
 for (const [exitCode, complete] of [[0, false], [1, false], [0, true]]) {
   test(`post-READY exit ${exitCode} ${complete ? "with COMPLETE avoids extra grace" : "without COMPLETE preserves DSP fade grace"}`, async () => {

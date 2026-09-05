@@ -22,6 +22,7 @@ function parseFlatJson(bytes) {
   try {
     const text = utf8.decode(bytes);
     if (text.includes("\r") || text.includes("\n")) return null;
+    // eslint-disable-next-line no-control-regex -- JSON strings must reject unescaped U+0000..U+001F.
     const string = /"(?:[^"\\\x00-\x1f]|\\(?:["\\/bfnrt]|u[0-9a-fA-F]{4}))*"/y;
     const primitive = /(?:-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?|true|false|null)/y;
     let index = 0;

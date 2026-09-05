@@ -214,11 +214,21 @@ test("silent flock-v1 service gates wind independently, bounds flaps, and preser
     await until(service.winds, (nodes) => nodes.length === 2, "second releasing pair");
     await service.mute();
     for (let index = 0; index < 6; index += 1) {
+      const before = await service.winds();
       await service.live();
       const nodes = await service.winds();
       assert.ok(nodes.length <= 2, "rapid flaps cannot allocate a third wind");
-      assert.ok(nodes.every(({ controls }) => controls.gate === 0), "full seats drop live without replay");
+      // An async query can outlast the existing 0.3s release. Assert the drop
+      // only when both releasing identities survived across this live/query.
+      if (before.length === 2 && before.every(({ controls }) => controls.gate === 0) && nodes.length === 2 &&
+          nodes.every(({ id }) => before.some(node => node.id === id))) {
+        assert.ok(nodes.every(({ controls }) => controls.gate === 0), "full seats drop live without replay");
+      }
       await service.mute();
+      await until(service.winds, (remaining) => {
+        assert.ok(remaining.length <= 2, "mute cannot exceed two wind nodes");
+        return remaining.every(({ controls }) => controls.gate === 0);
+      }, "every flap mutes all remaining winds");
     }
     await until(service.winds, (nodes) => nodes.length === 0, "releasing seats reclaimed", 550);
     await delay(70);

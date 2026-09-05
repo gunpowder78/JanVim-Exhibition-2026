@@ -170,6 +170,7 @@ const runIsolatedSclang = ({
     `$result = Invoke-JanVimIsolatedSclang -ScriptPath ${psLiteral(scriptPath)} -ScriptArguments @(${scriptArguments.map(psLiteral).join(",")}) -UdpPort 57140 -TimeoutMilliseconds ${timeoutMilliseconds} -KillTimeoutMilliseconds 2000 -MaxCaptureCharacters 131072 -WorkingDirectory ${psLiteral(paths.testsDirectory)}`,
     "if ($result.StdOut) { Write-Output $result.StdOut.TrimEnd() }",
     "if ($result.StdErr) { [Console]::Error.WriteLine($result.StdErr.TrimEnd()) }",
+    "Write-Output ('SCLANG_RUN_RESULT ' + ([ordered]@{ TimedOut=$result.TimedOut; CaptureIncomplete=$result.CaptureIncomplete; KillDeadlineExceeded=$result.KillDeadlineExceeded; StdOutTruncated=$result.StdOutTruncated; StdErrTruncated=$result.StdErrTruncated; ExitCode=$result.ExitCode } | ConvertTo-Json -Compress))",
     "if ($result.TimedOut) { throw 'isolated sclang exceeded its deadline' }",
     "if ($result.KillDeadlineExceeded -or $result.CaptureIncomplete) { throw 'isolated sclang cleanup exceeded its bound' }",
     "if ($result.StdOutTruncated -or $result.StdErrTruncated) { throw 'isolated sclang output exceeded its bound' }",
@@ -614,6 +615,47 @@ test("reports a capture write failure as an unclean service failure", async () =
   );
 });
 
+// Shared with the deterministic sensitivity check: the startup guard does not
+// relax Stop-to-exit acceptance, and a killed/incompletely captured run cannot pass.
+const requireForcedCleanup = (result, fakeEvents, completedAtMilliseconds) => {
+  const cleanupStarted = fakeEvents.find(({ event }) => event === "cleanup-started");
+  const cleanupMilliseconds = completedAtMilliseconds - cleanupStarted?.atMilliseconds;
+  assert.ok(cleanupStarted, `fake server never observed the stop fade\nevents: ${JSON.stringify(fakeEvents)}`);
+  assert.ok(
+    cleanupMilliseconds < 7800,
+    `cleanup took ${cleanupMilliseconds} ms from stop request to process exit`,
+  );
+  assert.ok(Number.isInteger(result.status), "wrapper must have an actual exit code");
+  assert.notEqual(result.status, 0);
+  assert.equal(result.signal, null);
+  assert.deepEqual(parseRecords(result.stdout, "SCLANG_RUN_RESULT"), [{
+    TimedOut: false, CaptureIncomplete: false, KillDeadlineExceeded: false,
+    StdOutTruncated: false, StdErrTruncated: false, ExitCode: result.status,
+  }], "actual launcher metadata must show complete capture without watchdog termination");
+  assert.deepEqual(parseRecords(result.stdout, "SOUND_COMPLETE"), [
+    { reason: "duration", clean: false },
+  ]);
+  return cleanupMilliseconds;
+};
+
+test("forced cleanup oracle rejects over-bound cleanup and incomplete launcher results without SC", () => {
+  const metadata = { TimedOut: false, CaptureIncomplete: false, KillDeadlineExceeded: false,
+    StdOutTruncated: false, StdErrTruncated: false, ExitCode: 1 };
+  const complete = 'SOUND_COMPLETE {"reason":"duration","clean":false}\n';
+  const result = (overrides = {}, completion = complete) => ({ status: 1, signal: null,
+    stdout: `${completion}SCLANG_RUN_RESULT ${JSON.stringify({ ...metadata, ...overrides })}\n` });
+  const events = [{ event: "cleanup-started", atMilliseconds: 1000 }];
+  assert.equal(requireForcedCleanup(result(), events, 8799), 7799);
+  for (const milliseconds of [7800, 7801, 15000]) {
+    assert.throws(() => requireForcedCleanup(result(), events, 1000 + milliseconds), /cleanup took/);
+  }
+  for (const flag of ["TimedOut", "CaptureIncomplete", "KillDeadlineExceeded", "StdOutTruncated", "StdErrTruncated"]) {
+    assert.throws(() => requireForcedCleanup(result({ [flag]: true }), events, 8799), /actual launcher metadata/);
+  }
+  assert.throws(() => requireForcedCleanup(result({ ExitCode: null }), events, 8799), /actual launcher metadata/);
+  assert.throws(() => requireForcedCleanup(result({}, ""), events, 8799));
+});
+
 test("finishes forced cleanup with margin inside the eight-second deadline", async () => {
   const { testsDirectory } = soundPaths();
   const rehearsalDirectory = await freshRehearsalDirectory("sound-cleanup-bound-");
@@ -623,7 +665,8 @@ test("finishes forced cleanup with margin inside the eight-second deadline", asy
   const result = await runIsolatedSclang({
     scriptPath: join(testsDirectory, "service-fake-server.scd"),
     scriptArguments: ["55555555555555555555555555555555", "silent", "1", ""],
-    timeoutMilliseconds: 12000,
+    // Separate finite startup allowance; actual Stop-to-exit must still be <7800ms.
+    timeoutMilliseconds: 15000,
     environment: {
       JANVIM_SOUND_FAKE_MODE: "cleanup-hang",
       JANVIM_SOUND_FAKE_LOG: fakeLogPath,
@@ -637,19 +680,14 @@ test("finishes forced cleanup with margin inside the eight-second deadline", asy
     .map((line) => JSON.parse(line));
   const cleanupStarted = fakeEvents.find(({ event }) => event === "cleanup-started");
   const cleanupMilliseconds = completedAtMilliseconds - cleanupStarted?.atMilliseconds;
-
-  assert.ok(cleanupStarted, `fake server never observed the stop fade\nevents: ${JSON.stringify(fakeEvents)}`);
-  assert.ok(
-    cleanupMilliseconds < 7800,
-    `cleanup took ${cleanupMilliseconds} ms from stop request to process exit`,
-  );
-  assert.notEqual(result.status, 0);
-  assert.deepEqual(parseRecords(result.stdout, "SOUND_COMPLETE"), [
-    { reason: "duration", clean: false },
-  ]);
+  const resultPath = join(rehearsalDirectory, "cleanup-result.json");
+  const launcherResults = parseRecords(result.stdout, "SCLANG_RUN_RESULT");
+  await writeFile(resultPath, JSON.stringify({ result, launcherResults, fakeEvents,
+    completedAtMilliseconds, cleanupMilliseconds }, null, 2), "utf8");
   console.log(
-    `CLEANUP_BOUND_EVIDENCE ${JSON.stringify({ rehearsalDirectory, fakeLogPath, cleanupMilliseconds })}`,
+    `CLEANUP_BOUND_EVIDENCE ${JSON.stringify({ rehearsalDirectory, fakeLogPath, resultPath, cleanupMilliseconds, launcherResults })}`,
   );
+  requireForcedCleanup(result, fakeEvents, completedAtMilliseconds);
 });
 
 test("rejects invalid CLI arguments before probing the private server port", async () => {

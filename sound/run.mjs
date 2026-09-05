@@ -836,6 +836,8 @@ async function inspectReadyProcesses(languagePid, readyServerPid, hostPid) {
       $identity = Identity $cursor
       if ($null -eq $identity) { break }
       $ancestry += $identity
+      # The owned host is the boundary; fresh role queries below still verify admission.
+      if ($cursor -eq ${hostPid}) { break }
       $cursor = $identity.parentPid
     }
     [pscustomobject]@{
