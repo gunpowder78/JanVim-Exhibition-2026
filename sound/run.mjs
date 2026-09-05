@@ -159,6 +159,33 @@ export async function startControlServer(runRoot, onStop) {
   const sockets = new Set();
   let accepted = false;
   let receipt;
+  let closePromise;
+  let persistence = Promise.resolve();
+  let persistenceError = null;
+
+  const closeListener = () => {
+    if (closePromise) return closePromise;
+    if (!server.listening) return Promise.resolve();
+    closePromise = new Promise((resolve) => server.close(resolve));
+    return closePromise;
+  };
+  const closeOwned = async () => {
+    for (const socket of sockets) socket.destroy();
+    await closeListener();
+  };
+  const persistReceipt = () => {
+    persistence = persistence.then(async () => {
+      try {
+        await writeFile(path.join(runRoot, "control.json"), `${JSON.stringify(receipt)}\n`, {
+          encoding: "utf8",
+          flag: "w",
+        });
+      } catch (error) {
+        if (persistenceError === null) persistenceError = error;
+      }
+    });
+    return persistence;
+  };
 
   const server = net.createServer((socket) => {
     if (sockets.size >= 8 || accepted) {
@@ -197,13 +224,10 @@ export async function startControlServer(runRoot, onStop) {
       }
       accepted = true;
       receipt = { ...receipt, active: false };
-      void writeFile(path.join(runRoot, "control.json"), `${JSON.stringify(receipt)}\n`, {
-        encoding: "utf8",
-        flag: "w",
-      });
+      void persistReceipt();
       onStop();
       socket.end('{"ok":true}\n');
-      server.close();
+      void closeListener();
     });
     socket.on("close", () => sockets.delete(socket));
     socket.on("error", () => {});
@@ -222,17 +246,29 @@ export async function startControlServer(runRoot, onStop) {
     token,
     version: 1,
   };
-  await writeFile(path.join(runRoot, "control.json"), `${JSON.stringify(receipt)}\n`, {
-    encoding: "utf8",
-    flag: "wx",
-  });
+  try {
+    await writeFile(path.join(runRoot, "control.json"), `${JSON.stringify(receipt)}\n`, {
+      encoding: "utf8",
+      flag: "wx",
+    });
+  } catch (error) {
+    await closeOwned();
+    throw new Error("failed to persist initial control receipt", { cause: error });
+  }
 
   return {
+    get persistenceError() {
+      return persistenceError;
+    },
     receipt,
     async close() {
-      for (const socket of sockets) socket.destroy();
-      if (!server.listening) return;
-      await new Promise((resolve) => server.close(resolve));
+      await closeOwned();
+      await persistence;
+    },
+    async persistInactive() {
+      receipt = { ...receipt, active: false };
+      await persistReceipt();
+      return persistenceError === null;
     },
   };
 }
@@ -448,6 +484,7 @@ const SCLANG = "C:/Program Files/SuperCollider-3.14.1/sclang.exe";
 const CLASS_LIBRARY = "C:/Program Files/SuperCollider-3.14.1/SCClassLibrary";
 const MAX_EVENT_LOG_BYTES = 4 * 1024 * 1024;
 const MAX_RESOURCE_LOG_BYTES = 2 * 1024 * 1024;
+const STOP_DEADLINE_MILLISECONDS = 300;
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
 async function withTimeout(promise, timeoutMs, error) {
@@ -480,6 +517,8 @@ class SupervisorError extends Error {
     this.reason = reason;
   }
 }
+
+class StopDeadlineError extends Error {}
 
 function jsonLog(filePath, maximumBytes) {
   const output = boundedLog(filePath, maximumBytes);
@@ -690,10 +729,26 @@ async function workingSets(roles) {
   });
 }
 
-async function sendUdp(socket, packet) {
-  await new Promise((resolve, reject) => {
+async function sendUdp(socket, packet, deadline) {
+  if (deadline !== undefined && performance.now() >= deadline) return false;
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let timeout;
+    const finish = (error, sent) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      if (error) reject(error);
+      else resolve(sent);
+    };
+    if (deadline !== undefined) {
+      timeout = setTimeout(
+        () => finish(null, false),
+        Math.max(1, deadline - performance.now()),
+      );
+    }
     socket.send(packet, SERVER_PORT - 1, "127.0.0.1", (error) =>
-      error ? reject(error) : resolve(),
+      finish(error, !error),
     );
   });
 }
@@ -740,15 +795,23 @@ async function runInternalSender() {
   let sequence = 0;
   let stopping = false;
 
-  const requestTimestamp = () =>
+  const requestTimestamp = (deadline = performance.now() + 1000) =>
     new Promise((resolve, reject) => {
+      if (performance.now() >= deadline) {
+        reject(new StopDeadlineError("sender deadline expired before clock request"));
+        return;
+      }
       const requestId = ++clockRequestId;
       const timeout = setTimeout(() => {
         clockReplies.delete(requestId);
-        reject(new Error("supervisor clock request timed out"));
-      }, 1000);
+        reject(new StopDeadlineError("supervisor clock request timed out"));
+      }, Math.max(1, deadline - performance.now()));
       clockReplies.set(requestId, (value) => {
         clearTimeout(timeout);
+        if (performance.now() >= deadline) {
+          reject(new StopDeadlineError("supervisor clock reply missed sender deadline"));
+          return;
+        }
         resolve(value);
       });
       try {
@@ -764,8 +827,11 @@ async function runInternalSender() {
         reject(error);
       }
     });
-  const packetFor = async (event) => {
-    const sentAt = await requestTimestamp();
+  const packetFor = async (event, deadline) => {
+    const sentAt = await requestTimestamp(deadline);
+    if (deadline !== undefined && performance.now() >= deadline) {
+      throw new StopDeadlineError("sender deadline expired before packet encoding");
+    }
     const common = [
       { type: "s", value: config.session },
       { type: "i", value: ++sequence },
@@ -798,24 +864,37 @@ async function runInternalSender() {
   const report = (value) => {
     sendIpc(process, value);
   };
-  const sendEvent = async (event) => {
-    const encoded = await packetFor(event);
-    await sendUdp(socket, encoded.packet);
-    return encoded;
+  const sendEvent = async (event, deadline) => {
+    const encoded = await packetFor(event, deadline);
+    const sent = await sendUdp(socket, encoded.packet, deadline);
+    return sent ? encoded : null;
   };
   const finishStop = async (trigger) => {
     if (stopping) return;
     stopping = true;
     let attempts = 0;
     const firstAttempt = performance.now();
-    while (attempts < 3 && !stopAcknowledged) {
+    const deadline = firstAttempt + STOP_DEADLINE_MILLISECONDS;
+    while (attempts < 3 && !stopAcknowledged && performance.now() < deadline) {
+      let sent;
+      try {
+        sent = await sendEvent({ kind: "stop" }, deadline);
+      } catch (error) {
+        if (error instanceof StopDeadlineError) break;
+        throw error;
+      }
+      if (sent === null) break;
       attempts += 1;
-      const sent = await sendEvent({ kind: "stop" });
       report({ kind: "stop", sentAt: sent.sentAt, seq: sent.seq, type: "packet" });
       if (stopAcknowledged || attempts === 3) break;
-      await delay(100);
+      const remaining = deadline - performance.now();
+      if (remaining <= 0) break;
+      await delay(Math.min(100, remaining));
     }
-    const attemptWindowMilliseconds = performance.now() - firstAttempt;
+    const attemptWindowMilliseconds = Math.min(
+      STOP_DEADLINE_MILLISECONDS,
+      performance.now() - firstAttempt,
+    );
     socket.close();
     await finishInternalSender({
       attemptWindowMilliseconds,
@@ -1194,10 +1273,15 @@ async function runSupervisor(options) {
     process.removeListener("SIGTERM", signalHandler);
     if (control) {
       await control.close();
-      await writeJson(path.join(runRoot, "control.json"), {
-        ...control.receipt,
-        active: false,
-      });
+      await control.persistInactive();
+      if (control.persistenceError) {
+        summary.clean = false;
+        summary.controlPersistenceError = {
+          code: control.persistenceError.code ?? null,
+          message: control.persistenceError.message,
+        };
+        record("supervisor", "controlPersistenceError", summary.controlPersistenceError);
+      }
     }
     const eventState = events.close();
     const resourceState = resources.close();

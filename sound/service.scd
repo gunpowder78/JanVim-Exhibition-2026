@@ -1,7 +1,7 @@
 (
 var argv, session, mode, durationText, duration, capturePath, hardwareOutput, argumentError;
 var finiteFloat, validSession, validDurationText, jsonString, emit;
-var emitReady, emitEvent, emitStats, emitComplete, completeEmitted = false;
+var emitReady, emitEvent, emitStats, emitComplete, completeEmitted = false, readyEmitted = false;
 var soundRoot, policyFactory, policy, synthFactory, definitions;
 var options, server, serverPort = 57141, launchedPid, preflightId, preflightResponder;
 var endpointHelperPath, endpointOwned = false, endpointCheckPid;
@@ -45,6 +45,7 @@ jsonString = { |value|
 
 emit = { |prefix, body| (prefix ++ " " ++ body).postln };
 emitReady = {
+    readyEmitted = true;
     emit.value("SOUND_READY", "{" ++
         "\"clock\":" ++ Main.elapsedTime.asString ++ "," ++
         "\"languagePort\":" ++ NetAddr.langPort.asString ++ "," ++
@@ -246,6 +247,7 @@ finishWithoutServer = { |reason, clean, exitCode|
         removeResponders.value;
         if(server.statusWatcher.aliveThread.notNil) { server.stopAliveThread };
         server.remove;
+        if(readyEmitted) { emitStats.value };
         emitComplete.value(reason, clean);
         AppClock.sched(0.05, { exitCode.exit; nil });
     };
@@ -373,6 +375,7 @@ beginStop = { |reason, clean = true|
     if(phase == \ready) {
         phase = \stopping;
         emitEvent.value("stop", reason);
+        emitStats.value;
         stopTasks.value;
         removeResponders.value;
         mixer !? { mixer.set(\stop, 1) };

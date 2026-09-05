@@ -3,9 +3,12 @@ import { spawn } from "node:child_process";
 import dgram from "node:dgram";
 import { mkdir, readFile, rm, stat } from "node:fs/promises";
 import path from "node:path";
+import { performance } from "node:perf_hooks";
 import process from "node:process";
 import test from "node:test";
 import { clearTimeout, setTimeout } from "node:timers";
+import { setTimeout as delay } from "node:timers/promises";
+import { pathToFileURL } from "node:url";
 import { randomUUID } from "node:crypto";
 
 const REHEARSAL_PARENT = "D:/VirtualData/JanVim-Exhibition-Rehearsals";
@@ -19,7 +22,11 @@ const runProcess = (executable, args, options = {}) =>
     });
     let stdout = "";
     let stderr = "";
-    const timeout = setTimeout(() => child.kill(), options.timeoutMs ?? 15000);
+    let timedOut = false;
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      child.kill();
+    }, options.timeoutMs ?? 15000);
     child.stdout.on("data", (chunk) => {
       stdout = (stdout + chunk).slice(-16384);
     });
@@ -29,7 +36,7 @@ const runProcess = (executable, args, options = {}) =>
     child.once("error", reject);
     child.once("close", (exitCode, signal) => {
       clearTimeout(timeout);
-      resolve({ exitCode, signal, stderr, stdout });
+      resolve({ exitCode, signal, stderr, stdout, timedOut });
     });
   });
 
@@ -110,6 +117,67 @@ test("fake-clock timeline skips missed cues instead of bursting after a stall", 
   assert.deepEqual(timeline.due(9), []);
 });
 
+test("delayed stop clocks and no acknowledgment cannot outlive the 300 ms send deadline", async (t) => {
+  const receiver = dgram.createSocket({ type: "udp4", reuseAddr: false });
+  await new Promise((resolve, reject) => {
+    receiver.once("error", reject);
+    receiver.bind({ address: "127.0.0.1", exclusive: true, port: 57140 }, resolve);
+  });
+  t.after(() => receiver.close());
+
+  const child = spawn(process.execPath, [path.resolve("sound/run.mjs"), "--internal-sender"], {
+    cwd: path.resolve("."),
+    stdio: ["ignore", "pipe", "pipe", "ipc"],
+    windowsHide: true,
+  });
+  t.after(() => {
+    if (child.exitCode === null && child.signalCode === null) child.kill();
+  });
+
+  const datagrams = [];
+  const stopReports = [];
+  let stopping = false;
+  let stopClockRequests = 0;
+  let stopStarted;
+  const finished = new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error("sender did not finish")), 2500);
+    child.once("error", reject);
+    child.on("message", (message) => {
+      if (message.type === "clock") {
+        const wait = stopping ? (stopClockRequests++ === 0 ? 150 : 350) : 0;
+        setTimeout(() => {
+          if (child.connected) {
+            child.send({ requestId: message.requestId, type: "clock", value: 1 });
+          }
+        }, wait);
+      } else if (message.type === "packet" && message.kind === "stop") {
+        stopReports.push(message);
+      } else if (message.type === "finished") {
+        clearTimeout(timeout);
+        resolve({ message, receivedAt: performance.now() });
+      }
+    });
+  });
+  receiver.on("message", (packet) => {
+    datagrams.push({ packet, receivedAt: performance.now() });
+    if (datagrams.length === 1) {
+      child.send({ type: "ackStart" });
+      stopping = true;
+      stopStarted = performance.now();
+      child.send({ type: "stop" });
+    }
+  });
+  child.send({ duration: 30, session: "0123456789abcdef0123456789abcdef", type: "initialize" });
+
+  const result = await finished;
+  assert.ok(result.message.attemptWindowMilliseconds <= 300, result.message);
+  assert.ok(result.receivedAt - stopStarted < 450, result);
+  assert.equal(stopReports.length, 1);
+  const datagramsAtFinish = datagrams.length;
+  await delay(450);
+  assert.equal(datagrams.length, datagramsAtFinish, "a delayed clock reply sent a late packet");
+});
+
 test("control listener rejects a wrong token and closes after the exact stop", async (t) => {
   const { prepareRunRoot, requestStop, sendControlRequest, startControlServer } =
     await import("../run.mjs");
@@ -128,6 +196,53 @@ test("control listener rejects a wrong token and closes after the exact stop", a
   assert.equal(stops, 0);
   assert.equal(await requestStop(runRoot), true);
   assert.equal(stops, 1);
+  await assert.rejects(() => sendControlRequest(control.receipt), /connect|closed|refused/i);
+});
+
+test("initial control receipt failure closes the locally acquired listener", async (t) => {
+  const { prepareRunRoot } = await import("../run.mjs");
+  const runRoot = await prepareRunRoot(null);
+  t.after(() => rm(runRoot, { recursive: true, force: true }));
+  await mkdir(path.join(runRoot, "control.json"));
+  const moduleUrl = pathToFileURL(path.resolve("sound/run.mjs")).href;
+  const script = `
+    const { startControlServer } = await import(${JSON.stringify(moduleUrl)});
+    try {
+      await startControlServer(${JSON.stringify(runRoot)}, () => {});
+      process.exitCode = 2;
+    } catch {
+      process.stdout.write("INITIAL_RECEIPT_FAILURE_HANDLED\\n");
+    }
+  `;
+
+  const result = await runProcess(process.execPath, ["--input-type=module", "-e", script], {
+    cwd: path.resolve("."),
+    timeoutMs: 1000,
+  });
+
+  assert.equal(result.timedOut, false, result);
+  assert.equal(result.exitCode, 0, result.stderr);
+  assert.equal(result.stdout, "INITIAL_RECEIPT_FAILURE_HANDLED\n");
+});
+
+test("accepted-stop receipt failure is tracked without escaping control cleanup", async (t) => {
+  const { prepareRunRoot, sendControlRequest, startControlServer } =
+    await import("../run.mjs");
+  const runRoot = await prepareRunRoot(null);
+  t.after(() => rm(runRoot, { recursive: true, force: true }));
+  let stops = 0;
+  const control = await startControlServer(runRoot, () => {
+    stops += 1;
+  });
+  t.after(() => control.close());
+  const receiptPath = path.join(runRoot, "control.json");
+  await rm(receiptPath);
+  await mkdir(receiptPath);
+
+  assert.equal(await sendControlRequest(control.receipt), true);
+  await control.close();
+  assert.equal(stops, 1);
+  assert.ok(control.persistenceError instanceof Error);
   await assert.rejects(() => sendControlRequest(control.receipt), /connect|closed|refused/i);
 });
 

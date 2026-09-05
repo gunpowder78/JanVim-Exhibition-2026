@@ -297,11 +297,35 @@ test("silent sender reaches policy and SynthDefs, rejects probes, and fades to s
     );
     assert.ok(statsEvent.body.maxPlucks <= 8);
 
+    await waitForEvent(
+      runRoot,
+      handle,
+      (event) =>
+        event.source === "sender" &&
+        event.type === "cue" &&
+        event.body.elapsed >= 6.25 &&
+        event.body.kinds.includes("cursor") &&
+        event.body.kinds.includes("flock"),
+      5000,
+    );
+    const stopRequest = spawnCaptured(process.execPath, [RUN_SCRIPT, "--stop", runRoot]);
+    const stopRequestResult = await waitForCompletion(stopRequest, 5000);
+    assert.equal(stopRequestResult.exitCode, 0, stopRequestResult.stdout + stopRequestResult.stderr);
+
     const stopEvent = await waitForEvent(
       runRoot,
       handle,
       (event) => event.source === "service" && event.type === "SOUND_EVENT" && event.body.type === "stop",
       12000,
+    );
+    const postStopBefore = await waitForEvent(
+      runRoot,
+      handle,
+      (event) =>
+        event.source === "service" &&
+        event.type === "SOUND_STATS" &&
+        event.elapsedSeconds >= stopEvent.elapsedSeconds,
+      5000,
     );
     await sendPacket(
       unsafeOsc("/janvim/sound/v1/cursor", [
@@ -322,6 +346,21 @@ test("silent sender reaches policy and SynthDefs, rejects probes, and fades to s
     assert.ok(summary.resource.maxPlucks > 0 && summary.resource.maxPlucks <= 8);
 
     const events = await readEvents(runRoot);
+    const postStopStats = events.filter(
+      (event) =>
+        event.source === "service" &&
+        event.type === "SOUND_STATS" &&
+        event.elapsedSeconds >= postStopBefore.elapsedSeconds,
+    );
+    assert.ok(postStopStats.length >= 2);
+    const postStopAfter = postStopStats.at(-1);
+    const postStopAcceptedDelta = {
+      acceptedFlocks:
+        postStopAfter.body.acceptedFlocks - postStopBefore.body.acceptedFlocks,
+      acceptedPlucks:
+        postStopAfter.body.acceptedPlucks - postStopBefore.body.acceptedPlucks,
+    };
+    assert.deepEqual(postStopAcceptedDelta, { acceptedFlocks: 0, acceptedPlucks: 0 });
     const readyEvent = events.find(
       (event) => event.source === "service" && event.type === "SOUND_READY",
     );
@@ -374,6 +413,18 @@ test("silent sender reaches policy and SynthDefs, rejects probes, and fades to s
       path.join(runRoot, "probe-evidence.json"),
       `${JSON.stringify({
         invalidRejected: statsEvent.body.rejected,
+        postStopAcceptedAfter: {
+          acceptedFlocks: postStopAfter.body.acceptedFlocks,
+          acceptedPlucks: postStopAfter.body.acceptedPlucks,
+        },
+        postStopAcceptedBefore: {
+          acceptedFlocks: postStopBefore.body.acceptedFlocks,
+          acceptedPlucks: postStopBefore.body.acceptedPlucks,
+        },
+        postStopAcceptedDelta,
+        postStopObservationReason:
+          "actual UDP cursor between stopped-policy and final-cleanup statistics",
+        stopReason: stopEvent.body.reason,
         postStopPeak: capture.segments.find((segment) => segment.name === "postStop").peak,
         startAcceptedAt: startEvent.elapsedSeconds,
         stopAcceptedAt: stopEvent.elapsedSeconds,
