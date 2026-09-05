@@ -66,16 +66,19 @@ function Observer:sample(buffer_number)
       or self.seq >= MAX_SEQUENCE then return end
 
   local window = vim.api.nvim_get_current_win()
+  -- Buffer offsets cannot account for wrapped rows or preceding wrapped lines.
+  -- These window-relative cursor APIs also update Neovim's pending viewport scroll.
+  local view_row = vim.fn.winline() - 1
+  local view_col = vim.fn.wincol() - 1
   local rows = vim.api.nvim_win_get_height(window)
   local info = vim.fn.getwininfo(window)[1]
   local cols = vim.api.nvim_win_get_width(window) - info.textoff
   if not bounded_integer(rows, 1, 65536) or not bounded_integer(cols, 1, 65536) then return end
-  local view = vim.fn.winsaveview()
   local event = {
     schema = 1, type = "cursor", loopId = self.context.loopId, cueId = self.context.cueId,
     seq = self.seq + 1, elapsedMs = elapsed_ms, row = current.row, cellCol = current.cellCol,
-    viewRow = clamp(current.row - (view.topline - 1), rows),
-    viewCol = clamp(current.cellCol - view.leftcol, cols), rows = rows, cols = cols,
+    viewRow = clamp(view_row, rows),
+    viewCol = clamp(view_col - info.textoff, cols), rows = rows, cols = cols,
   }
   if #vim.json.encode(event) > 1024 then return end
   self.seq = event.seq

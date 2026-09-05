@@ -196,7 +196,86 @@ run("cursor observer samples actual move chunks and selection endpoints", functi
   agent:dispose()
 end)
 
-run("cursor observer uses the active logical viewport and never hashes or activates per sample", function()
+run("cursor observer reports displayed window coordinates for wrapped ASCII and Chinese lines", function()
+  -- A remote text grid gives real Neovim a rendered viewport without a native GUI.
+  local child = vim.fn.jobstart({ vim.v.progpath, "--embed", "--headless", "-u", "NONE", "-i", "NONE", "--noplugin" }, { rpc = true })
+  expect(child > 0, "could not start the embedded Neovim grid fixture")
+  local cases = {
+    { text = string.rep("a", 46) .. "\nnext line", before_col = 21, after_col = 22 },
+    { text = string.rep("山", 23) .. "\nnext line", before_col = 30, after_col = 33 },
+  }
+  local ok, err = xpcall(function()
+    vim.rpcrequest(child, "nvim_ui_attach", 60, 16, { rgb = true })
+    for _, case in ipairs(cases) do
+      vim.rpcrequest(child, "nvim_exec_lua", [[
+        local root, text = ...
+        vim.opt.runtimepath:prepend(root)
+        local fixture = { samples = {}, ms = 0 }
+        _G.cursor_grid_fixture = fixture
+        fixture.agent = require("janvim_exhibition.actions").new({
+          token = "fixture-token-2026-lua", now = function() return fixture.ms end,
+          defer = function(callback) callback() end,
+          on_cursor = function(event) table.insert(fixture.samples, event) end,
+        })
+        function fixture.dispatch(cue, action)
+          local ack
+          fixture.agent:dispatch({ schema = 1, token = "fixture-token-2026-lua",
+            loopId = "loop-grid", cueId = cue, action = action }, function(result) ack = result end)
+          return assert(ack)
+        end
+        fixture.dispatch("prepare", { type = "prepare", poem = text, expectedSha256 = vim.fn.sha256(text) })
+        fixture.window = vim.api.nvim_open_win(assert(fixture.agent:buffer_number()), true, {
+          relative = "editor", row = 2, col = 7, width = 20, height = 6, style = "minimal",
+        })
+        fixture.settings = { wrap = true, linebreak = false, breakindent = false, showbreak = "",
+          number = false, relativenumber = false, signcolumn = "no", foldcolumn = "0" }
+        for name, value in pairs(fixture.settings) do
+          vim.api.nvim_set_option_value(name, value, { win = fixture.window })
+        end
+        vim.cmd("redraw")
+      ]], { runtime_root, case.text })
+      local result = vim.rpcrequest(child, "nvim_exec_lua", [[
+        local fixture = _G.cursor_grid_fixture
+        vim.api.nvim_win_set_cursor(fixture.window, { 1, ... })
+        local ack = fixture.dispatch("move-wrap", { type = "move", keys = "l", ["repeat"] = 1 })
+        return { ack = ack, samples = fixture.samples }
+      ]], { case.before_col })
+      equal(result.ack.outcome, "applied")
+      equal(result.ack.cursor, { row = 0, col = case.after_col })
+      equal(#result.samples, 1)
+      equal({ result.samples[1].row, result.samples[1].cellCol }, { 0, 22 })
+      equal({ result.samples[1].rows, result.samples[1].cols }, { 6, 20 })
+      equal({ result.samples[1].viewRow, result.samples[1].viewCol }, { 1, 2 },
+        "wrapped cursor must be on the second displayed row, third cell")
+
+      -- The three displayed rows of the first logical line offset the next line.
+      result = vim.rpcrequest(child, "nvim_exec_lua", [[
+        local fixture = _G.cursor_grid_fixture
+        fixture.ms = 125
+        vim.api.nvim_win_set_cursor(fixture.window, { 2, 1 })
+        fixture.dispatch("move-after-wrap", { type = "move", keys = "l", ["repeat"] = 1 })
+        for name, value in pairs(fixture.settings) do
+          assert(vim.api.nvim_get_option_value(name, { win = fixture.window }) == value,
+            "observation changed window option " .. name)
+        end
+        local text = table.concat(vim.api.nvim_buf_get_lines(fixture.agent:buffer_number(), 0, -1, true), "\n")
+        vim.api.nvim_win_close(fixture.window, true)
+        fixture.agent:dispose()
+        return { samples = fixture.samples, text = text }
+      ]], {})
+      equal(#result.samples, 2)
+      equal({ result.samples[2].row, result.samples[2].cellCol }, { 1, 2 })
+      equal({ result.samples[2].viewRow, result.samples[2].viewCol }, { 3, 2 })
+      equal(result.text, case.text)
+    end
+  end, debug.traceback)
+  vim.fn.jobstop(child)
+  local stopped = vim.fn.jobwait({ child }, 1000)[1]
+  expect(stopped ~= -1, "embedded Neovim did not stop within one second")
+  if not ok then error(err, 0) end
+end)
+
+run("cursor observer keeps viewport bounds and never hashes or activates per sample", function()
   local clock = fake_clock()
   local samples = {}
   local agent = new_agent({ now = clock.now, defer = clock.defer,
@@ -216,14 +295,18 @@ run("cursor observer uses the active logical viewport and never hashes or activa
   observer:sample(show_buffer)
   agent.show_buffer.status = original_status
   equal(#samples, 1)
-  equal({ samples[1].row, samples[1].cellCol, samples[1].viewRow, samples[1].viewCol }, { 11, 6, 2, 2 })
+  equal({ samples[1].row, samples[1].cellCol, samples[1].viewCol }, { 11, 6, 2 })
+  -- Without an attached grid Neovim can scroll when resolving the displayed cursor.
+  -- Exact displayed positions are tested in the embedded grid fixture above.
+  expect(samples[1].viewRow >= 0 and samples[1].viewRow < samples[1].rows, "viewport row escaped its bounds")
   clock.ms = 125
   vim.api.nvim_win_set_cursor(0, { 50, 300 })
   vim.fn.winrestview({ topline = 1, leftcol = 0 })
   observer:sample(show_buffer)
   equal(#samples, 2)
-  equal(samples[2].viewRow, samples[2].rows - 1)
-  equal(samples[2].viewCol, samples[2].cols - 1)
+  equal({ samples[2].row, samples[2].cellCol }, { 49, 200 })
+  expect(samples[2].viewRow >= 0 and samples[2].viewRow < samples[2].rows, "viewport row escaped its bounds")
+  expect(samples[2].viewCol >= 0 and samples[2].viewCol < samples[2].cols, "viewport column escaped its bounds")
   local foreign = vim.api.nvim_create_buf(false, true)
   vim.api.nvim_buf_set_lines(foreign, 0, -1, true, { "FOREIGN-SENTINEL" })
   vim.api.nvim_set_current_buf(foreign)
