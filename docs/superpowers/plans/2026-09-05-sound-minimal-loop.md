@@ -95,6 +95,9 @@ Task 3 implementation/review complete: `3b050ba`, fix `dd83918`; 37/37 combined 
 
 ## Self-review / rulings
 
+- Final-review correction: a sound-local Windows Job lifetime helper may assign the sound child to its owned job atomically at creation, covering startup loss before READY. No breakaway, unrelated endpoint termination, dependency or host-setting change.
+- Final-review correction: bounded recorder frame-progress and final `SOUND_CAPTURE` diagnostics may prove a genuinely recorded post-fade interval. Source voices remain alive through that interval; a deliberately omitted mixer stop must fail the assertion despite unused buffer padding. Preserve 120-second capture cap, 1.5-second fade and eight-second cleanup.
+
 - Scope and file interfaces checked: Task 1 policy/OSC consumed by Tasks 2/3; Task 2 READY/session/definitions consumed by Task 3; Task 4 documents tested behavior only.
 - No source modifications needed for baseline setup: ignored immutable runtime copies and build outputs are staged in candidate. Missing setup assets are not waived as passing tests.
 - User explicitly waived intermediate review waits; perform self-review and continue. Do not waive acoustic acceptance, broaden side effects or install software to force a gate through.
