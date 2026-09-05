@@ -3,6 +3,7 @@ import { Buffer } from "node:buffer";
 import { spawn } from "node:child_process";
 import console from "node:console";
 import dgram from "node:dgram";
+import net from "node:net";
 import { randomUUID } from "node:crypto";
 import { cp, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -12,6 +13,7 @@ import test from "node:test";
 import { clearTimeout, setTimeout } from "node:timers";
 import { analyzeWav } from "./analyze-wav.mjs";
 import { recordedStop, requireRecordedSilence } from "./recorded-stop.mjs";
+import { requestStop } from "../run.mjs";
 
 const REHEARSAL_PARENT = "D:/VirtualData/JanVim-Exhibition-Rehearsals";
 const REPOSITORY_ROOT = path.resolve(".");
@@ -566,3 +568,74 @@ test("PowerShell start and stop wrappers work from an unrelated cwd with no prel
     await terminateOwnedTree(start);
   }
 });
+
+for (const attached of [false, true]) {
+test(`real-input transport fixture: ${attached ? "controlled plucks and manual Stop" : "no attach is recorded silence"}`, async () => {
+  const runRoot = freshRunRoot(attached ? "real-transport" : "real-no-attach");
+  const handle = spawnCaptured("pwsh.exe", ["-NoProfile", "-NonInteractive", "-File", START_SCRIPT,
+    "-Input", "RealCursor", "-Duration", attached ? "20" : "2", "-RunRoot", runRoot], UNRELATED_CWD);
+  let producer;
+  try {
+    const ready = await waitForJson(path.join(runRoot, "ready.json"), handle);
+    assert.equal(ready.service.hardwareOutput, false);
+    const receipt = await waitForJson(path.join(runRoot, "control.json"), handle);
+    assert.equal(receipt.input, "real-cursor");
+    await waitForEvent(runRoot, handle, e => e.type === "SOUND_EVENT" && e.body.type === "start");
+    if (attached) {
+      producer = net.createConnection({ host: receipt.host, port: receipt.port });
+      const identity = { runId: "transport-fixture", controllerRunId: "transport-controller" };
+      await new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error("fixture attach timed out")), 2000);
+        producer.once("error", reject);
+        producer.once("data", chunk => {
+          clearTimeout(timer);
+          if (chunk.toString() === '{"ok":true,"input":"real-cursor"}\n') resolve();
+          else reject(new Error("fixture attach rejected"));
+        });
+        producer.once("connect", () => producer.write(`${JSON.stringify({
+          command: "attach", token: receipt.token, ...identity,
+        })}\n`));
+      });
+      const origin = performance.now();
+      let seq = 0;
+      for (let index = 0; index < 32; index += 1) {
+        const frame = { token: receipt.token, ...identity, elapsedMs: performance.now() - origin,
+          generationId: index < 16 ? 1 : 2, loopId: index < 8 ? "loop-1" : "loop-2" };
+        producer.write(`${JSON.stringify({ ...frame, command: "heartbeat", seq: ++seq })}\n` +
+          `${JSON.stringify({ ...frame, command: "cursor", seq: ++seq, x: 0.7, y: 0.3, motion: 0.9 })}\n`);
+        await delay(125);
+      }
+      assert.equal(await requestStop(runRoot), true);
+    }
+    const result = await waitForCompletion(handle, 25000);
+    assert.equal(result.exitCode, 0, result.stdout + result.stderr);
+    const summary = await waitForJson(path.join(runRoot, "summary.json"), handle);
+    assert.equal(summary.clean, true);
+    if (attached) assert.equal(summary.reason, "requested");
+    else assert.ok(["duration", "requested"].includes(summary.reason));
+    const events = await readEvents(runRoot);
+    assert.ok(events.every(e => !JSON.stringify(e).includes(receipt.token)), "private token reached event log");
+    const stats = events.filter(e => e.type === "SOUND_STATS");
+    assert.ok(stats.length > 0);
+    assert.ok(stats.every(e => e.body.acceptedFlocks === 0));
+    const captureEvidence = events.find(e => e.type === "SOUND_CAPTURE")?.body;
+    assert.ok(captureEvidence?.recordedFrames > 48000, "must measure recorded frames, not allocated padding");
+    const wav = await readFile(ready.capturePath);
+    let capture;
+    if (attached) {
+      assert.ok(stats.some(e => e.body.acceptedPlucks > 0));
+      capture = recordedStop(wav, captureEvidence);
+      requireRecordedSilence(capture);
+    } else {
+      assert.ok(stats.every(e => e.body.acceptedPlucks === 0));
+      capture = analyzeWav(wav, [{ name: "recorded", start: 0, end: captureEvidence.recordedFrames / 48000 }]);
+      assert.equal(capture.segments[0].peak, 0);
+    }
+    await assertPortsReusable();
+    console.log(`REAL_INPUT_TRANSPORT_EVIDENCE ${JSON.stringify({ attached, capture, captureEvidence, runRoot })}`);
+  } finally {
+    producer?.destroy();
+    await terminateOwnedTree(handle);
+  }
+});
+}

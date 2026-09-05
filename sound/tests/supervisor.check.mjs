@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import dgram from "node:dgram";
+import net from "node:net";
 import { mkdir, readFile, rm, stat } from "node:fs/promises";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
@@ -49,6 +50,18 @@ test("CLI defaults to a 45-second silent run", async () => {
     mode: "silent",
     output: null,
   });
+});
+
+test("real cursor CLI is opt-in and explicit simulation preserves the old return shape", async () => {
+  const { parseCli } = await import("../run.mjs");
+  assert.deepEqual(parseCli(["--input", "real-cursor"]), {
+    command: "run", duration: 45, mode: "silent", output: null, input: "real-cursor",
+  });
+  assert.deepEqual(parseCli(["--input", "simulated"]), parseCli([]));
+  for (const args of [["--input"], ["--input", "real"],
+    ["--input", "real-cursor", "--input", "simulated"]]) {
+    assert.throws(() => parseCli(args), /invalid/i);
+  }
 });
 
 test("CLI accepts only the bounded run and stop forms", async () => {
@@ -189,6 +202,9 @@ test("control listener rejects a wrong token and closes after the exact stop", a
   });
   t.after(() => control.close());
 
+  assert.deepEqual(Object.keys(control.receipt).sort(),
+    ["active", "host", "port", "runRoot", "token", "version"]);
+
   assert.equal(
     await sendControlRequest({ ...control.receipt, token: "0".repeat(64) }),
     false,
@@ -197,6 +213,165 @@ test("control listener rejects a wrong token and closes after the exact stop", a
   assert.equal(await requestStop(runRoot), true);
   assert.equal(stops, 1);
   await assert.rejects(() => sendControlRequest(control.receipt), /connect|closed|refused/i);
+});
+
+test("real sender pulls one clock/features reply at a time, drops stale IPC, and never runs simulation", async (t) => {
+  const receiver = dgram.createSocket({ type: "udp4", reuseAddr: false });
+  await new Promise((resolve, reject) => {
+    receiver.once("error", reject);
+    receiver.bind({ address: "127.0.0.1", exclusive: true, port: 57140 }, resolve);
+  });
+  t.after(() => receiver.close());
+  const child = spawn(process.execPath, [path.resolve("sound/run.mjs"), "--internal-sender"], {
+    stdio: ["ignore", "pipe", "pipe", "ipc"], windowsHide: true,
+  });
+  t.after(() => { if (child.exitCode === null && child.signalCode === null) child.kill(); });
+  const packets = [];
+  receiver.on("message", packet => {
+    const name = packet.toString("ascii", 0, packet.indexOf(0)).split("/").at(-1);
+    packets.push({ name, at: performance.now(),
+      ...(name === "cursor" ? { x: packet.readFloatBE(packet.length - 12) } : {}) });
+    if (name === "start") child.send({ type: "ackStart" });
+    if (name === "stop") child.send({ type: "ackStop" });
+  });
+  let pulls = 0;
+  let pending = false;
+  let overlap = false;
+  const finished = new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("real sender did not finish")), 4500);
+    child.on("message", message => {
+      if (message.type === "finished") { clearTimeout(timer); resolve(); }
+      if (message.type !== "clock") return;
+      if (pending) overlap = true;
+      pending = true;
+      const now = performance.timeOrigin + performance.now();
+      let events = [];
+      if (message.takeRealInput) {
+        pulls += 1;
+        if (pulls >= 2) events = [{ kind: "cursor", x: pulls === 2 ? 0.125 : 0.75,
+          y: 0.4, motion: 0.8, expiresAtMs: now + 500 }];
+      }
+      setTimeout(() => {
+        pending = false;
+        if (child.connected) child.send({ type: "clock", requestId: message.requestId,
+          value: 1, sampledAtMs: now, events });
+      }, message.takeRealInput && pulls === 2 ? 600 : 0);
+    });
+  });
+  child.send({ duration: 1.4, input: "real-cursor", session: "0123456789abcdef0123456789abcdef", type: "initialize" });
+  await finished;
+  assert.ok(pulls >= 3, "sender must request actual input instead of running its timeline");
+  assert.equal(overlap, false, "IPC requests accumulated while a reply was delayed");
+  assert.equal(packets.some(p => p.name === "flock"), false);
+  const cursors = packets.filter(p => p.name === "cursor");
+  assert.ok(cursors.length > 0);
+  assert.ok(cursors.every(packet => packet.x === 0.75), "the delayed sample was sent with a renewed age");
+  assert.ok(cursors[0].at - packets[0].at >= 600, "expired reply was admitted");
+  for (let index = 1; index < cursors.length; index += 1) {
+    assert.ok(cursors[index].at - cursors[index - 1].at >= 120, "sender exceeded eight Hz");
+  }
+});
+
+async function openControlStream(t, receipt) {
+  const socket = net.createConnection({ host: receipt.host, port: receipt.port });
+  t.after(() => socket.destroy());
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => socket.destroy(new Error("control connection timed out")), 1500);
+    socket.once("connect", () => { clearTimeout(timer); resolve(); });
+    socket.once("error", error => { clearTimeout(timer); reject(error); });
+  });
+  return socket;
+}
+
+function controlReply(socket, message) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("missing control reply")), 1500);
+    socket.once("data", chunk => {
+      clearTimeout(timer);
+      resolve(chunk.toString());
+    });
+    socket.write(typeof message === "string" ? message : `${JSON.stringify(message)}\n`);
+  });
+}
+
+test("real control stream authenticates before policy, bounds frames, retains one owner, and preserves manual Stop", async (t) => {
+  const { prepareRunRoot, sendControlRequest, startControlServer } = await import("../run.mjs");
+  const { createRealInput } = await import("../real-input.mjs");
+  const runRoot = await prepareRunRoot(null);
+  t.after(() => rm(runRoot, { recursive: true, force: true }));
+  let ms = 0;
+  const stopped = [];
+  const policy = createRealInput({ nowMs: () => ms, onStop: r => stopped.push(r) });
+  const seen = [];
+  const realInput = {
+    attach: identity => { seen.push(identity); return policy.attach(identity); },
+    accept: frame => { seen.push(frame); return policy.accept(frame); },
+    close: reason => policy.close(reason),
+  };
+  let manualStops = 0;
+  const control = await startControlServer(runRoot, () => { manualStops += 1; }, { realInput });
+  t.after(() => control.close());
+  assert.equal(control.receipt.input, "real-cursor");
+  const attach = { command: "attach", token: control.receipt.token, runId: "show-1", controllerRunId: "ctl-1" };
+  const bad = await openControlStream(t, control.receipt);
+  assert.equal(await controlReply(bad, { ...attach, token: "0".repeat(64) }), '{"ok":false}\n');
+  assert.deepEqual(seen, []);
+  const owner = await openControlStream(t, control.receipt);
+  const encoded = JSON.stringify(attach);
+  owner.write(encoded.slice(0, 10));
+  assert.equal(await controlReply(owner, `${encoded.slice(10)}\n`), '{"ok":true,"input":"real-cursor"}\n');
+  const other = await openControlStream(t, control.receipt);
+  assert.equal(await controlReply(other, attach), '{"ok":false}\n');
+  assert.equal(await sendControlRequest({ ...control.receipt, token: "0".repeat(64) }), false);
+  assert.deepEqual(stopped, []);
+  const base = { ...attach, command: "heartbeat", seq: 1, elapsedMs: 0, generationId: 1, loopId: "loop-1" };
+  const note = { ...base, command: "cursor", seq: 2, x: 0.2, y: 0.4, motion: 0.8 };
+  owner.write(`${JSON.stringify(base)}\n${JSON.stringify(note)}\n`);
+  await delay(30);
+  assert.equal(policy.take().filter(e => e.kind === "cursor").length, 1);
+  assert.ok(seen.every(frame => !Object.hasOwn(frame, "token")));
+  await delay(1100); // attached streams outlive the legacy one-shot timeout
+  ms = 1150;
+  owner.write(`${JSON.stringify({ ...base, seq: 3, elapsedMs: 1150 })}\n`);
+  await delay(30);
+  assert.equal(owner.destroyed, false);
+  assert.equal(policy.take().filter(e => e.kind === "heartbeat").length, 1);
+  for (const payload of ["x".repeat(1025), JSON.stringify({ ...attach, text: "private" }) + "\n"]) {
+    const probe = await openControlStream(t, control.receipt);
+    assert.equal(await controlReply(probe, payload), '{"ok":false}\n');
+  }
+  assert.equal(await sendControlRequest(control.receipt), true);
+  assert.equal(manualStops, 1);
+  await control.close();
+  assert.equal(JSON.parse(await readFile(path.join(runRoot, "control.json"), "utf8")).active, false);
+  assert.deepEqual(policy.take(), []);
+});
+
+test("owner disconnect closes real input permanently; rejected frames cannot extend the lease", async (t) => {
+  const { prepareRunRoot, startControlServer } = await import("../run.mjs");
+  const { createRealInput } = await import("../real-input.mjs");
+  for (const disconnect of [true, false]) {
+    const runRoot = await prepareRunRoot(null);
+    t.after(() => rm(runRoot, { recursive: true, force: true }));
+    const stopped = [];
+    const origin = performance.now();
+    const input = createRealInput({ nowMs: () => performance.now() - origin, onStop: r => stopped.push(r) });
+    const control = await startControlServer(runRoot, () => {}, { realInput: input });
+    t.after(() => control.close());
+    const owner = await openControlStream(t, control.receipt);
+    const attach = { command: "attach", token: control.receipt.token, runId: "show-1", controllerRunId: "ctl-1" };
+    assert.equal(await controlReply(owner, attach), '{"ok":true,"input":"real-cursor"}\n');
+    if (disconnect) owner.destroy();
+    else {
+      await delay(1200);
+      owner.write(`${JSON.stringify({ ...attach, command: "heartbeat", seq: 1 })}\n`);
+    }
+    await delay(disconnect ? 50 : 1000);
+    assert.deepEqual(stopped, [disconnect ? "source-disconnect" : "producer-timeout"]);
+    const second = await openControlStream(t, control.receipt);
+    assert.equal(await controlReply(second, attach), '{"ok":false}\n');
+    await control.close();
+  }
 });
 
 test("initial control receipt failure closes the locally acquired listener", async (t) => {

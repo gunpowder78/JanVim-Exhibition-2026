@@ -176,7 +176,7 @@ for (const [label, before, after] of [
 ]) {
   test(`owned creation fails closed when ${label}`, async () => {
     const runRoot = await prepareRunRoot(null);
-    for (const name of ["run.mjs", "osc.mjs", "owned-process.ps1", "owned-process.cs"]) {
+    for (const name of ["run.mjs", "osc.mjs", "real-input.mjs", "owned-process.ps1", "owned-process.cs"]) {
       await copyFile(path.resolve("sound", name), path.join(runRoot, name));
     }
     const nativePath = path.join(runRoot, "owned-process.cs");
@@ -216,7 +216,7 @@ for (const phase of ["before READY", "during inspection", "after pinning", "clea
   test(`supervisor startup failure ${phase} closes its owned tree and writes a summary`, async () => {
     const sourceRoot = await prepareRunRoot(null);
     const output = `${sourceRoot}-run`;
-    for (const name of ["run.mjs", "osc.mjs", "owned-process.ps1", "owned-process.cs"]) {
+    for (const name of ["run.mjs", "osc.mjs", "real-input.mjs", "owned-process.ps1", "owned-process.cs"]) {
       await copyFile(path.resolve("sound", name), path.join(sourceRoot, name));
     }
     const leafCode = `const d=require('node:dgram').createSocket('udp4');

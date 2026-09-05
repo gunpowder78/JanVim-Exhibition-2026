@@ -11,6 +11,7 @@ import process from "node:process";
 import { clearInterval, clearTimeout, setInterval, setTimeout } from "node:timers";
 import { fileURLToPath } from "node:url";
 import { encodeMessage } from "./osc.mjs";
+import { createRealAdmission, createRealInput } from "./real-input.mjs";
 
 const RUN_FILE = fileURLToPath(import.meta.url);
 export const REHEARSAL_PARENT = "D:/VirtualData/JanVim-Exhibition-Rehearsals";
@@ -29,12 +30,12 @@ export function parseCli(argv) {
     return { command: "stop", runRoot: path.normalize(argv[1]) };
   }
 
-  const values = { duration: "45", mode: "silent", output: null };
+  const values = { duration: "45", mode: "silent", output: null, input: "simulated" };
   const seen = new Set();
   for (let index = 0; index < argv.length; index += 2) {
     const option = argv[index];
     const value = argv[index + 1];
-    if (!["--duration", "--mode", "--output"].includes(option) || value === undefined) {
+    if (!["--duration", "--mode", "--output", "--input"].includes(option) || value === undefined) {
       invalid("unknown or missing option");
     }
     if (seen.has(option)) invalid("duplicate option");
@@ -43,6 +44,7 @@ export function parseCli(argv) {
   }
 
   if (!["silent", "listen"].includes(values.mode)) invalid("mode must be silent or listen");
+  if (!["simulated", "real-cursor"].includes(values.input)) invalid("input must be simulated or real-cursor");
   if (!/^(?:0|[1-9]\d*)(?:\.\d+)?$/.test(values.duration)) invalid("duration is malformed");
   const duration = Number(values.duration);
   if (!Number.isFinite(duration) || duration < 1 || duration > 3600) {
@@ -56,6 +58,7 @@ export function parseCli(argv) {
     duration,
     mode: values.mode,
     output: values.output === null ? null : path.normalize(values.output),
+    ...(values.input === "real-cursor" ? { input: "real-cursor" } : {}),
   };
 }
 
@@ -154,7 +157,7 @@ function tokensEqual(left, right) {
   return leftBytes.length === rightBytes.length && timingSafeEqual(leftBytes, rightBytes);
 }
 
-export async function startControlServer(runRoot, onStop) {
+export async function startControlServer(runRoot, onStop, { realInput = null } = {}) {
   const token = randomBytes(32).toString("hex");
   const sockets = new Set();
   let accepted = false;
@@ -162,6 +165,16 @@ export async function startControlServer(runRoot, onStop) {
   let closePromise;
   let persistence = Promise.resolve();
   let persistenceError = null;
+  let ownerSocket = null;
+  let producerTimer;
+
+  const renewProducer = () => {
+    clearTimeout(producerTimer);
+    producerTimer = setTimeout(() => {
+      realInput.close("producer-timeout");
+      ownerSocket?.destroy();
+    }, 2000);
+  };
 
   const closeListener = () => {
     if (closePromise) return closePromise;
@@ -170,6 +183,8 @@ export async function startControlServer(runRoot, onStop) {
     return closePromise;
   };
   const closeOwned = async () => {
+    clearTimeout(producerTimer);
+    realInput?.close();
     for (const socket of sockets) socket.destroy();
     await closeListener();
   };
@@ -189,13 +204,75 @@ export async function startControlServer(runRoot, onStop) {
 
   const server = net.createServer((socket) => {
     if (sockets.size >= 8 || accepted) {
+      if (realInput) {
+        socket.destroy();
+        return;
+      }
       socket.end('{"ok":false}\n');
       return;
     }
     sockets.add(socket);
     socket.setTimeout(1000, () => socket.destroy());
     let input = Buffer.alloc(0);
+    let rejected = false;
+    const reject = () => {
+      rejected = true;
+      input = Buffer.alloc(0);
+      socket.end('{"ok":false}\n');
+      // A rejected owner must not keep the TCP half-open after its lease expires.
+      if (socket === ownerSocket) socket.destroySoon();
+    };
+    const acceptStop = () => {
+      accepted = true;
+      receipt = { ...receipt, active: false };
+      void persistReceipt();
+      onStop();
+      clearTimeout(producerTimer);
+      realInput?.close();
+      if (ownerSocket && ownerSocket !== socket) ownerSocket.destroy();
+      socket.end('{"ok":true}\n');
+      void closeListener();
+    };
+    const realFrame = bytes => {
+      let message;
+      try { message = JSON.parse(bytes.toString("utf8")); } catch { reject(); return; }
+      if (!message || !tokensEqual(message.token, token)) {
+        if (socket !== ownerSocket) reject();
+        return;
+      }
+      // Authenticate and strip the secret before any policy, IPC or event path.
+      const { token: privateToken, ...frame } = message;
+      void privateToken;
+      const keys = Object.keys(frame);
+      if (frame.command === "stop" && keys.length === 1) {
+        acceptStop();
+      } else if (frame.command === "attach" && keys.length === 3 &&
+          keys.includes("runId") && keys.includes("controllerRunId") && !ownerSocket &&
+          realInput.attach({ runId: frame.runId, controllerRunId: frame.controllerRunId })) {
+        ownerSocket = socket;
+        socket.setTimeout(0);
+        renewProducer();
+        socket.write('{"ok":true,"input":"real-cursor"}\n');
+      } else if (socket === ownerSocket) {
+        if (realInput.accept(frame) && frame.command === "heartbeat") renewProducer();
+      } else reject();
+    };
     socket.on("data", (chunk) => {
+      if (realInput) {
+        let offset = 0;
+        while (offset < chunk.length && !rejected && !accepted) {
+          const newline = chunk.indexOf(10, offset);
+          const end = newline < 0 ? chunk.length : newline;
+          if (input.length + end - offset > 1024) { reject(); return; }
+          input = Buffer.concat([input, chunk.subarray(offset, end)]);
+          if (newline < 0) break;
+          const frame = input;
+          input = Buffer.alloc(0);
+          realFrame(frame);
+          offset = newline + 1;
+        }
+        return;
+      }
       if (input.length + chunk.length > 512) {
         socket.end('{"ok":false}\n');
         return;
@@ -222,14 +299,15 @@ export async function startControlServer(runRoot, onStop) {
         socket.end('{"ok":false}\n');
         return;
       }
-      accepted = true;
-      receipt = { ...receipt, active: false };
-      void persistReceipt();
-      onStop();
-      socket.end('{"ok":true}\n');
-      void closeListener();
+      acceptStop();
     });
-    socket.on("close", () => sockets.delete(socket));
+    socket.on("close", () => {
+      sockets.delete(socket);
+      if (socket === ownerSocket) {
+        clearTimeout(producerTimer);
+        realInput.close();
+      }
+    });
     socket.on("error", () => {});
   });
 
@@ -245,6 +323,7 @@ export async function startControlServer(runRoot, onStop) {
     runRoot: path.normalize(runRoot),
     token,
     version: 1,
+    ...(realInput ? { input: "real-cursor" } : {}),
   };
   try {
     await writeFile(path.join(runRoot, "control.json"), `${JSON.stringify(receipt)}\n`, {
@@ -817,16 +896,20 @@ async function runInternalSender() {
       const resolve = clockReplies.get(message.requestId);
       if (resolve) {
         clockReplies.delete(message.requestId);
-        resolve(message.value);
+        resolve(message);
       }
     }
   });
   const config = await withTimeout(initialized, 5000, new Error("sender init timed out"));
+  const realMode = config.input === "real-cursor";
+  const admitReal = realMode ? createRealAdmission({
+    nowMs: () => performance.timeOrigin + performance.now(),
+  }) : null;
   const socket = dgram.createSocket("udp4");
   let sequence = 0;
   let stopping = false;
 
-  const requestTimestamp = (deadline = performance.now() + 1000) =>
+  const requestTimestamp = (deadline = performance.now() + 1000, takeRealInput = false) =>
     new Promise((resolve, reject) => {
       if (performance.now() >= deadline) {
         reject(new StopDeadlineError("sender deadline expired before clock request"));
@@ -846,7 +929,7 @@ async function runInternalSender() {
         resolve(value);
       });
       try {
-        process.send({ requestId, type: "clock" }, (error) => {
+        process.send({ requestId, type: "clock", ...(takeRealInput ? { takeRealInput: true } : {}) }, (error) => {
           if (!error) return;
           clearTimeout(timeout);
           clockReplies.delete(requestId);
@@ -858,8 +941,10 @@ async function runInternalSender() {
         reject(error);
       }
     });
-  const packetFor = async (event, deadline) => {
-    const sentAt = await requestTimestamp(deadline);
+  const packetFor = async (event, deadline, clock) => {
+    const timestamp = clock ?? await requestTimestamp(deadline);
+    const sentAt = timestamp.value + (clock
+      ? (performance.timeOrigin + performance.now() - clock.sampledAtMs) / 1000 : 0);
     if (deadline !== undefined && performance.now() >= deadline) {
       throw new StopDeadlineError("sender deadline expired before packet encoding");
     }
@@ -895,8 +980,9 @@ async function runInternalSender() {
   const report = (value) => {
     sendIpc(process, value);
   };
-  const sendEvent = async (event, deadline) => {
-    const encoded = await packetFor(event, deadline);
+  const sendEvent = async (event, deadline, clock) => {
+    const encoded = await packetFor(event, deadline, clock);
+    if (clock && (stopRequested || !admitReal(event))) return null;
     const sent = await sendUdp(socket, encoded.packet, deadline);
     return sent ? encoded : null;
   };
@@ -946,24 +1032,31 @@ async function runInternalSender() {
     return 2;
   }
 
-  const timeline = createTimeline(config.duration);
+  const timeline = realMode ? null : createTimeline(config.duration);
   const timelineStart = performance.now();
   while (!stopping) {
     const elapsed = (performance.now() - timelineStart) / 1000;
     if (stopRequested || elapsed >= config.duration) {
       return finishStop(stopRequested ? "requested" : "duration");
     }
-    const events = timeline.due(elapsed);
+    // One request in flight, at most a heartbeat and the latest cursor in its
+    // reply. The existing sender still serializes every packet and owns seq/time.
+    const clock = realMode ? await requestTimestamp(undefined, true) : null;
+    if (stopRequested) return finishStop("requested");
+    const events = realMode ? clock.events : timeline.due(elapsed);
     const kinds = [];
     for (const event of events) {
-      await sendEvent(event);
-      kinds.push(event.kind);
+      const sent = await sendEvent(event, undefined, clock);
+      if (sent) kinds.push(event.kind);
     }
     if (kinds.length > 0) {
       report({ elapsed, kinds, seq: sequence, type: "cue" });
     }
-    const nextBoundary = (Math.floor(elapsed / 0.25) + 1) * 0.25;
-    await delay(Math.max(1, Math.min(250, (nextBoundary - elapsed) * 1000)));
+    if (realMode) await delay(25);
+    else {
+      const nextBoundary = (Math.floor(elapsed / 0.25) + 1) * 0.25;
+      await delay(Math.max(1, Math.min(250, (nextBoundary - elapsed) * 1000)));
+    }
   }
 }
 
@@ -989,6 +1082,7 @@ async function runSupervisor(options) {
   let senderFinished = false;
   let senderUnexpected = false;
   let stopRequested = false;
+  let realInput = null;
   let resourceTimer;
   let resourceSamplePromise = null;
   let senderFallbackTimer;
@@ -1010,6 +1104,7 @@ async function runSupervisor(options) {
   const requestRunStop = (source) => {
     if (stopRequested) return;
     stopRequested = true;
+    realInput?.close();
     record("supervisor", "stopRequested", { source });
     sendIpc(sender?.child, { type: "stop" });
   };
@@ -1018,7 +1113,13 @@ async function runSupervisor(options) {
   process.on("SIGTERM", signalHandler);
 
   try {
-    control = await startControlServer(runRoot, () => requestRunStop("control"));
+    if (options.input === "real-cursor") {
+      realInput = createRealInput({
+        nowMs: () => performance.timeOrigin + performance.now(),
+        onStop: requestRunStop,
+      });
+    }
+    control = await startControlServer(runRoot, () => requestRunStop("control"), { realInput });
     await assertLanguagePortAvailable();
 
     let resolveReady;
@@ -1135,10 +1236,13 @@ async function runSupervisor(options) {
     }
     sender.child.on("message", (message) => {
       if (message.type === "clock") {
+        const sampledAtMs = performance.timeOrigin + performance.now();
         const value =
           receiverAnchor.clock +
-          (performance.now() - receiverAnchor.performanceMilliseconds) / 1000;
-        sendIpc(sender.child, { requestId: message.requestId, type: "clock", value });
+          (sampledAtMs - receiverAnchor.epochMilliseconds) / 1000;
+        const inputReply = message.takeRealInput && realInput
+          ? { events: realInput.take(), sampledAtMs } : {};
+        sendIpc(sender.child, { requestId: message.requestId, type: "clock", value, ...inputReply });
         return;
       }
       record("sender", message.type, message);
@@ -1148,6 +1252,7 @@ async function runSupervisor(options) {
       duration: options.duration === 3600 ? 3599.75 : options.duration,
       session,
       type: "initialize",
+      ...(realInput ? { input: "real-cursor" } : {}),
     });
     const senderCompletion = sender.completion.then((result) => {
       if (!senderFinished) {
@@ -1326,6 +1431,10 @@ async function runSupervisor(options) {
     clearTimeout(senderFallbackTimer);
     process.removeListener("SIGINT", signalHandler);
     process.removeListener("SIGTERM", signalHandler);
+    if (realInput) {
+      stopRequested = true;
+      realInput.close();
+    }
     if (control) {
       await control.close();
       await control.persistInactive();

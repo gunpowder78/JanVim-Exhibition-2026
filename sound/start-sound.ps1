@@ -5,7 +5,11 @@ param(
     [ValidateRange(1, 3600)]
     [double] $Duration = 45,
 
-    [string] $RunRoot
+    [string] $RunRoot,
+
+    [ValidateSet('Simulated', 'RealCursor')]
+    [Alias('Input')]
+    [string] $SoundInput = 'Simulated'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -26,6 +30,10 @@ $arguments.Add('--mode')
 $arguments.Add($(if ($Listen) { 'listen' } else { 'silent' }))
 $arguments.Add('--duration')
 $arguments.Add($Duration.ToString([System.Globalization.CultureInfo]::InvariantCulture))
+if ($SoundInput -eq 'RealCursor') {
+    $arguments.Add('--input')
+    $arguments.Add('real-cursor')
+}
 if (-not [string]::IsNullOrWhiteSpace($RunRoot)) {
     if (-not [System.IO.Path]::IsPathFullyQualified($RunRoot)) {
         throw 'RunRoot must be an absolute path'
