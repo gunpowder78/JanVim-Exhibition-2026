@@ -3,15 +3,16 @@
 候选仅为 `D:/github/JanVim-Exhibition-2026/.worktrees/sound-real-cursor`、
 `feat/sound-real-cursor`。真实 Lua → Bridge → sound client → 认证 real-input listener →
 唯一 sender → SuperCollider 的无声录音证据与完整门禁见
-`.superpowers/sdd/2026-09-05-real-cursor-sound/task-4-report.md`。
+`.operator/real-cursor-sound-report.md`（候选内保留的本机报告副本）。
 这是 headless 集成证据；人工听音、当前双投影三圈、离线和强制重启恢复验收仍待执行。
 历史模拟声音试听结论不自动转为真实输入验收。
 
 ## 人工预演：使用已保存脚本
 
 候选已保存本地操作文件
-`.superpowers/sdd/2026-09-05-real-cursor-sound/operator.ps1`（ignored、本机交接附件，
-不属于发布源码）。下面每条命令单独执行；不需要跨窗口变量或长段交互粘贴。
+`.operator/real-cursor-sound.ps1`（完整 helper，候选 `.gitignore` 忽略的本机交接附件，
+不属于发布源码）。必须保留整个 `.operator/`；清理本轮 SDD scratch 不移动此目录。
+helper、邻接 session 和报告入口不依赖 SDD。下面每条命令单独执行；不需要跨窗口变量或长段交互粘贴。
 脚本只转调现有 launcher，保存本次明确的 show/sound 路径，不扫描“最新”运行。
 
 1. PRE-SHOW：在 PowerShell 7 执行 Prepare。它先显式选择现有长文
@@ -20,20 +21,23 @@
    在演出开始前选择长文，不修改冻结 profile、原诗或媒体。
 
 ```powershell
-pwsh -NoProfile -File 'D:/github/JanVim-Exhibition-2026/.worktrees/sound-real-cursor/.superpowers/sdd/2026-09-05-real-cursor-sound/operator.ps1' -Step Prepare
+pwsh -NoProfile -File 'D:/github/JanVim-Exhibition-2026/.worktrees/sound-real-cursor/.operator/real-cursor-sound.ps1' -Step Prepare
 ```
 
 GUI 中由人 Identify 并确认当前显示器映射、分辨率、缩放和 profile；完整生产路由选择
 `production-3`，单屏只能选择 `single-display-preview` 并记录对应限制。
 Save 后关闭 GUI；此步骤不自动启动展演。不复用历史显示 ID。
-保存的 `operator-session.json` 同时位于该 show root 和脚本旁，记录本次精确 SoundRunRoot。
+保存的 `real-cursor-sound-session.json` 同时位于该 show root 和候选的
+`.operator/real-cursor-sound-session.json`，记录本次精确 SoundRunRoot。
+后续三个模式固定读取这个邻接文件；缺失则拒绝启动，需人工重新 Prepare。
+本次修复没有复制任何已有 live/private Show session；此文件仅由人工 Prepare 创建。
 
 2. 声音窗口 A：人工确认有线耳机和低音量后，显式启用 Listen。此命令实际调用
    候选 `sound/start-sound.ps1 -Input RealCursor -Listen -Duration 900 -RunRoot <本次保存路径>`。
    等待 `SOUND_RUN_READY`；核对它的 runRoot 等于 session 文件的 soundRunRoot。
 
 ```powershell
-pwsh -NoProfile -File 'D:/github/JanVim-Exhibition-2026/.worktrees/sound-real-cursor/.superpowers/sdd/2026-09-05-real-cursor-sound/operator.ps1' -Step Sound -Listen
+pwsh -NoProfile -File 'D:/github/JanVim-Exhibition-2026/.worktrees/sound-real-cursor/.operator/real-cursor-sound.ps1' -Step Sound -Listen
 ```
 
 不加 `-Listen` 时仍为无声诊断。现有 1–3600 秒运行上限和小于 120 秒录音分配上限不变；
@@ -44,7 +48,7 @@ pwsh -NoProfile -File 'D:/github/JanVim-Exhibition-2026/.worktrees/sound-real-cu
    脚本把同一 session 文件的精确 soundRunRoot 传给候选 `scripts/start-show.ps1 -SoundRunRoot`。
 
 ```powershell
-pwsh -NoProfile -File 'D:/github/JanVim-Exhibition-2026/.worktrees/sound-real-cursor/.superpowers/sdd/2026-09-05-real-cursor-sound/operator.ps1' -Step Show
+pwsh -NoProfile -File 'D:/github/JanVim-Exhibition-2026/.worktrees/sound-real-cursor/.operator/real-cursor-sound.ps1' -Step Show
 ```
 
 默认 `-NetworkPolicy OfflineRequired`。只做联网诊断时可以显式追加
@@ -58,7 +62,7 @@ pwsh -NoProfile -File 'D:/github/JanVim-Exhibition-2026/.worktrees/sound-real-cu
    备用声音停止（仅停止本次声音）：
 
 ```powershell
-pwsh -NoProfile -File 'D:/github/JanVim-Exhibition-2026/.worktrees/sound-real-cursor/.superpowers/sdd/2026-09-05-real-cursor-sound/operator.ps1' -Step StopSound
+pwsh -NoProfile -File 'D:/github/JanVim-Exhibition-2026/.worktrees/sound-real-cursor/.operator/real-cursor-sound.ps1' -Step StopSound
 ```
 
 `STOP_REQUESTED` 只是请求回执；窗口 A 的 `SOUND_RUN_COMPLETE` 和 sound root 的

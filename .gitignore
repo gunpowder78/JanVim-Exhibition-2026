@@ -6,6 +6,7 @@ coverage/
 .DS_Store
 Thumbs.db
 .worktrees/
+/.operator/
 
 # Prepared show artifacts are staged locally and identified by lock/manifests.
 runtime/janvim/

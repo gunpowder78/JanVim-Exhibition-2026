@@ -3,6 +3,9 @@
 `feat/sound-real-cursor` 已接入可选真实逻辑光标输入；人工联动听音仍待确认。
 本地操作、PRE-SHOW 的 `songfeng-source` 长文选择、全新显示映射与运行目录见
 [真实光标候选交接](../docs/operations/2026-09-05-real-cursor-sound-handoff.md)。
+完整本机 helper 为候选 `.operator/real-cursor-sound.ps1`，人工 Prepare 后读取邻接
+`.operator/real-cursor-sound-session.json`；证据报告入口为 `.operator/real-cursor-sound-report.md`。
+这些是 ignored 本机附件；清理 SDD scratch 时必须保留 `.operator/`，交接命令不依赖计划目录。
 以下历史试听结果及 `sound-minimal-loop` 命令属于保全的模拟基线。
 
 状态：N1 退出淡出缺口已修正；2026-09-05 基本试听及混合段提前 Stop 人工试听均通过。
