@@ -448,6 +448,7 @@ installOsc = {
                 now = Main.elapsedTime;
                 decoded = msg.copy;
                 decoded.put(0, msg.at(0).asString);
+                if(msg.at(1).isKindOf(Symbol)) { decoded.put(1, msg.at(1).asString) };
                 before = policy.at(\snapshot).value;
                 action = policy.at(\handle).value(decoded, now);
                 after = policy.at(\snapshot).value;
