@@ -2,7 +2,8 @@
 var argv, session, mode, durationText, duration, capturePath, hardwareOutput, argumentError;
 var flockIngress = false;
 var finiteFloat, validSession, validDurationText, jsonString, emit;
-var emitReady, emitEvent, emitStats, emitComplete, completeEmitted = false, readyEmitted = false;
+var emitReady, emitEvent, emitOwnershipCheckFailure, emitStats, emitComplete;
+var completeEmitted = false, readyEmitted = false;
 var soundRoot, policyFactory, policy, synthFactory, definitions;
 var options, server, serverPort = 57141, launchedPid, preflightId, preflightResponder;
 var endpointHelperPath, endpointOwned = false, endpointCheckPid;
@@ -62,6 +63,19 @@ emitEvent = { |type, reason|
     var body = "{\"type\":" ++ jsonString.value(type);
     if(reason.notNil) { body = body ++ ",\"reason\":" ++ jsonString.value(reason) };
     emit.value("SOUND_EVENT", body ++ "}");
+};
+emitOwnershipCheckFailure = { |origin, status, helperPid, generation, started|
+    emit.value("SOUND_EVENT", "{" ++
+        "\"type\":\"ownershipCheckFailure\"," ++
+        "\"origin\":" ++ jsonString.value(origin) ++ "," ++
+        "\"status\":" ++ status.asString ++ "," ++
+        "\"helperPid\":" ++ helperPid.asString ++ "," ++
+        "\"generation\":" ++ generation.asString ++ "," ++
+        "\"phase\":" ++ jsonString.value(phase.asString) ++ "," ++
+        "\"serverPid\":" ++ launchedPid.asString ++ "," ++
+        "\"elapsedMilliseconds\":" ++
+            ((Main.elapsedTime - started) * 1000).round.asInteger.asString ++ "}"
+    );
 };
 emitStats = {
     var snapshot = policy.at(\snapshot).value;
@@ -185,10 +199,11 @@ cancelEndpointCheck = {
     endpointCheckPid = nil;
 };
 
-inspectEndpoint = { |action|
-    var generation;
+inspectEndpoint = { |action, deadlineSeconds = 1.5|
+    var generation, started, helperPid;
     cancelEndpointCheck.value;
     generation = endpointCheckGeneration;
+    started = Main.elapsedTime;
     if(ownsServerProcess.value.not) {
         action.value(2);
     } {
@@ -203,12 +218,18 @@ inspectEndpoint = { |action|
                         endpointCheckTimeout = nil;
                     };
                     endpointCheckPid = nil;
+                    if(phase == \starting and: { exitCode != 0 and: { exitCode != 2 } }) {
+                        emitOwnershipCheckFailure.value(
+                            "helperExit", exitCode, helperPid, generation, started
+                        );
+                    };
                     action.value(exitCode);
                 };
             }.defer;
         }, false);
+        helperPid = endpointCheckPid;
         endpointCheckTimeout = Routine {
-            1.5.wait;
+            deadlineSeconds.wait;
             if(generation == endpointCheckGeneration) {
                 endpointCheckGeneration = endpointCheckGeneration + 1;
                 if(pidIsRunning.value(endpointCheckPid)) {
@@ -216,6 +237,11 @@ inspectEndpoint = { |action|
                 };
                 endpointCheckPid = nil;
                 endpointCheckTimeout = nil;
+                if(phase == \starting) {
+                    emitOwnershipCheckFailure.value(
+                        "deadlineExpired", 4, helperPid, generation, started
+                    );
+                };
                 action.value(4);
             };
         }.play(AppClock);
@@ -651,7 +677,7 @@ verifyStartupEndpoint = {
                 { abortStartup.value("ownershipCheckFailed") }
             );
         };
-    });
+    }, 3.0);
 };
 
 startSafeBoot = {
