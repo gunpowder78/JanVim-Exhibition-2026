@@ -9,7 +9,41 @@
 鲸鸣、经典电子音色、宇宙洪荒声场和热噪等方向只做备忘，不在此次实现中。
 
 无需打开 SuperCollider IDE，也不需要新增依赖、ASIO 驱动、全局插件或 GUI。
-运行与停止指令会在实际无声闭环验证后补齐于此；不要使用旧测试脚本代替本候选。
+不要使用旧测试脚本代替本候选。本候选不启动 JanVim 或副屏界面。
+
+## 运行与停止
+
+使用 PowerShell 7。下面的指令不要求先切换目录，也不依赖预载变量。
+当前仍在进行长时测试与审查；人工试听应等交接记录标明自动验证完成后再开始。
+
+默认无声运行（45 秒模拟输入，随后清理）：
+
+```powershell
+pwsh -NoProfile -File 'D:\github\JanVim-Exhibition-2026\.worktrees\sound-minimal-loop\sound\start-sound.ps1'
+```
+
+仅在人工试听时使用下面的明确启声选项。先确认有线耳机已连接，并由人把耳机音量调低：
+
+```powershell
+pwsh -NoProfile -File 'D:\github\JanVim-Exhibition-2026\.worktrees\sound-minimal-loop\sound\start-sound.ps1' -Listen
+```
+
+三段模拟输入分别为拨弦、风声、混合；默认每段约 15 秒。启动和退出时间另计。
+每次自动创建一个 `sound-*` 运行目录，控制台的 `SOUND_RUN_READY` 给出 `runRoot`。
+如需提前停止，在另一个 PowerShell 7 窗口执行下面的文件命令，
+将占位路径替换为**本次** `runRoot`，不要使用旧运行的路径：
+
+```powershell
+pwsh -NoProfile -File 'D:\github\JanVim-Exhibition-2026\.worktrees\sound-minimal-loop\sound\stop-sound.ps1' -RunRoot 'D:\VirtualData\JanVim-Exhibition-Rehearsals\sound-本次运行目录'
+```
+
+`STOP_REQUESTED` 只表示请求被接收；应继续确认 A 窗口出现 `SOUND_RUN_COMPLETE`，
+对应 `summary.json` 的 `clean` 为 `true`。停止后不自动重新启声。
+`Ctrl+C` 是备用停止方式。出现突发过响先摘下耳机，再停止候选。
+
+目录不复用、不覆盖；声音证据位于仓库外，不是展演源媒体。
+如遇端口占用、设备不匹配或启动失败，保留当前回执并停止排查；不要批量杀进程、
+改默认输出设备或提高音量来强行获得声音。已确认可听的官方示例仅作单独排障参考。
 
 ## 安全边界
 
@@ -41,6 +75,9 @@
 
 特征必须有限，随后限制在 `[0,1]`；拒绝错误字段、过时/超前消息、旧序号或错误会话。
 限频直接丢弃，不积压补播。只有合法 start / heartbeat 续租。
+
+SC 会把收到的 OSC `s` 解码为 Symbol；接收边界将会话 Symbol 归一为 String 后再交给策略，
+不会把其他错误参数类型强制转成合法会话。参见 [SC OSC 类型说明](https://doc.sccode.org/Guides/OSC_communication.html)。
 
 发送器只编码不超过 512 字节的普通消息。SC 的 OSCdef 接收的是已解码字段，不是原始
 UDP 报文防火墙；本原型不面向任意外部发送者或恶意本机进程。

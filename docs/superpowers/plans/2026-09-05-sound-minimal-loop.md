@@ -69,6 +69,8 @@ Evidence: implementation `4e95208`, fixes `2f394e9` / `ce3e2ae`; 14/14 WAV/servi
 
 **Files:** Create `sound/run.mjs`, `sound/start-sound.ps1`, `sound/stop-sound.ps1`, `sound/tests/supervisor.check.mjs`, `sound/tests/integration.mjs`.
 
+Integration-discovered correction: allow the existing `sound/service.scd` receive boundary to normalize decoded Symbol session values to String. Actual SC OSC `s` decoding differs from CLI argv; preserve invalid argument types and prove valid/invalid admission through production UDP integration. No policy or wire-contract weakening.
+
 **Interfaces:** CLI `node sound/run.mjs --mode silent|listen --duration 45 --output ABS_FRESH_DIR` starts the exact SC service, waits READY, uses receiver clock anchor with performance.now() for typed OSC timestamps. Output defaults to a fresh `sound-<timestamp>-<random>` under the external rehearsal parent; refuse reused/non-external destinations. Supervisor opens a loopback-only ephemeral control listener, stores its address plus random control token in this run's `control.json`, accepts exact stop only, then closes it. `node sound/run.mjs --stop ABS_RUN_DIR` validates the receipt and asks this supervisor to stop; does not kill a PID from disk. PowerShell wrappers expose `-Listen` and `-RunRoot` with explicit absolute invocation independent of cwd. Never default to Listen.
 
 - [ ] Write failing CLI tests: default silent, invalid duration/mode/path, reused output, port occupation does not kill occupant, child launch fails cleanly, bounded stdout line/buffer and log limits, matching/wrong stop token. Real disposable process/UDP fixtures preferred; fake-clock pure timeline test for non-burst scheduling.
