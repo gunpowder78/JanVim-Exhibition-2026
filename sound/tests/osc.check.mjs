@@ -9,6 +9,52 @@ import { encodeMessage } from "../osc.mjs";
 const STOP_PATH = "/janvim/sound/v1/stop";
 const START_PATH = "/janvim/sound/v1/start";
 
+test("flock-live preserves the original double deadline and ordered wire fields", () => {
+  const packet = encodeMessage("/janvim/sound/v1/flock-live", [
+    { type: "s", value: "abc" }, { type: "i", value: 7 },
+    { type: "d", value: 10.49 }, { type: "i", value: 2 },
+    { type: "i", value: 19 }, { type: "f", value: 0.75 },
+    { type: "f", value: 0.25 }, { type: "d", value: 10.5 },
+  ]);
+  // Hand-derived: 28-byte address, 12-byte tags, then 40 bytes of values.
+  assert.equal(packet.subarray(0, 28).toString("ascii"), "/janvim/sound/v1/flock-live\0");
+  assert.equal(packet.subarray(28, 40).toString("hex"), "2c7369646969666664000000");
+  assert.equal(packet.subarray(40, 44).toString("hex"), "61626300");
+  assert.equal(packet.readInt32BE(44), 7);
+  assert.equal(packet.readDoubleBE(48), 10.49);
+  assert.equal(packet.readInt32BE(56), 2);
+  assert.equal(packet.readInt32BE(60), 19);
+  assert.equal(packet.readFloatBE(64), 0.75);
+  assert.equal(packet.readFloatBE(68), 0.25);
+  assert.equal(packet.readDoubleBE(72), 10.5);
+  assert.equal(packet.length, 80);
+});
+
+test("flock-mute adds only epoch and revision to the common wire fields", () => {
+  const packet = encodeMessage("/janvim/sound/v1/flock-mute", [
+    { type: "s", value: "abc" }, { type: "i", value: 8 },
+    { type: "d", value: 10.5 }, { type: "i", value: 2 },
+    { type: "i", value: 20 },
+  ]);
+  assert.equal(packet.subarray(0, 28).toString("ascii"), "/janvim/sound/v1/flock-mute\0");
+  assert.equal(packet.subarray(28, 36).toString("hex"), "2c73696469690000");
+  assert.equal(packet.subarray(36, 40).toString("hex"), "61626300");
+  assert.equal(packet.readInt32BE(40), 8);
+  assert.equal(packet.readDoubleBE(44), 10.5);
+  assert.equal(packet.readInt32BE(52), 2);
+  assert.equal(packet.readInt32BE(56), 20);
+  assert.equal(packet.length, 60);
+});
+
+test("the additive paths preserve every legacy path and reject lookalike paths", () => {
+  for (const name of ["start", "heartbeat", "cursor", "flock", "stop"]) {
+    assert.doesNotThrow(() => encodeMessage(`/janvim/sound/v1/${name}`, []));
+  }
+  for (const name of ["flock-live/", "flock-muted", "Flock-live", "flock-live/stop"]) {
+    assert.throws(() => encodeMessage(`/janvim/sound/v1/${name}`, []), /not allowed/);
+  }
+});
+
 test("encodes a no-argument packet from hand-derived OSC bytes", () => {
   const packet = encodeMessage(STOP_PATH, []);
 

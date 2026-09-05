@@ -1,7 +1,8 @@
 (
-{ |session, initialCounters|
+{ |session, initialCounters, flockIngress = false|
     var paths, lengths, notes, counterKeys, int32Max, validSeed;
     var state, lastSeq, lastHeartbeat, lastCursor, lastFlock;
+    var flockEpoch = 0, flockRevision = 0, windExpiresAt;
     var acceptedPlucks, acceptedFlocks, rejected, rateDropped;
     var finiteFloat, saturatingIncrement, reject, stop, timeout;
     var handle, tick, snapshot;
@@ -14,6 +15,10 @@
         "/janvim/sound/v1/stop"
     ];
     lengths = [4, 4, 7, 6, 4];
+    if(flockIngress == true) {
+        paths = paths ++ ["/janvim/sound/v1/flock-live", "/janvim/sound/v1/flock-mute"];
+        lengths = lengths ++ [9, 6];
+    };
     notes = [48, 50, 52, 55, 57, 60, 62, 64, 67, 69, 72];
     counterKeys = [\acceptedPlucks, \acceptedFlocks, \rejected, \rateDropped];
     int32Max = 2147483647;
@@ -70,6 +75,7 @@
             nil
         } {
             state = \stopped;
+            windExpiresAt = nil;
             (type: \stop, reason: reason)
         }
     };
@@ -89,6 +95,7 @@
     handle = { |msg, now|
         var timeoutAction, valid, path, pathIndex, seq, sentAt;
         var x, y, motion, energy, centroid, noteIndex;
+        var epoch, revision, expiresAt;
 
         if(finiteFloat.value(now).not) {
             reject.value
@@ -148,11 +155,40 @@
                             finiteFloat.value(msg.at(5))
                         };
                     };
+                    if(valid and: { pathIndex >= 5 }) {
+                        epoch = msg.at(4);
+                        revision = msg.at(5);
+                        valid = epoch.isInteger and: {
+                            epoch > 0 and: { epoch <= int32Max and: {
+                                revision.isInteger and: {
+                                    revision > 0 and: { revision <= int32Max and: {
+                                        epoch >= flockEpoch and: { revision > flockRevision }
+                                    } }
+                                }
+                            } }
+                        };
+                    };
+                    if(valid and: { pathIndex == 5 }) {
+                        energy = msg.at(6);
+                        centroid = msg.at(7);
+                        expiresAt = msg.at(8);
+                        valid = finiteFloat.value(energy) and: {
+                            energy >= 0.0 and: { energy <= 1.0 and: {
+                                finiteFloat.value(centroid) and: {
+                                    centroid >= 0.0 and: { centroid <= 1.0 and: {
+                                        finiteFloat.value(expiresAt) and: {
+                                            now < expiresAt and: { expiresAt <= (sentAt + 0.5) }
+                                        }
+                                    } }
+                                }
+                            } }
+                        };
+                    };
                     if(valid) {
                         if(pathIndex == 0) {
                             valid = state == \idle;
                         } {
-                            if((pathIndex >= 1) and: { pathIndex <= 3 }) {
+                            if(pathIndex != 4) {
                                 valid = state == \running;
                             };
                         };
@@ -207,7 +243,23 @@
                                             )
                                         }
                                     } {
-                                        stop.value(\requested)
+                                        if(pathIndex == 4) {
+                                            stop.value(\requested)
+                                        } {
+                                            // The sender admits samples at 20Hz. Apply each new
+                                            // watermark here immediately, including epoch/mute
+                                            // changes less than 50ms apart. Never renew the lease.
+                                            flockEpoch = epoch;
+                                            flockRevision = revision;
+                                            if(pathIndex == 5) {
+                                                windExpiresAt = expiresAt;
+                                                acceptedFlocks = saturatingIncrement.value(acceptedFlocks);
+                                                (type: \wind, energy: energy, pan: (centroid * 1.6) - 0.8)
+                                            } {
+                                                windExpiresAt = nil;
+                                                (type: \windMute)
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -219,7 +271,24 @@
     };
 
     tick = { |now|
-        if(finiteFloat.value(now)) { timeout.value(now) } { nil }
+        var action;
+        if(finiteFloat.value(now)) {
+            action = timeout.value(now);
+            if(action.notNil) {
+                action
+            } {
+                if(state == \running and: {
+                    windExpiresAt.notNil and: { now >= windExpiresAt }
+                }) {
+                    windExpiresAt = nil;
+                    (type: \windMute)
+                } {
+                    nil
+                }
+            }
+        } {
+            nil
+        }
     };
 
     snapshot = {

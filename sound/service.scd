@@ -1,5 +1,6 @@
 (
 var argv, session, mode, durationText, duration, capturePath, hardwareOutput, argumentError;
+var flockIngress = false;
 var finiteFloat, validSession, validDurationText, jsonString, emit;
 var emitReady, emitEvent, emitStats, emitComplete, completeEmitted = false, readyEmitted = false;
 var soundRoot, policyFactory, policy, synthFactory, definitions;
@@ -10,6 +11,7 @@ var phase = \validating, bootRoutine, startupTimeout, startupMonitor;
 var cleanupRoutine, cleanupTimeout, captureWriteDoneResponder, captureWriteFailureResponder;
 var checker, statsTask, durationTask, serverFailureResponder, oscKeys = Array.new;
 var voiceBus, finalBus, mixer, outputSynth, captureBuffer, captureSynth, windSynth;
+var windNodes = Array.new;
 var captureFrames, pluckNodes = Array.new, livePlucks = 0, maxPlucks = 0, heartbeatControl = 0;
 var capturePositionResponder, recordedFrames = 0, stopFrame = 0;
 var pidIsRunning, cancelEndpointCheck, inspectEndpoint, stopTasks, removeResponders;
@@ -85,13 +87,17 @@ emitComplete = { |reason, clean|
 
 argv = thisProcess.argv;
 argumentError = nil;
-if(argv.size != 4) {
+if((argv.size != 4) and: { argv.size != 5 }) {
     argumentError = "invalidArguments";
 } {
     session = argv.at(0);
     mode = argv.at(1);
     durationText = argv.at(2);
     capturePath = argv.at(3);
+    if(argv.size == 5) {
+        flockIngress = ["flock-v1"].includesEqual(argv.at(4));
+        if(flockIngress.not) { argumentError = "invalidArguments" };
+    };
     validSession = session.isString and: {
         session.size == 32 and: {
             session.every { |character| "0123456789abcdef".includes(character) }
@@ -139,7 +145,7 @@ if(
     emitComplete.value("loadFailure", false);
     2.exit;
 } {
-policy = policyFactory.value(session);
+policy = policyFactory.value(session, nil, flockIngress);
 definitions = synthFactory.value;
 
 options = ServerOptions.new
@@ -296,7 +302,9 @@ finishService = { |reason, initiallyClean|
                     captureSynth !? { captureSynth.free };
                     outputSynth !? { outputSynth.free };
                     pluckNodes.do { |node| node.free };
-                    windSynth !? { windSynth.free };
+                    windNodes.do { |node| node.free };
+                    windNodes = Array.new;
+                    windSynth = nil;
                     voiceBus !? { voiceBus.free };
                     finalBus !? { finalBus.free };
                     captureBuffer !? {
@@ -427,14 +435,31 @@ processAction = { |action|
             },
             \wind, {
                 if(windSynth.isNil) {
-                    windSynth = Synth.before(mixer, \jvWind, [
-                        \outBus, voiceBus.index,
-                        \energy, action.at(\energy),
-                        \pan, action.at(\pan)
-                    ]);
+                    // Releasing winds still own a seat. A full pair drops this
+                    // trigger; only a later fresh action may allocate again.
+                    if(windNodes.size < 2) {
+                        var node = Synth.before(mixer, \jvWind, [
+                            \outBus, voiceBus.index,
+                            \energy, action.at(\energy),
+                            \pan, action.at(\pan)
+                        ]);
+                        windSynth = node;
+                        windNodes = windNodes.add(node);
+                        node.onFree {
+                            {
+                                windNodes = windNodes.reject { |candidate| candidate === node };
+                                if(windSynth === node) { windSynth = nil };
+                            }.defer;
+                        };
+                    };
                 } {
                     windSynth.set(\energy, action.at(\energy), \pan, action.at(\pan));
                 };
+            },
+            \windMute, {
+                // The existing SynthDef gate has a 0.3s release. Keep the node
+                // owned until onFree, but allow a fresh live to use a new seat.
+                windSynth !? { windSynth.set(\gate, 0); windSynth = nil };
             },
             \stop, { beginStop.value(action.at(\reason).asString, true) }
         );
@@ -449,6 +474,9 @@ installOsc = {
         "/janvim/sound/v1/flock",
         "/janvim/sound/v1/stop"
     ];
+    if(flockIngress) {
+        paths = paths ++ ["/janvim/sound/v1/flock-live", "/janvim/sound/v1/flock-mute"];
+    };
 
     paths.do { |path, index|
         var key = ("jvSoundService" ++ index).asSymbol;
