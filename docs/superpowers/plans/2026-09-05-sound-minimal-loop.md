@@ -19,7 +19,7 @@
 - Destination `127.0.0.1:57140` (sclang); private scsynth `127.0.0.1:57141`. Never displace an existing process.
 - Headphones device must match `Windows WASAPI : Headphones (Senary Audio)`; 48 kHz, stereo, zero input channels. Do not fall back to speakers or another endpoint.
 - Ceiling 0.2 linear sample amplitude; one wind voice and at most eight overlapping pluck nodes; shared stop fade 1.5 s.
-- Human listening and real JanVim/Jianshan integration remain pending.
+- Human listening for the simulated-input minimal loop passed on 2026-09-05 (basic WAV/live consistency and mixed-phase early Stop). Real JanVim/Jianshan integration and exhibition audio acceptance remain outside this delivery.
 
 ## Task 1: Bounded OSC encoding and SC admission policy
 
@@ -92,7 +92,7 @@ Task 3 implementation/review complete: `3b050ba`, fix `dd83918`; 37/37 combined 
 - [x] Record Node/SC/ports/device, commits, honest test outcomes, resource duration/node/memory stats, audio sample metrics/hashes and any limitations in an external JSON receipt and concise tracked handoff. Distinguish automatic signal checks, real-time silent transport, simulated input, and still-pending human hearing. Final runtime `0cb5a9c`: 49/49 sound checks, 3 SC checks, 1800.034s silent activity, 361 resource samples, max7 plucks; exact-source hashes unchanged, owned processes stopped. Important N1 remains explicit; not full acceptance.
 - [x] README: one absolute launch command (`-Listen` only for user), second-terminal stop command, fresh paths, failure/no-audio procedure referencing known-good official tone, no IDE required, no system volume manipulation. Preserve listen examples and stops together.
 - [x] Whole-branch independent review with exact base/diff and one consolidated fix/re-review completed. I1/I2 addressed; final re-review found Important N1 (post-READY exit0 without COMPLETE skips fade allowance). Local commits only; candidate stopped and worktree retained. Review is NOT clean.
-- [x] Follow-up explicitly authorized by user's “请继续推进”: resolve N1 with a failing zero-status lifetime regression and one-line READY/COMPLETE-based grace correction. Three exit cases and the combined sound suite passed (52/52, 222.351s); independent focused review has no Critical/Important findings. Earlier overnight review-cap stop remains in history; this is a separately authorized continuation, not a waiver. Basic WAV/live hearing confirmed by user; early-Stop human audition remains pending.
+- [x] Follow-up explicitly authorized by user's “请继续推进”: resolve N1 with a failing zero-status lifetime regression and one-line READY/COMPLETE-based grace correction. Three exit cases and the combined sound suite passed (52/52, 222.351s); independent focused review has no Critical/Important findings. Earlier overnight review-cap stop remains in history; this is a separately authorized continuation, not a waiver. Basic WAV/live hearing and mixed-phase early Stop confirmed by user; `sound-stop-n1-20260905-140741-listen` ended cleanly after 78.864s, control requested, no further sound reported. Receipt/logs and cleanup independently checked. No real-input or exhibition acceptance inferred.
 
 ## Self-review / rulings
 
