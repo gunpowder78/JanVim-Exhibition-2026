@@ -9,6 +9,7 @@ import { performance } from "node:perf_hooks";
 import process from "node:process";
 import test from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
+import { createContext, Script } from "node:vm";
 import { prepareRunRoot, spawnManagedChild } from "../run.mjs";
 import { analyzeWav } from "./analyze-wav.mjs";
 import { recordedStop, requireRecordedSilence } from "./recorded-stop.mjs";
@@ -27,14 +28,55 @@ async function bounded(promise, ms = 1500) {
   } finally { abort.abort(); }
 }
 
-async function until(read, accept, label, ms = 1500) {
-  const deadline = performance.now() + ms;
+async function until(read, accept, label, ms = 1500, deadline = performance.now() + ms) {
   while (performance.now() < deadline) {
     const value = await read();
+    if (performance.now() >= deadline) break;
     if (accept(value)) return value;
     await delay(20);
   }
   assert.fail(`deadline exceeded: ${label}`);
+}
+
+// Run the actual shared helper with an isolated clock, never patched global timers.
+function pollingFixture() {
+  const clock = { now: 0 };
+  const context = createContext({ assert,
+    performance: { now: () => clock.now, timeOrigin: 100000 },
+    delay: async ms => { clock.now += ms; },
+  });
+  new Script(until.toString()).runInContext(context, { timeout: 1000 });
+  return { clock, context };
+}
+
+for (const completedAt of [600, 350, 349]) {
+  test(`poll deadline ${completedAt < 350 ? "accepts before" : "rejects at or after"} 350ms: read completes at ${completedAt}ms`, async () => {
+    const { clock, context } = pollingFixture();
+    const result = context.until(async () => {
+      clock.now = completedAt;
+      return { gate: 0 };
+    }, value => value.gate === 0, "explicit mute", 350);
+    if (completedAt < 350) assert.equal((await result).gate, 0);
+    else await assert.rejects(result, /deadline exceeded: explicit mute/);
+  });
+}
+
+for (const phase of ["empty", "unavailable"]) {
+  test(`poll deadline for ${phase} is anchored before the invalidation call`, async () => {
+    const { clock, context } = pollingFixture();
+    const source = await readFile(path.join(root, "sound/tests/flock-chain.check.mjs"), "utf8");
+    const blocks = source.match(/^ {8}const invalidatedAt[\s\S]+?(?=^ {8}if \(phase === "stale"\))/gm);
+    assert.equal(blocks?.length, 1, "execute the actual integration invalidation/wait block");
+    Object.assign(context, { phase, epochNow: () => 100000 + clock.now,
+      bird: {}, flockFrame: () => ({}),
+      send: () => { clock.now = 200; }, // Invalidation itself consumes part of the budget.
+      tree: async () => { clock.now = 500; return [{ name: "jvWind", controls: { gate: 0 } }]; },
+      wind: node => node.name === "jvWind",
+    });
+    const result = new Script(`(async () => { ${blocks[0]} })()`)
+      .runInContext(context, { timeout: 1000 });
+    await assert.rejects(result, /deadline exceeded: .* wind gate released/);
+  });
 }
 
 // Read-only query of the actual owned server. Never inject sound OSC from this test.
@@ -233,11 +275,13 @@ for (const disconnect of [false, true]) {
         lastSampledAtMs = performance.now() - birdOrigin;
         send(bird, flockFrame("sample", lastSampledAtMs));
         live = false;
-        const invalidatedAtMs = epochNow();
+        const invalidatedAt = performance.now();
+        const invalidatedAtMs = performance.timeOrigin + invalidatedAt;
         if (phase === "empty" || phase === "unavailable") send(bird, flockFrame(phase));
         if (phase === "disconnect") bird.end();
         await until(tree, nodes => nodes.filter(wind).every(node => node.controls.gate === 0),
-          `${phase} wind gate released`, phase === "empty" || phase === "unavailable" ? 350 : 1000);
+          `${phase} wind gate released`, phase === "empty" || phase === "unavailable" ? 350 : 1000,
+          phase === "empty" || phase === "unavailable" ? invalidatedAt + 350 : undefined);
         if (phase === "stale") {
           await delay(550);
           for (let index = 0; index < 3; index++) {

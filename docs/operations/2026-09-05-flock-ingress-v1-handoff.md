@@ -5,7 +5,8 @@
 `93ce7b6f9667c1f32e4faada1d5f45130cbe224c`。
 候选源码提交 `ce8c4aec9484f66c0ac321996b0950945162a43e`；Task 4 含测试/交接以及父控制器明确授权的
 `run.mjs` 启动祖先遍历边界修复和 `flock-protocol.mjs` 单行 lint 注释（解析语义不变）。
-源码与测试已本地提交；文件 SHA 与修复后证据/审计一致，交接文档随后单独提交。
+上述生产源码及原测试已本地提交；本轮仅修正集成测试的截止时间 oracle，生产源码不变。
+本轮测试/交接修正由父控制器另行提交；新 oracle 的证据单独列出，不替换原始门禁记录。
 声音全量 140/140 通过，应用全量仍为 1126/1128；这是未完成整体验收的候选，不是发布版本。
 当前不推送、不合并、不替换保底；整分支集成审查等待应用门禁问题处理。
 
@@ -55,6 +56,11 @@ Show Stop、2 秒 Show 租约失效或其他全局终止条件保留 1.5 秒整�
 
 Task 4 修复后完整声音 **140/140、exit 0**，完整 lint exit 0；全局应用门禁 **NOT PASS**。
 先前聚焦 SC 3/4 的独立所有权检查失败仍保留为关切，不声称所有启动问题已消失。
+其后 review Important 1 确认测试等待器可能把 350ms 后的结果算作及时 mute；本轮仅修测试。
+实际 shared `until` 现在在 await read 后重新检查期限，empty/unavailable 的绝对单调期限
+在失效调用前锚定，仍是 350ms，不能用自然 500ms 到期冒充显式 mute。
+本轮确定性 RED 1/5（4 个正确暴露的假通过）→GREEN 5/5；唯一完整 chain 文件运行 **7/7**，
+两项 synthetic 实际 PCM 加五项确定性边界检查。旧 140/140 是原生产运行记录，不是新 oracle 的全量重跑。
 测试入口：`sound/tests/flock-chain.check.mjs`。它使用明确标记的 **synthetic Show/flock producers**，
 经过真实 supervisor → TCP listener → 唯一 sender → SC policy/synth → 内部 PCM capture。
 没有硬件输出节点。风声、独立 mute 后的新拨弦、mute 后的零 PCM、Stop 前非零和淡出后静音
@@ -64,15 +70,23 @@ Task 4 修复后完整声音 **140/140、exit 0**，完整 lint exit 0；全局�
 
 可复核的已完成运行（均已停止，描述文件 active=false，仅作证据，不能复用连接）：
 
-- 修复后主链成功证据：`D:/VirtualData/JanVim-Exhibition-Rehearsals/sound-20260905T153025719Z-d08af47330f9/`。
+- 本轮严格 oracle 主链成功证据：`D:/VirtualData/JanVim-Exhibition-Rehearsals/sound-20260905T154708492Z-bc3116153913/`。
   实际 READY runRoot 是该路径下的 `run`；完整私有描述文件路径是
-  `D:/VirtualData/JanVim-Exhibition-Rehearsals/sound-20260905T153025719Z-d08af47330f9/run/flock-input.json`。
-- 修复后断连成功证据：`D:/VirtualData/JanVim-Exhibition-Rehearsals/sound-20260905T153100082Z-3c7a1bc94cf8/`。
+  `D:/VirtualData/JanVim-Exhibition-Rehearsals/sound-20260905T154708492Z-bc3116153913/run/flock-input.json`。
+- 本轮严格 oracle 断连成功证据：`D:/VirtualData/JanVim-Exhibition-Rehearsals/sound-20260905T154742874Z-dbf23e213d88/`。
   对应 `run/ready.json` 与 `run/flock-input.json` 均由这次实际 supervisor 生成。
 - 两处根目录的 `flock-chain-proof.json` 包含每个窗口、实际 node 观察、policy counters、capture/source SHA；
   `run/capture.wav` 是内部录音。主链四种 mute 与断连后的 mute peak/rms 均为 0，
   wind-only/cursor-only 各窗口非零，两次 recorded postStop peak/rms 均为 0。
   两次最大观察到 1 个 wind，T2 flap 检查另外实际覆盖 2 个活跃/释放节点。
+
+新回执：`task4-fix1-oracle-red`、`task4-fix1-oracle-green`、`task4-fix1-chain`、
+`task4-fix1-format-green-lint`，均在下述门禁根。主链 empty/unavailable 首次观察 gate=0 距失效
+分别 49.1663ms / 49.9463ms；严格 post-await 判据亦须 <350ms。
+SC 实际测试源码 SHA `ce205e9caf21057f169618da9053b212c703e46d3bf0be290e500db7d09a5f97`，
+留档 `task4-fix1-chain-source.mjs`。随后 lint 仅将提取 regex 的八个字面空格等价改成 ` {8}`；
+最终测试 SHA `6ebcb471f76ecec477401b1c7d22012aa1abef2b86ad76fb5787c43f93b07be0`，
+确定性 5/5 和修改文件 lint 再过；没有重跑 SC 或改写原 proof。差异与源码审计见 `task4-fix1-audit`。
 
 门禁回执根：`D:/VirtualData/JanVim-Exhibition-Rehearsals/flock-v1-gates-20260905-a2d9b87/`。
 历史失败保留：初次断连读取部分 READY JSON（已作有界测试修复）；首轮完整声音 **119/123、4 失败**，
@@ -92,7 +106,7 @@ forced-cleanup 外层改为 15s 启动+退出守卫，实际 Stop→exit 仍须 
 该次没有 SC READY，未进入修改过的 supervisor 祖先检查，**不同于旧 5000ms pwsh 超时**。
 定位为未修改的 SC `inspectEndpoint` / `server-port-owner.ps1` 阶段：1.5s 检查守卫和 helper 异常
 都可产生相同拒绝状态；原日志不能进一步区分，未证明驱动/端口外部故障。未降低所有权检查或作额外修复。
-随后仅执行一次完整声音 suite；本节两项新源码 PCM 均来自该次已通过的主链/断连。
+随后仅执行一次完整声音 suite；该次原 PCM 记录仍在 Task 4 报告中，本节入口更新为后来严格 oracle 的运行。
 该次 `final-sound-postfix` 于 15:34:51 UTC 完成：140/140、exit 0，265824.1586ms，
 captureComplete=true、timedOut=false、logLimitHit=false；没有重复全量运行。
 最终 forced-cleanup 实测 7455ms，结果保存于
@@ -147,7 +161,7 @@ T2 flap 测试仅在两个释放节点身份仍占位时断言新 live 被丢弃
 JanVim artifact lock 文件 SHA-256：
 `9cb5f25c91d8fd7186465de0f90e6ddde8b4a54fadee431d907992a797e54a7c`。
 本轮两项实测均匹配。完整最新 source/runtime hash 清单见门禁根 `task4-postfix-identities.stdout.log`
-与 Task 4 报告；没有改锁或重钉 bundle。授权修复后的当前未提交源码 SHA-256：
+与 Task 4 报告；没有改锁或重钉 bundle。已提交于 `ce8c4ae`、本轮保持不变的生产源码 SHA-256：
 
 - `sound/run.mjs`：`3eab8479b2ead1a722050dd0256533aa7e24818e15e477557a6ae2cef915f10e`
 - `sound/flock-protocol.mjs`：`b0bee92e76bff85c453e5b09c956c4184e6aa5d3b182bd4c90fb894cc0f7c5b6`
