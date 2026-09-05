@@ -3,7 +3,7 @@ import { spawn } from "node:child_process";
 import { Buffer } from "node:buffer";
 import { closeSync, openSync, writeSync } from "node:fs";
 import dgram from "node:dgram";
-import { lstat, mkdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
+import { link, lstat, mkdir, readFile, realpath, stat, unlink, writeFile } from "node:fs/promises";
 import net from "node:net";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
@@ -12,6 +12,8 @@ import { clearInterval, clearTimeout, setInterval, setTimeout } from "node:timer
 import { fileURLToPath } from "node:url";
 import { encodeMessage } from "./osc.mjs";
 import { createRealAdmission, createRealInput } from "./real-input.mjs";
+import { createFlockAdmission, createFlockInput } from "./flock-input.mjs";
+import { createFlockFramer, parseFlockAttach, parseFlockFrame } from "./flock-protocol.mjs";
 
 const RUN_FILE = fileURLToPath(import.meta.url);
 export const REHEARSAL_PARENT = "D:/VirtualData/JanVim-Exhibition-Rehearsals";
@@ -35,7 +37,7 @@ export function parseCli(argv) {
   for (let index = 0; index < argv.length; index += 2) {
     const option = argv[index];
     const value = argv[index + 1];
-    if (!["--duration", "--mode", "--output", "--input"].includes(option) || value === undefined) {
+    if (!["--duration", "--mode", "--output", "--input", "--flock-input"].includes(option) || value === undefined) {
       invalid("unknown or missing option");
     }
     if (seen.has(option)) invalid("duplicate option");
@@ -45,6 +47,9 @@ export function parseCli(argv) {
 
   if (!["silent", "listen"].includes(values.mode)) invalid("mode must be silent or listen");
   if (!["simulated", "real-cursor"].includes(values.input)) invalid("input must be simulated or real-cursor");
+  if (seen.has("--flock-input") && (values["flock-input"] !== "enabled" || values.input !== "real-cursor")) {
+    invalid("flock input requires --input real-cursor --flock-input enabled");
+  }
   if (!/^(?:0|[1-9]\d*)(?:\.\d+)?$/.test(values.duration)) invalid("duration is malformed");
   const duration = Number(values.duration);
   if (!Number.isFinite(duration) || duration < 1 || duration > 3600) {
@@ -59,6 +64,7 @@ export function parseCli(argv) {
     mode: values.mode,
     output: values.output === null ? null : path.normalize(values.output),
     ...(values.input === "real-cursor" ? { input: "real-cursor" } : {}),
+    ...(seen.has("--flock-input") ? { flockInput: "enabled" } : {}),
   };
 }
 
@@ -157,7 +163,8 @@ function tokensEqual(left, right) {
   return leftBytes.length === rightBytes.length && timingSafeEqual(leftBytes, rightBytes);
 }
 
-export async function startControlServer(runRoot, onStop, { realInput = null } = {}) {
+export async function startControlServer(runRoot, onStop, { realInput = null, flockInput = null } = {}) {
+  if (flockInput && !realInput) throw new Error("flock input requires real input");
   const token = randomBytes(32).toString("hex");
   const sockets = new Set();
   let accepted = false;
@@ -167,11 +174,32 @@ export async function startControlServer(runRoot, onStop, { realInput = null } =
   let persistenceError = null;
   let ownerSocket = null;
   let producerTimer;
+  let flockReceipt;
+  let birdSocket = null;
+  let birdDisabled = false;
+  let flockPersistence = Promise.resolve();
+  const flockPath = path.join(runRoot, "flock-input.json");
+  const flockDiagnostic = () => process.stderr.write("sound flock ingress: descriptor unavailable; optional input disabled\n");
+  const disableFlock = (reason = "source-disconnect", rejecting = false) => {
+    if (!flockInput) return;
+    if (!birdDisabled) {
+      birdDisabled = true;
+      flockInput.close(reason);
+      if (!rejecting) birdSocket?.destroy();
+    }
+    if (flockReceipt?.active) {
+      flockReceipt = { ...flockReceipt, active: false };
+      flockPersistence = writeFile(flockPath, `${JSON.stringify(flockReceipt)}\n`, {
+        encoding: "utf8", flag: "w", signal: globalThis.AbortSignal.timeout(1000),
+      }).catch(flockDiagnostic);
+    }
+  };
 
   const renewProducer = () => {
     clearTimeout(producerTimer);
     producerTimer = setTimeout(() => {
       realInput.close("producer-timeout");
+      disableFlock("show-stop");
       ownerSocket?.destroy();
     }, 2000);
   };
@@ -185,6 +213,7 @@ export async function startControlServer(runRoot, onStop, { realInput = null } =
   const closeOwned = async () => {
     clearTimeout(producerTimer);
     realInput?.close();
+    disableFlock("show-stop");
     for (const socket of sockets) socket.destroy();
     await closeListener();
   };
@@ -212,15 +241,21 @@ export async function startControlServer(runRoot, onStop, { realInput = null } =
       return;
     }
     sockets.add(socket);
-    socket.setTimeout(1000, () => socket.destroy());
+    const attachDeadline = performance.now() + 1000;
+    const attachTimer = setTimeout(() => socket.destroy(), 1000);
     let input = Buffer.alloc(0);
     let rejected = false;
+    let rejectionTimer;
+    let role = null;
     const reject = () => {
+      if (rejected || accepted) return;
       rejected = true;
       input = Buffer.alloc(0);
-      socket.end('{"ok":false}\n');
+      socket.end(flockInput && role !== "control" ? '{"version":1,"ok":false,"reason":"rejected"}\n' : '{"ok":false}\n');
+      if (role === "bird") disableFlock("invalid-frame", true);
       // A rejected owner must not keep the TCP half-open after its lease expires.
-      if (socket === ownerSocket) socket.destroySoon();
+      socket.destroySoon();
+      rejectionTimer = setTimeout(() => socket.destroy(), 250);
     };
     const acceptStop = () => {
       accepted = true;
@@ -229,6 +264,7 @@ export async function startControlServer(runRoot, onStop, { realInput = null } =
       onStop();
       clearTimeout(producerTimer);
       realInput?.close();
+      disableFlock("show-stop");
       if (ownerSocket && ownerSocket !== socket) ownerSocket.destroy();
       socket.end('{"ok":true}\n');
       void closeListener();
@@ -240,6 +276,7 @@ export async function startControlServer(runRoot, onStop, { realInput = null } =
         if (socket !== ownerSocket) reject();
         return;
       }
+      role = "control";
       // Authenticate and strip the secret before any policy, IPC or event path.
       const { token: privateToken, ...frame } = message;
       void privateToken;
@@ -250,27 +287,44 @@ export async function startControlServer(runRoot, onStop, { realInput = null } =
           keys.includes("runId") && keys.includes("controllerRunId") && !ownerSocket &&
           realInput.attach({ runId: frame.runId, controllerRunId: frame.controllerRunId })) {
         ownerSocket = socket;
-        socket.setTimeout(0);
+        clearTimeout(attachTimer);
         renewProducer();
         socket.write('{"ok":true,"input":"real-cursor"}\n');
       } else if (socket === ownerSocket) {
         if (realInput.accept(frame) && frame.command === "heartbeat") renewProducer();
       } else reject();
     };
+    const framer = realInput ? createFlockFramer({
+      onReject: reject,
+      onFrame: bytes => {
+        if (rejected || accepted) return false;
+        if (socket !== ownerSocket && socket !== birdSocket && performance.now() >= attachDeadline) return false;
+        if (role === "bird") {
+          const frame = parseFlockFrame(bytes);
+          if (!frame || birdDisabled) return false;
+          flockInput.accept(frame); // A legitimate freshness/order drop keeps the owner.
+          if (flockInput.snapshot().closed) disableFlock();
+          return !birdDisabled;
+        }
+        if (role === null && flockReceipt) {
+          const attach = parseFlockAttach(bytes, flockReceipt.token);
+          if (attach) {
+            if (birdDisabled || birdSocket || !flockInput.attach(attach.sourceId)) return false;
+            // attach captures R immediately before queuing the success ACK.
+            role = "bird";
+            birdSocket = socket;
+            clearTimeout(attachTimer);
+            socket.write('{"version":1,"ok":true,"input":"jianshan-flock-ndjson-v1"}\n');
+            return true;
+          }
+        }
+        realFrame(bytes);
+        return !rejected;
+      },
+    }) : null;
     socket.on("data", (chunk) => {
       if (realInput) {
-        let offset = 0;
-        while (offset < chunk.length && !rejected && !accepted) {
-          const newline = chunk.indexOf(10, offset);
-          const end = newline < 0 ? chunk.length : newline;
-          if (input.length + end - offset > 1024) { reject(); return; }
-          input = Buffer.concat([input, chunk.subarray(offset, end)]);
-          if (newline < 0) break;
-          const frame = input;
-          input = Buffer.alloc(0);
-          realFrame(frame);
-          offset = newline + 1;
-        }
+        framer.push(chunk); // One socket callback is exactly one bounded framer push.
         return;
       }
       if (input.length + chunk.length > 512) {
@@ -302,11 +356,15 @@ export async function startControlServer(runRoot, onStop, { realInput = null } =
       acceptStop();
     });
     socket.on("close", () => {
+      clearTimeout(attachTimer);
+      clearTimeout(rejectionTimer);
       sockets.delete(socket);
       if (socket === ownerSocket) {
         clearTimeout(producerTimer);
         realInput.close();
+        disableFlock("show-stop");
       }
+      if (socket === birdSocket) disableFlock();
     });
     socket.on("error", () => {});
   });
@@ -334,15 +392,37 @@ export async function startControlServer(runRoot, onStop, { realInput = null } =
     await closeOwned();
     throw new Error("failed to persist initial control receipt", { cause: error });
   }
+  if (flockInput) {
+    // Publish a complete private file atomically, without replacing an existing path.
+    const pendingPath = path.join(runRoot, `.flock-input-${randomBytes(8).toString("hex")}.tmp`);
+    const descriptor = { version: 1, active: true, host: "127.0.0.1", port: address.port,
+      protocol: "jianshan-flock-ndjson-v1", token: randomBytes(32).toString("hex") };
+    try {
+      await writeFile(pendingPath, `${JSON.stringify(descriptor)}\n`, {
+        encoding: "utf8", flag: "wx", mode: 0o600, signal: globalThis.AbortSignal.timeout(1000),
+      });
+      await link(pendingPath, flockPath);
+      flockReceipt = descriptor;
+      if (birdDisabled || flockInput.snapshot().closed) disableFlock("show-stop");
+    } catch {
+      disableFlock("descriptor-failure");
+      flockDiagnostic();
+    } finally {
+      await unlink(pendingPath).catch(() => {});
+    }
+  }
 
   return {
     get persistenceError() {
       return persistenceError;
     },
     receipt,
+    get flockReceipt() { return flockReceipt; },
+    disableFlock,
     async close() {
       await closeOwned();
       await persistence;
+      await flockPersistence;
     },
     async persistInactive() {
       receipt = { ...receipt, active: false };
@@ -350,6 +430,13 @@ export async function startControlServer(runRoot, onStop, { realInput = null } =
       return persistenceError === null;
     },
   };
+}
+
+export function takeInputReply(realInput, flockInput) {
+  const events = realInput.take(); // Enforce the real Show lease before bird authorization.
+  if (!flockInput) return { events };
+  const flockEvent = flockInput.take({ showAuthorized: realInput.isShowAuthorized() });
+  return { events, flockEvent, flockSnapshot: flockInput.snapshot() };
 }
 
 export function sendControlRequest(receipt) {
@@ -905,6 +992,9 @@ async function runInternalSender() {
   const admitReal = realMode ? createRealAdmission({
     nowMs: () => performance.timeOrigin + performance.now(),
   }) : null;
+  const admitFlock = realMode && config.flockInput === "enabled" ? createFlockAdmission({
+    nowMs: () => performance.timeOrigin + performance.now(),
+  }) : null;
   const socket = dgram.createSocket("udp4");
   let sequence = 0;
   let stopping = false;
@@ -926,6 +1016,7 @@ async function runInternalSender() {
           reject(new StopDeadlineError("supervisor clock reply missed sender deadline"));
           return;
         }
+        admitFlock?.update(value.flockSnapshot);
         resolve(value);
       });
       try {
@@ -973,6 +1064,17 @@ async function runInternalSender() {
         { type: "f", value: event.centroid },
       ]);
     }
+    if (event.kind === "flock-live" || event.kind === "flock-mute") {
+      const watermark = [{ type: "i", value: event.epoch }, { type: "i", value: event.revision }];
+      packet = encodeMessage(`/janvim/sound/v1/${event.kind}`, [
+        ...common, ...watermark,
+        ...(event.kind === "flock-live" ? [
+          { type: "f", value: event.energy }, { type: "f", value: event.centroid },
+          // Translate the original receiver deadline; IPC and send time grant no new lease.
+          { type: "d", value: clock.value + (event.expiresAtMs - clock.sampledAtMs) / 1000 },
+        ] : []),
+      ]);
+    }
     if (event.kind === "stop") packet = encodeMessage("/janvim/sound/v1/stop", common);
     return { packet, sentAt, seq: sequence };
   };
@@ -982,7 +1084,11 @@ async function runInternalSender() {
   };
   const sendEvent = async (event, deadline, clock) => {
     const encoded = await packetFor(event, deadline, clock);
-    if (clock && (stopRequested || !admitReal(event))) return null;
+    if (clock) {
+      if (stopRequested) return null;
+      const flock = event.kind === "flock-live" || event.kind === "flock-mute";
+      if (flock ? !admitFlock?.accept(event) : !admitReal(event)) return null;
+    }
     const sent = await sendUdp(socket, encoded.packet, deadline);
     return sent ? encoded : null;
   };
@@ -1039,11 +1145,12 @@ async function runInternalSender() {
     if (stopRequested || elapsed >= config.duration) {
       return finishStop(stopRequested ? "requested" : "duration");
     }
-    // One request in flight, at most a heartbeat and the latest cursor in its
-    // reply. The existing sender still serializes every packet and owns seq/time.
+    // One request in flight; constant-size input and watermark. This sender
+    // serializes every packet and owns the only OSC session and sequence.
     const clock = realMode ? await requestTimestamp(undefined, true) : null;
     if (stopRequested) return finishStop("requested");
-    const events = realMode ? clock.events : timeline.due(elapsed);
+    const events = realMode ? [...clock.events,
+      ...(admitFlock && clock.flockEvent ? [clock.flockEvent] : [])] : timeline.due(elapsed);
     const kinds = [];
     for (const event of events) {
       const sent = await sendEvent(event, undefined, clock);
@@ -1083,6 +1190,7 @@ async function runSupervisor(options) {
   let senderUnexpected = false;
   let stopRequested = false;
   let realInput = null;
+  let flockInput = null;
   let resourceTimer;
   let resourceSamplePromise = null;
   let senderFallbackTimer;
@@ -1105,6 +1213,8 @@ async function runSupervisor(options) {
     if (stopRequested) return;
     stopRequested = true;
     realInput?.close();
+    flockInput?.close("show-stop");
+    control?.disableFlock("show-stop");
     record("supervisor", "stopRequested", { source });
     sendIpc(sender?.child, { type: "stop" });
   };
@@ -1118,14 +1228,21 @@ async function runSupervisor(options) {
         nowMs: () => performance.timeOrigin + performance.now(),
         onStop: requestRunStop,
       });
+      if (options.flockInput === "enabled") {
+        flockInput = createFlockInput({
+          nowMs: () => performance.timeOrigin + performance.now(),
+          onDisable: reason => control?.disableFlock(reason),
+        });
+      }
     }
-    control = await startControlServer(runRoot, () => requestRunStop("control"), { realInput });
+    control = await startControlServer(runRoot, () => requestRunStop("control"), { realInput, flockInput });
     await assertLanguagePortAvailable();
 
     let resolveReady;
     const readyPromise = new Promise((resolve) => {
       resolveReady = resolve;
     });
+    const session = randomBytes(16).toString("hex");
     const serviceArgs = [
       "-a",
       "-l",
@@ -1137,12 +1254,12 @@ async function runSupervisor(options) {
       "-u",
       String(LANGUAGE_PORT),
       path.join(path.dirname(RUN_FILE), "service.scd"),
-      randomBytes(16).toString("hex"),
+      session,
       options.mode,
       String(serviceDuration),
       capturePath,
+      ...(flockInput ? ["flock-v1"] : []),
     ];
-    const session = serviceArgs.at(-4);
     service = await spawnManagedChild({
       args: serviceArgs,
       cwd: path.dirname(RUN_FILE),
@@ -1169,6 +1286,7 @@ async function runSupervisor(options) {
             sendIpc(sender?.child, { type: "ackStart" });
           }
           if (structured.body.type === "stop") {
+            if (flockInput) requestRunStop("service");
             sendIpc(sender?.child, { type: "ackStop" });
           }
         } else if (structured.type === "SOUND_STATS") {
@@ -1240,8 +1358,8 @@ async function runSupervisor(options) {
         const value =
           receiverAnchor.clock +
           (sampledAtMs - receiverAnchor.epochMilliseconds) / 1000;
-        const inputReply = message.takeRealInput && realInput
-          ? { events: realInput.take(), sampledAtMs } : {};
+        const inputReply = realInput && (message.takeRealInput || flockInput)
+          ? { ...takeInputReply(realInput, flockInput), sampledAtMs } : {};
         sendIpc(sender.child, { requestId: message.requestId, type: "clock", value, ...inputReply });
         return;
       }
@@ -1253,6 +1371,7 @@ async function runSupervisor(options) {
       session,
       type: "initialize",
       ...(realInput ? { input: "real-cursor" } : {}),
+      ...(flockInput ? { flockInput: "enabled" } : {}),
     });
     const senderCompletion = sender.completion.then((result) => {
       if (!senderFinished) {

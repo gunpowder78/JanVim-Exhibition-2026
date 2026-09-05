@@ -92,6 +92,11 @@ export function createRealInput({ nowMs, onStop }) {
       }
       return events;
     },
+    isShowAuthorized() {
+      const now = nowMs();
+      return !stopped && owner !== null && loop !== "idle" && generation > 0 &&
+        Number.isFinite(now) && now >= leaseMs && now - leaseMs < 2000;
+    },
     close,
   };
 }

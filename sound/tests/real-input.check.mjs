@@ -17,6 +17,27 @@ async function fixture() {
 }
 const notes = events => events.filter(event => event.kind === "cursor");
 
+test("Show authorization needs a non-idle owner heartbeat and survives consumption only within its lease", async () => {
+  const { input, at, stopped } = await fixture();
+  input.take();
+  assert.equal(input.isShowAuthorized?.(), false, "service health is not Show authorization");
+  input.attach(identity);
+  assert.equal(input.isShowAuthorized(), false);
+  input.accept(heartbeat(1, 0, { loopId: "idle" }));
+  assert.equal(input.isShowAuthorized(), false);
+  input.accept(heartbeat(2));
+  input.take();
+  assert.equal(input.isShowAuthorized(), true);
+  at(1999);
+  assert.equal(input.isShowAuthorized(), true);
+  at(2000);
+  assert.equal(input.isShowAuthorized(), false);
+  assert.deepEqual(stopped, [], "read-only authorization does not drive Stop");
+  input.take();
+  assert.deepEqual(stopped, ["producer-timeout"]);
+  assert.equal(input.isShowAuthorized(), false);
+});
+
 test("real input permits one attachment and expires at exactly two seconds", async () => {
   const { createRealInput } = await import("../real-input.mjs");
   let ms = 0;

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import dgram from "node:dgram";
 import net from "node:net";
-import { mkdir, readFile, rm, stat } from "node:fs/promises";
+import { copyFile, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 import process from "node:process";
@@ -13,6 +13,24 @@ import { pathToFileURL } from "node:url";
 import { randomUUID } from "node:crypto";
 
 const REHEARSAL_PARENT = "D:/VirtualData/JanVim-Exhibition-Rehearsals";
+
+test("PowerShell launcher forwards explicit flock ingress and rejects simulated or duplicate flags", async t => {
+  const { prepareRunRoot } = await import("../run.mjs");
+  const root = await prepareRunRoot(null);
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await copyFile(path.resolve("sound/start-sound.ps1"), path.join(root, "start-sound.ps1"));
+  await writeFile(path.join(root, "run.mjs"), 'process.stdout.write(JSON.stringify(process.argv.slice(2)));');
+  const launch = args => runProcess("pwsh.exe",
+    ["-NoProfile", "-NonInteractive", "-File", path.join(root, "start-sound.ps1"), ...args], { timeoutMs: 5000 });
+  const enabled = await launch(["-Input", "RealCursor", "-FlockIngress"]);
+  assert.equal(enabled.exitCode, 0, enabled.stderr);
+  assert.deepEqual(JSON.parse(enabled.stdout), ["--mode", "silent", "--duration", "45", "--input", "real-cursor", "--flock-input", "enabled"]);
+  for (const args of [["-FlockIngress"], ["-Input", "RealCursor", "-FlockIngress", "-FlockIngress"]]) {
+    const result = await launch(args);
+    assert.notEqual(result.exitCode, 0);
+    assert.equal(result.stdout, "");
+  }
+});
 
 const runProcess = (executable, args, options = {}) =>
   new Promise((resolve, reject) => {

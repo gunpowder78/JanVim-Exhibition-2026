@@ -176,7 +176,7 @@ for (const [label, before, after] of [
 ]) {
   test(`owned creation fails closed when ${label}`, async () => {
     const runRoot = await prepareRunRoot(null);
-    for (const name of ["run.mjs", "osc.mjs", "real-input.mjs", "owned-process.ps1", "owned-process.cs"]) {
+    for (const name of ["run.mjs", "osc.mjs", "real-input.mjs", "flock-input.mjs", "flock-protocol.mjs", "owned-process.ps1", "owned-process.cs"]) {
       await copyFile(path.resolve("sound", name), path.join(runRoot, name));
     }
     const nativePath = path.join(runRoot, "owned-process.cs");
@@ -216,7 +216,7 @@ for (const phase of ["before READY", "during inspection", "after pinning", "clea
   test(`supervisor startup failure ${phase} closes its owned tree and writes a summary`, async () => {
     const sourceRoot = await prepareRunRoot(null);
     const output = `${sourceRoot}-run`;
-    for (const name of ["run.mjs", "osc.mjs", "real-input.mjs", "owned-process.ps1", "owned-process.cs"]) {
+    for (const name of ["run.mjs", "osc.mjs", "real-input.mjs", "flock-input.mjs", "flock-protocol.mjs", "owned-process.ps1", "owned-process.cs"]) {
       await copyFile(path.resolve("sound", name), path.join(sourceRoot, name));
     }
     const leafCode = `const d=require('node:dgram').createSocket('udp4');
@@ -236,9 +236,12 @@ for (const phase of ["before READY", "during inspection", "after pinning", "clea
     const runPath = path.join(sourceRoot, "run.mjs");
     let source = await readFile(runPath, "utf8");
     source = source.replace(/const SCLANG = [^;]+;/, "const SCLANG = process.execPath;");
-    source = source.replace(/const serviceArgs = \[[\s\S]+?const session = serviceArgs.at\(-4\);/,
-      `const serviceArgs = ["-e", ${JSON.stringify(languageCode)}];
-       const session = "0123456789abcdef0123456789abcdef";`);
+    const serviceInvocation = /const session = randomBytes\(16\)\.toString\("hex"\);\s+const serviceArgs = \[[\s\S]+?\r?\n {4}\];(?=\s+service = await spawnManagedChild\()/g;
+    assert.equal([...source.matchAll(serviceInvocation)].length, 1,
+      "expected exactly one explicit SC session/serviceArgs source block before fixture replacement");
+    source = source.replace(serviceInvocation,
+      `const session = "0123456789abcdef0123456789abcdef";
+       const serviceArgs = ["-e", ${JSON.stringify(languageCode)}];`);
     source = source.replace(/async function inspectReadyProcesses\([\s\S]+?(?=async function inspectProcess)/,
       phase === "during inspection"
         ? "async function inspectReadyProcesses() { await delay(400); throw new Error('fixture inspection failure'); }\n\n"

@@ -9,10 +9,15 @@ param(
 
     [ValidateSet('Simulated', 'RealCursor')]
     [Alias('Input')]
-    [string] $SoundInput = 'Simulated'
+    [string] $SoundInput = 'Simulated',
+
+    [switch] $FlockIngress
 )
 
 $ErrorActionPreference = 'Stop'
+if ($FlockIngress -and $SoundInput -ne 'RealCursor') {
+    throw 'FlockIngress requires -Input RealCursor'
+}
 $verifiedNode = 'C:\Users\hxj\AppData\Local\hermes\node\node.exe'
 $node = if (Test-Path -LiteralPath $verifiedNode -PathType Leaf) {
     $verifiedNode
@@ -33,6 +38,10 @@ $arguments.Add($Duration.ToString([System.Globalization.CultureInfo]::InvariantC
 if ($SoundInput -eq 'RealCursor') {
     $arguments.Add('--input')
     $arguments.Add('real-cursor')
+}
+if ($FlockIngress) {
+    $arguments.Add('--flock-input')
+    $arguments.Add('enabled')
 }
 if (-not [string]::IsNullOrWhiteSpace($RunRoot)) {
     if (-not [System.IO.Path]::IsPathFullyQualified($RunRoot)) {
