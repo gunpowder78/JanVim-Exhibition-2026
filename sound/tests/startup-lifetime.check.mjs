@@ -4,6 +4,7 @@ import console from "node:console";
 import dgram from "node:dgram";
 import { copyFile, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { performance } from "node:perf_hooks";
 import process from "node:process";
 import test from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
@@ -26,6 +27,76 @@ async function reusable(port) {
       socket.bind({ address: "127.0.0.1", port, exclusive: true }, resolve);
     });
   } finally { socket.close(); }
+}
+
+for (const [exitCode, complete] of [[0, false], [1, false], [0, true]]) {
+  test(`post-READY exit ${exitCode} ${complete ? "with COMPLETE avoids extra grace" : "without COMPLETE preserves DSP fade grace"}`, async () => {
+    const runRoot = await prepareRunRoot(null);
+    let leaf;
+    let resolveReady;
+    const ready = new Promise((resolve) => { resolveReady = resolve; });
+    // No audio: the detached leaf keeps an endpoint and inherited streams alive.
+    // Exit is requested only after the real launcher's READY/COMPLETE path runs.
+    const leafCode = `const d=require('node:dgram').createSocket('udp4');
+      d.bind(0,'127.0.0.1',()=>process.send({pid:process.pid,port:d.address().port}));
+      d.on('message',()=>process.send('exit'));
+      setTimeout(()=>process.exit(),15000);`;
+    const languageCode = `const {spawn}=require('node:child_process');
+      const c=spawn(process.execPath,['-e',${JSON.stringify(leafCode)}],
+        {stdio:['ignore','inherit','inherit','ipc'],detached:true,windowsHide:true});
+      c.on('message',value=>{
+        if(value==='exit') process.exit(${exitCode});
+        console.log('LEAF '+JSON.stringify(value));
+        console.log('SOUND_READY {}');
+        if(${complete}) console.log('SOUND_COMPLETE {}');
+        console.log('FIXTURE_ARMED');
+      });
+      setTimeout(()=>process.exit(2),15000);`;
+    const owned = await spawnManagedChild({ executable: process.execPath,
+      args: ["-e", languageCode], cwd: runRoot, ownedLifetime: true, timeoutMs: 18000,
+      stdoutPath: path.join(runRoot, "grace.stdout.log"), stderrPath: path.join(runRoot, "grace.stderr.log"),
+      onStdoutLine: (line) => {
+        if (line.startsWith("LEAF ")) leaf = JSON.parse(line.slice(5));
+        if (line === "FIXTURE_ARMED") resolveReady();
+      },
+    });
+    try {
+      await bounded(ready);
+      await delay(200); // allow the launcher's stdin reader to consume R / C
+      const trigger = dgram.createSocket("udp4");
+      const started = performance.now();
+      try {
+        await new Promise((resolve, reject) => trigger.send("exit", leaf.port, "127.0.0.1",
+          (error) => error ? reject(error) : resolve()));
+      } finally { trigger.close(); }
+      // Confirm language loss, not merely that the fixture received a request.
+      await (async () => {
+        const deadline = performance.now() + 1000;
+        while (performance.now() < deadline) {
+          try { process.kill(owned.identity.pid, 0); }
+          catch (error) { assert.equal(error.code, "ESRCH"); return; }
+          await delay(10);
+        }
+        assert.fail("fixture language did not exit within one second");
+      })();
+      if (!complete) {
+        await delay(3100);
+        assert.doesNotThrow(() => process.kill(leaf.pid, 0), "descendant must survive DSP lease and fade grace");
+        await assert.rejects(reusable(leaf.port), /EADDRINUSE/);
+      }
+      const result = await bounded(owned.completion, complete ? 2500 : 4000);
+      const elapsedMs = performance.now() - started;
+      assert.equal(result.exitCode, exitCode);
+      assert.equal(result.limitReason, null, "cleanup must not depend on the test watchdog");
+      assert.ok(complete ? elapsedMs < 2500 : elapsedMs >= 3500 && elapsedMs < 8000, `exit cleanup took ${elapsedMs} ms`);
+      assert.throws(() => process.kill(leaf.pid, 0), /ESRCH/);
+      await reusable(leaf.port);
+      console.log(`EXIT_GRACE_EVIDENCE ${JSON.stringify({exitCode,complete,elapsedMs,runRoot,leaf})}`);
+    } finally {
+      await owned.terminate();
+      await bounded(owned.completion);
+    }
+  });
 }
 
 // These children have no audio code. The leaf holds an ephemeral UDP endpoint and

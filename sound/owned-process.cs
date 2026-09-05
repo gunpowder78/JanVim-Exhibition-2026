@@ -118,7 +118,7 @@ public static class SoundOwnedProcess {
                     uint code; Check(GetExitCodeProcess(created.process, out code));
                     // Let the production 2 s DSP lease + 1.5 s fade finish after
                     // unexpected post-READY language loss, before closing the Job.
-                    if (code != 0 && Volatile.Read(ref ready) != 0 && Volatile.Read(ref complete) == 0)
+                    if (Volatile.Read(ref ready) != 0 && Volatile.Read(ref complete) == 0)
                         Thread.Sleep(3600);
                     return unchecked((int)code);
                 }

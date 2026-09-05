@@ -1,12 +1,13 @@
 # 声音最小闭环（模拟输入、隔离候选）
 
-状态：实现、自动测试及最终 30 分钟静音运行已完成；审查有一项未结问题，人工试听未验收。
+状态：N1 退出淡出缺口已补定向回归和最小修正；基本试听已获用户确认，尚待提前 Stop 人工试听。
 现有可展览视觉版本不依赖此目录。
 
-已知限制 N1：语言进程在 READY 后以退出码 0 消失、但没有发送 `SOUND_COMPLETE` 时，
-本次音频子进程会被立即回收，可能硬切声音，而非完成淡出。正常 Stop、心跳丢失和
-已测试的非零退出故障路径通过；不能据此宣称所有异常退出都会平滑淡出。
-此候选尚不能合入展演；建议先补齐这一小分支的修正与回归，再进行正式人工试听。
+N1 修正：语言进程在 READY 后消失、但没有发送 `SOUND_COMPLETE` 时，无论退出码是否为 0，
+均保留 DSP 租约与淡出的宽限，再回收本次声音子进程；正常 COMPLETE 不增加等待。
+缺失 COMPLETE 仍是失败，不会因为语言退出码为 0 就报告正常结束。
+用户已确认录音与实时短演示声音正常且一致；这不替代提前停止的主观淡出检查。
+本候选仍保持隔离，不自动合入展演。详细验证与历史 30 分钟运行的源码范围见交接记录。
 
 ## 当前范围
 
@@ -20,7 +21,7 @@
 ## 运行与停止
 
 使用 PowerShell 7。下面的指令不要求先切换目录，也不依赖预载变量。
-本次测试已经结束、声音进程已关闭；下面保留完整操作指令，不表示未结审查问题已被豁免。
+以下指令由操作员主动执行；不依赖 SuperCollider IDE 或前一次终端会话。
 
 默认无声运行（45 秒模拟输入，随后清理）：
 
@@ -36,11 +37,12 @@ pwsh -NoProfile -File 'D:\github\JanVim-Exhibition-2026\.worktrees\sound-minimal
 
 三段模拟输入分别为拨弦、风声、混合；默认每段约 15 秒。启动和退出时间另计。
 每次自动创建一个 `sound-*` 运行目录，控制台的 `SOUND_RUN_READY` 给出 `runRoot`。
-如需提前停止，在另一个 PowerShell 7 窗口执行下面的文件命令，
-将占位路径替换为**本次** `runRoot`，不要使用旧运行的路径：
+如需提前停止，在声音仍播放时，从另一个 PowerShell 7 窗口执行下面的命令。
+出现输入提示后，粘贴**本次** `SOUND_RUN_READY` 中的完整 `runRoot`（不带 JSON 引号），
+不要使用已结束运行的路径。命令中不再提供可被误执行的占位目录：
 
 ```powershell
-pwsh -NoProfile -File 'D:\github\JanVim-Exhibition-2026\.worktrees\sound-minimal-loop\sound\stop-sound.ps1' -RunRoot 'D:\VirtualData\JanVim-Exhibition-Rehearsals\sound-本次运行目录'
+pwsh -NoProfile -File 'D:\github\JanVim-Exhibition-2026\.worktrees\sound-minimal-loop\sound\stop-sound.ps1' -RunRoot (Read-Host 'Paste the CURRENT runRoot from SOUND_RUN_READY')
 ```
 
 `STOP_REQUESTED` 只表示请求被接收；应继续确认 A 窗口出现 `SOUND_RUN_COMPLETE`，
