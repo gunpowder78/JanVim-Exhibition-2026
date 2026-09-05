@@ -1,4 +1,10 @@
-# 声音闭环（模拟基线与真实光标候选）
+# 声音闭环（模拟基线、真实光标与鸟群入口候选）
+
+鸟群入口隔离候选位于 `.worktrees/sound-flock-ingress-v1`，仅显式
+`-Input RealCursor -FlockIngress`（Node `--input real-cursor --flock-input enabled`）启用。
+当次 READY、私有 `flock-input.json`、Stop 规则及验证限制见
+[鸟群入口 v1 交接](../docs/operations/2026-09-05-flock-ingress-v1-handoff.md)。
+默认仍关闭；synthetic producer 的内部 PCM 证据不等于见山真实 GPU 或人工联合听音验收。
 
 `feat/sound-real-cursor` 已接入可选真实逻辑光标输入；人工联动听音仍待确认。
 本地操作、PRE-SHOW 的 `songfeng-source` 长文选择、全新显示映射与运行目录见
@@ -24,7 +30,7 @@ N1 修正：语言进程在 READY 后消失、但没有发送 `SOUND_COMPLETE` �
 真实 OSC、真实 SuperCollider 合成。真实光标候选使用 `-Input RealCursor`，
 默认仍为无声；显式 `-Listen` 才启声。声音 READY 后由展演的可选 `-SoundRunRoot`
 绑定一个控制器，经实际 Lua 观察器、生产 Bridge/client/listener/sender 接入，
-不运行模拟时间线。未实现真实《见山》鸟群输入。
+不运行模拟时间线。鸟群候选已接入冻结 v1 TCP 入口，见山实际生产端联合验收仍待完成。
 鲸鸣、经典电子音色、宇宙洪荒声场和热噪等方向只做备忘，不在此次实现中。
 
 无需打开 SuperCollider IDE，也不需要新增依赖、ASIO 驱动、全局插件或 GUI。
@@ -72,7 +78,8 @@ pwsh -NoProfile -File 'D:\github\JanVim-Exhibition-2026\.worktrees\sound-minimal
 - 试听仅使用 `Windows WASAPI : Headphones (Senary Audio)`；48 kHz、双声道、零输入。
   不会自动切换扬声器，不改系统音量。试听前由人把耳机音量调低。
 - 总输出限幅为 0.2 线性样本幅度。这不是耳机声压安全认证，不能替代人的音量控制。
-- 最多 8 个拨弦声部、1 个风声声部；每个拨弦声部有限时长；统一淡出 1.5 秒。
+- 最多 8 个拨弦声部；传统模式 1 个风声声部，鸟群候选最多 2 个活跃/释放中风声节点。
+  每个拨弦声部有限时长；鸟群独立 mute 沿用 0.3 秒释音；统一淡出仍为 1.5 秒。
 - 合法心跳丢失 2 秒后停止，停止会话不能被旧消息重新开启。
   混音器另有独立于语言进程的 DSP 心跳淡出保护。
 - 使用独立 SC 类库配置屏蔽用户启动文件及扩展启动钩子；不修改用户的 SC 设置。
@@ -130,3 +137,13 @@ node --test --test-concurrency=1 sound/tests/real-cursor-chain.check.mjs
 同一段文本、ACK、reset。静止/reset 检查无新增音符，允许尾音自然衰减。
 定点坐标、限频/过期等假时钟测试继续由既有 Lua/client/real-input suites 覆盖。
 本测试不替代双投影、现场离线/恢复或人工听音验收。
+
+鸟群实际生产链内部 PCM 验证（synthetic Show/flock producers，独占 SC 测试时段）：
+
+```powershell
+node --test --test-concurrency=1 sound/tests/flock-chain.check.mjs
+```
+
+覆盖 fresh → empty/unavailable/expiry/stale/disconnect、独立风声静音时的新拨弦、
+Stop 与晚到帧。完整声音 suite 需串行执行，不能与应用全量门禁并发。
+精确 490ms/500ms 边界由实际策略假时钟及生产 sender/UDP 测试覆盖。
