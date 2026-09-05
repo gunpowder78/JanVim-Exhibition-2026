@@ -3369,7 +3369,8 @@ while ($true) {
         if ($_ -match '["\r\n]') {
             throw 'electron-argument-invalid'
         }
-        '"{0}"' -f $_
+        # Windows consumes backslash pairs immediately before a closing argument quote.
+        '"{0}"' -f ($_ -replace '(\\+)$', '$1$1')
     })
     Assert-NetworkPolicySnapshot -WorkingDirectory $repositoryRoot
     $controller = Start-Process `

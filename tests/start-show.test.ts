@@ -3732,7 +3732,14 @@ describe("offline show launcher and external watchdog", () => {
     }
   }, 15_000);
 
-  it.each(["external missing sound", 'bad"root', "bad\nroot"])("optional sound root %j cannot prevent visual launcher invocation", soundRoot => {
+  it.each([
+    "external missing sound",
+    "D:\\VirtualData\\JanVim-Exhibition-Rehearsals\\sound-one\\",
+    "D:\\VirtualData\\JanVim-Exhibition-Rehearsals\\sound one\\",
+    "D:\\VirtualData\\JanVim-Exhibition-Rehearsals\\sound one\\\\",
+    'bad"root',
+    "bad\nroot",
+  ])("optional sound root %j cannot prevent visual launcher invocation", soundRoot => {
     const fixture = makeLauncherFixture();
     try {
       const result = runLauncher(fixture, [...launcherArguments(fixture, "ValidateOnly"), "-SoundRunRoot", soundRoot], { controllerExit: 0 });
