@@ -1358,8 +1358,11 @@ async function runSupervisor(options) {
         const value =
           receiverAnchor.clock +
           (sampledAtMs - receiverAnchor.epochMilliseconds) / 1000;
-        const inputReply = realInput && (message.takeRealInput || flockInput)
-          ? { ...takeInputReply(realInput, flockInput), sampledAtMs } : {};
+        // Start/Stop callers use only time: inspect expiry/watermark without
+        // consuming the pending input that belongs to the next explicit pull.
+        const inputReply = realInput && message.takeRealInput
+          ? { ...takeInputReply(realInput, flockInput), sampledAtMs }
+          : flockInput ? { flockSnapshot: flockInput.snapshot(), sampledAtMs } : {};
         sendIpc(sender.child, { requestId: message.requestId, type: "clock", value, ...inputReply });
         return;
       }

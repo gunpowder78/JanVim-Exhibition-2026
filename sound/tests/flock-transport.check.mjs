@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { Buffer } from "node:buffer";
 import { spawn } from "node:child_process";
 import dgram from "node:dgram";
+import { EventEmitter } from "node:events";
 import net from "node:net";
 import { copyFile, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -10,6 +11,7 @@ import { performance } from "node:perf_hooks";
 import test from "node:test";
 import { setTimeout } from "node:timers";
 import { setTimeout as delay } from "node:timers/promises";
+import { createContext, Script } from "node:vm";
 import * as run from "../run.mjs";
 import { createRealInput } from "../real-input.mjs";
 import { createFlockInput } from "../flock-input.mjs";
@@ -173,7 +175,18 @@ test("attach deadline is absolute despite dribbling bytes and capacity stays eig
 });
 
 test("descriptor failure disables optional bird while Show remains attachable", async t => {
-  const f = await fixture(t, true, true);
+  const diagnostics = [];
+  const capture = t.mock.method(process.stderr, "write", chunk => {
+    assert.ok(diagnostics.length < 2 && Buffer.byteLength(chunk) <= 256, "bounded descriptor diagnostic");
+    diagnostics.push(String(chunk));
+    return true;
+  });
+  let f;
+  try { f = await fixture(t, true, true); }
+  finally { capture.mock.restore(); }
+  assert.ok(diagnostics.length === 1 &&
+    diagnostics[0] === "sound flock ingress: descriptor unavailable; optional input disabled\n",
+  "expected exactly one fixed redacted descriptor diagnostic");
   assert.equal(f.control.flockReceipt, undefined);
   assert.equal(f.flockInput.snapshot().closed, true);
   await f.attachShow();
@@ -233,6 +246,82 @@ test("clock reply preserves original deadline, emits watermark without events, a
   reply = run.takeInputReply(realInput, flockInput);
   assert.deepEqual(stops, ["producer-timeout"]);
   assert.equal(reply.flockEvent.kind, "flock-mute", "bird cannot keep Show alive");
+});
+
+async function productionClockHandler(realInput, flockInput, nowMs) {
+  // Execute the actual supervisor registration, including its takeRealInput
+  // branch. No SC/process launch or alternate implementation of that branch.
+  const source = await readFile(path.resolve("sound/run.mjs"), "utf8");
+  const registrations = source.match(/ {4}sender\.child\.on\("message", \(message\) => \{[\s\S]+?\r?\n {4}\}\);(?=\r?\n {4}sendIpc\(sender\.child, \{)/g);
+  assert.equal(registrations?.length, 1, "expected the actual supervisor sender-message registration");
+  const sender = { child: new EventEmitter() };
+  let reply;
+  const context = createContext({ sender, realInput, flockInput, takeInputReply: run.takeInputReply,
+    performance: { timeOrigin: 100000, now: () => nowMs() - 100000 },
+    receiverAnchor: { clock: 10, epochMilliseconds: 101000 },
+    sendIpc: (child, value) => {
+      assert.equal(child, sender.child);
+      assert.equal(reply, undefined, "one response per request");
+      reply = JSON.parse(JSON.stringify(value)); // Same plain JSON boundary as real IPC.
+    },
+  });
+  new Script(registrations[0]).runInContext(context, { timeout: 1000 });
+  const emit = new Script('sender.child.emit("message", request)');
+  let requestId = 0;
+  return (takeRealInput = false) => {
+    reply = undefined;
+    context.request = { type: "clock", requestId: ++requestId, ...(takeRealInput ? { takeRealInput: true } : {}) };
+    emit.runInContext(context, { timeout: 1000 });
+    assert.equal(reply.requestId, requestId);
+    return reply;
+  };
+}
+
+test("production startup timestamp request preserves pending heartbeat cursor and flock until first input pull", async () => {
+  let now = 101000;
+  const realInput = createRealInput({ nowMs: () => now, onStop: () => assert.fail("unexpected Show Stop") });
+  const flockInput = createFlockInput({ nowMs: () => now, onDisable: () => assert.fail("unexpected bird disable") });
+  assert.equal(realInput.attach(identity), true);
+  assert.equal(realInput.accept(heartbeat()), true);
+  assert.equal(realInput.accept({ ...heartbeat(2), command: "cursor", x: 0.2, y: 0.4, motion: 0.8 }), true);
+  assert.equal(flockInput.attach(sourceId), true);
+  assert.equal(flockInput.accept(sample()), true);
+  const clock = await productionClockHandler(realInput, flockInput, () => now);
+  now = 101100;
+  const startup = clock(); // The start packet requests only a timestamp.
+  now = 101490;
+  const pulled = clock(true);
+  assert.deepEqual(pulled.events, [
+    { kind: "heartbeat", expiresAtMs: 101500 },
+    { kind: "cursor", x: 0.2, y: 0.4, motion: 0.8, expiresAtMs: 101500 },
+  ], "startup timestamp request must not consume pending real input");
+  assert.deepEqual(pulled.flockEvent, { kind: "flock-live", epoch: 1, revision: 1,
+    energy: 0.75, centroid: 0.25, expiresAtMs: 101500 });
+  assert.equal(startup.events, undefined);
+  assert.equal(startup.flockEvent, undefined);
+  assert.equal(startup.value, 10.1);
+  assert.equal(startup.sampledAtMs, 101100);
+  assert.deepEqual(startup.flockSnapshot, { epoch: 1, revision: 1, closed: false, expiresAtMs: 101500 });
+  const consumed = clock(true);
+  assert.deepEqual(consumed.events, []);
+  assert.equal(consumed.flockEvent, null, "first input pull consumes the one existing pending slot exactly once");
+});
+
+test("production timestamp snapshots expire pending flock without consuming its mute", async () => {
+  let now = 101000;
+  const realInput = createRealInput({ nowMs: () => now, onStop: () => assert.fail("unexpected Show Stop") });
+  const flockInput = createFlockInput({ nowMs: () => now, onDisable: () => assert.fail("unexpected bird disable") });
+  realInput.attach(identity); realInput.accept(heartbeat());
+  flockInput.attach(sourceId); flockInput.accept(sample());
+  const clock = await productionClockHandler(realInput, flockInput, () => now);
+  now = 101500;
+  const expired = clock();
+  assert.deepEqual(expired.flockSnapshot, { epoch: 1, revision: 2, closed: false, expiresAtMs: null });
+  now = 101600;
+  clock();
+  assert.deepEqual(clock(true).flockEvent, { kind: "flock-mute", epoch: 1, revision: 2 },
+    "timestamp inspection must leave expiry mute pending for the input pull");
+  assert.equal(clock(true).flockEvent, null);
 });
 
 function readOsc(packet) {
