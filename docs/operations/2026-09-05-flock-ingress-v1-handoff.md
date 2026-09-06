@@ -5,6 +5,39 @@
 > 2026-09-05 的测试计数和失败记录作为历史证据保留；最新局部修复结果见紧接的 2026-09-06 小节。
 > 当前只推进隔离候选与受控联调，不解除真实声音/图形/整机重启验收，也不宣称应用全量门禁通过。
 
+## 2026-09-06：《见山》生产端最终候选回执已收到
+
+对方报告最终候选为仓库 `gunpowder78/jianshan02Boid`、分支 `feat/flock-ingress-v1`、
+提交 `d890caa5e9a3077bf1538d83f3695cdb32019d9a`；最终源码/构建锚点为
+`7955ce69677772008d5789134dbb83d005b461cc`。报告中的 release EXE 为 9,840,128 bytes，
+SHA-256 `d9cae3bcd850fc55d180c5d1bc9ab16fc4fc91b39dfd5c771a9caad96c030417`，
+但不是 portable 包。对方自报 Rust 164/164、Python 46/46，Intel/RTX DX12 硬件用例各 4/4；
+真实声音、相机、HP 和重启恢复仍待联合验收。
+
+本展示机先收到两份文档，SHA-256 分别为：交接回执
+`0b02227424e40cb57832181ad8338091b85f2342be3b0dc6ed6add060da8908e`，运行指南
+`fdb98e04be69cfec54f6bd3a46ad5061c288dc318d73bc670dc35cd46d6df9c4`。
+Git 中的 `docs/FLOCK_INGRESS_V1.md` 与下载的运行指南逐行正文一致；工作树副本为 CRLF、
+下载副本为 LF，因此原始文件 SHA 不同。
+
+随后对方把精确提交推送为 Draft PR #16，本展示机从远端把 `d890caa…` 检入独立 detached worktree；
+HEAD 干净，`7955ce6…` 是祖先，且其后 `jianshan-rust` / `tools` 无差异。本机复验 Rust 164/164、
+Python 46/46；AMD Radeon 8060S / DX12 的四项显式 GPU observer 测试 4/4。候选 probe 从真实源码
+构建，并与 JanVim 当次私有 descriptor 完成 8 秒静音 TCP 挂接：`status=Ready`、5220 published、
+0 busy、0 rejected。JanVim 接收后因没有 Show 授权只发 `flock-mute`，没有打开风声；主动 Stop 后
+`clean:true`、`reason:requested`、descriptor inactive，本轮五个声音进程均退出，57140/57141 空闲。
+
+本机 Rust/Cargo 1.97.1 的首次干净 release 构建生成 9,763,328 bytes、SHA-256
+`818cf44d3cb03425f3573c22b3aa8fd656de1c2196f30aa5188e78ddd083b18f`，与对方鉴定 EXE 不同。
+仓库没有 `rust-toolchain` 锁，因此当前只能把它视为本机重现构建，不能冒充对方鉴定二进制。
+对方精确 EXE、VC144 运行 DLL和 HP ZIP 尚未传到本机；没有启动 GUI 或相机。
+
+按对方最终指南与本冻结稿逐项做静态交叉核对，attach/ACK、凭证宽度、CRLF、1024/256 字节、
+500 ms 原期限、epoch、唯一 owner、一小时上限和统一 Stop 语义没有发现接口漂移。随后在当前
+JanVim 候选上重跑 `flock-input.check.mjs` 与 `flock-transport.check.mjs`：51/51、exit 0；
+包含本机 TCP 和静音 SC 产品链，未开启硬件输出。这证明接收端仍符合冻结协议，不替代对方
+EXE 到机后的 synthetic probe，也不替代真实 GPU、相机、画面和人工听感验收。
+
 ## 2026-09-06：有人值守范围的最新修复与验证
 
 本次只改声音服务的局部启动检查：启动时的端口所有权检查等待从 1.5 秒改为 3.0 秒，

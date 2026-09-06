@@ -5,10 +5,49 @@
 
 ## 先收《见山》候选
 
-请对方交付：Windows 运行包及必要资源/依赖清单、完整提交 SHA、包的 SHA-256、启用鸟群入口的确切命令，以及测试结果/已知限制。`3d9af0f` 只是中途开发检查点，不是最终交付身份。
-候选放独立新目录，不覆盖 HP 保底。按交付哈希核对；不要自动下载依赖、改驱动或更新 GPU 库。
-开发可以在另一台电脑；此次实际联调必须把候选放到与 JanVim、SuperCollider 相同的展示电脑。
-按《见山》交接说明关闭其内置声音和独立 SC 风声服务，只保留 JanVim 唯一声音发送端；不猜测开关名。
+2026-09-06 收到的生产端候选报告身份如下：
+
+- 仓库 `gunpowder78/jianshan02Boid`，分支 `feat/flock-ingress-v1`；最终提交
+  `d890caa5e9a3077bf1538d83f3695cdb32019d9a`。
+- 最终源代码/构建锚点 `7955ce69677772008d5789134dbb83d005b461cc`；最终提交在该锚点之后只含文档。
+- `jianshan-rust/target/release/jianshan.exe` 应为 9,840,128 bytes，SHA-256
+  `d9cae3bcd850fc55d180c5d1bc9ab16fc4fc91b39dfd5c771a9caad96c030417`。
+- 对方报告 Rust 164/164、Python 46/46，Intel/RTX DX12 硬件用例各 4/4；这些不是本展示机复验。
+
+该分支后来已推送并建立 Draft PR #16（base `feat/osc-supercollider`，未合并）。本展示机已把远端
+`d890caa…` 检入独立 detached worktree `D:\tmp\JianShan02-flock-ingress-v1`，源码身份和测试已复核。
+不能把 `D:\github\JianShan02` 旧根工作树当作候选。
+
+对方鉴定的 EXE 和 HP 运行资产仍未传到本机。本机 Rust/Cargo 1.97.1 从相同源码重新生成的 EXE
+为 9,763,328 bytes、SHA-256 `818cf44d3cb03425f3573c22b3aa8fd656de1c2196f30aa5188e78ddd083b18f`，
+不等于对方鉴定值；仓库又没有锁定 Rust 工具链。因此在取得对方工具链信息或精确 EXE 前，不能把本机
+重编译文件冒充对方鉴定二进制。下面的严格 EXE 门禁会按设计阻止它进入真实 GUI 联调。
+
+该 EXE 不是 portable 包。另建候选运行目录，沿用已鉴定只读来源中的 VC144 DLL、
+`native/mediapipe` DLL 和 `public/models/hand_landmarker.task` 布局；不要覆盖 HP 保底、原运行目录或原配置，
+也不要自动下载依赖、改驱动或更新 GPU 库。实际联调必须在与 JanVim、SuperCollider 相同的展示电脑进行。
+
+候选源码和 EXE 到机后先执行以下只读身份门禁；任何一项失败都不启动：
+
+```powershell
+$candidate = 'D:\tmp\JianShan02-flock-ingress-v1'
+$expectedHead = 'd890caa5e9a3077bf1538d83f3695cdb32019d9a'
+$expectedExeHash = 'd9cae3bcd850fc55d180c5d1bc9ab16fc4fc91b39dfd5c771a9caad96c030417'
+$head = (& git -C $candidate rev-parse HEAD).Trim()
+if ($LASTEXITCODE -ne 0 -or $head -cne $expectedHead) { throw 'jianshan-candidate-head-mismatch' }
+if ((& git -C $candidate status --porcelain).Count -ne 0) { throw 'jianshan-candidate-not-clean' }
+$exe = Join-Path $candidate 'jianshan-rust\target\release\jianshan.exe'
+$item = Get-Item -LiteralPath $exe -ErrorAction Stop
+if ($item.Length -ne 9840128) { throw 'jianshan-exe-size-mismatch' }
+$hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $exe).Hash.ToLowerInvariant()
+if ($hash -cne $expectedExeHash) { throw 'jianshan-exe-hash-mismatch' }
+'JIANSHAN_CANDIDATE_IDENTITY_PASS'
+```
+
+当前源码侧本机证据：Rust 164/164、Python 46/46，AMD Radeon 8060S / DX12 的显式 GPU observer
+4/4，真实生产 client 的 synthetic probe 已与 JanVim 当前 TCP 接收器完成一次 8 秒静音挂接；
+`status=Ready`、0 rejected，结束后 JanVim `clean:true`、descriptor inactive、固定声音端口释放。
+该结果只解除源码/协议/本机 GPU 抽样的准备风险，不解除 EXE、相机、完整资产、画面或听感验收。
 
 ## A：准备长文和声音
 
@@ -46,7 +85,42 @@ A 启动声音，按提示粘贴本次 SessionFile，随后保持此窗口打开
 ```
 
 Status 给出的 `flock-input.json` **路径**交给《见山》候选的既有入口参数。不要复制文件内容、token 或旧目录。
-按对方交接命令启动《见山》；如果该命令持续占用终端，单独开 C 窗执行，不占用 A、B。
+首次可先做不启窗口/相机的 synthetic 传输探针，但它只证明传输，并会永久占用本轮唯一鸟群 owner：
+
+```powershell
+Set-Location 'D:\tmp\JianShan02-flock-ingress-v1\jianshan-rust'
+cargo build --locked --example flock_input_probe
+.\target\debug\examples\flock_input_probe.exe --descriptor '粘贴 Status 给出的当前 flock-input.json 绝对路径' --duration 15
+```
+
+输出必须含 `synthetic=true acceptance=transport-only`。随后完整 StopSound；真实主程序必须重新 Prepare/Sound，
+使用全新的 SessionFile、runRoot 和 descriptor，绝不能复用探针会话。
+
+真实主程序使用一份完整候选 TOML 副本，只把重复声音关闭并显式启用新入口：
+
+```toml
+[audio]
+enabled = false
+
+[osc]
+enabled = false
+
+[flock_input]
+enabled = true
+descriptor_path = "D:/当前 SOUND_RUN_READY 的 runRoot/flock-input.json"
+send_hz = 10
+v_ref = 4.0
+```
+
+确认相机和投影可启动后，在候选 `jianshan-rust` 目录显式指定这份配置再运行；如果命令持续占用终端，
+单独开 C 窗，不占用 A、B：
+
+```powershell
+$env:JIANSHAN_CONFIG_PATH = 'D:\NEW_RUNTIME\jianshan-rust\jianshan-flock-v1.toml'
+.\jianshan.exe
+```
+
+启动后检查脱敏的 `[FlockInput]` 摘要出现 `status=Ready`。不要输出 descriptor JSON 或 token。
 然后回 B 执行 Show；脚本会核对本次声音 READY，先 ValidateOnly，成功后才调用原 Show 启动器：
 
 ```powershell
@@ -54,7 +128,8 @@ Status 给出的 `flock-input.json` **路径**交给《见山》候选的既有�
 ```
 
 副屏就绪后点击一次 Start Rehearsal。静止/idle 阶段风声不响不一定是故障。
-《见山》的确切启动命令和最终可执行包目前待交付；没有它们时只能做替身验证，不能称真实 GPU 联调通过。
+对方鉴定二进制及完整运行依赖未实际传到本展示机前，只能做源码、接收端或 synthetic probe 验证，
+不能称真实主程序 GPU 联调通过。
 本轮只接声音，未实现《见山》对 SCREEN-3 的自动接管。Show 就绪后还需人工确认《见山》窗口未被安全占位遮住、未最小化且仍在持续绘制；若不满足，先 Stop Show 并保留现场情况，不直接判定声音入口故障。
 
 本次默认声音 600 秒；如需更长，可在 Prepare 时加 `-Duration 1800`。最长仍为 3600 秒，不是全天版。
