@@ -18,36 +18,34 @@
 `d890caa…` 检入独立 detached worktree `D:\tmp\JianShan02-flock-ingress-v1`，源码身份和测试已复核。
 不能把 `D:\github\JianShan02` 旧根工作树当作候选。
 
-对方鉴定的 EXE 和 HP 运行资产仍未传到本机。本机 Rust/Cargo 1.97.1 从相同源码重新生成的 EXE
-为 9,763,328 bytes、SHA-256 `818cf44d3cb03425f3573c22b3aa8fd656de1c2196f30aa5188e78ddd083b18f`，
-不等于对方鉴定值；仓库又没有锁定 Rust 工具链。因此在取得对方工具链信息或精确 EXE 前，不能把本机
-重编译文件冒充对方鉴定二进制。下面的严格 EXE 门禁会按设计阻止它进入真实 GUI 联调。
+精确 EXE 与 HP ZIP 已转存到 `D:\JianShan-flock-ingress-v1-handoff` 并在本机重新验明大小和 SHA-256。
+ZIP 安全审计通过后，只解到新的隔离候选根：
+`D:\VirtualData\JanVim-Exhibition-Rehearsals\jianshan-flock-candidate-20260906T050050385Z-fde7b0c71412`。
+原 ZIP、旧运行目录和 HP 配置均未覆盖；ZIP 内原 EXE 另存于候选根的 `provenance`。对方确认原 EXE
+使用 stable Rust/Cargo 1.94.1；本机 1.97.1 重现产物不用于联调。
 
-该 EXE 不是 portable 包。另建候选运行目录，沿用已鉴定只读来源中的 VC144 DLL、
-`native/mediapipe` DLL 和 `public/models/hand_landmarker.task` 布局；不要覆盖 HP 保底、原运行目录或原配置，
-也不要自动下载依赖、改驱动或更新 GPU 库。实际联调必须在与 JanVim、SuperCollider 相同的展示电脑进行。
-
-候选源码和 EXE 到机后先执行以下只读身份门禁；任何一项失败都不启动：
+候选运行前执行以下只读身份门禁；任何一项失败都不启动：
 
 ```powershell
-$candidate = 'D:\tmp\JianShan02-flock-ingress-v1'
-$expectedHead = 'd890caa5e9a3077bf1538d83f3695cdb32019d9a'
+$runtime = 'D:\VirtualData\JanVim-Exhibition-Rehearsals\jianshan-flock-candidate-20260906T050050385Z-fde7b0c71412\runtime\jianshan-rust'
 $expectedExeHash = 'd9cae3bcd850fc55d180c5d1bc9ab16fc4fc91b39dfd5c771a9caad96c030417'
-$head = (& git -C $candidate rev-parse HEAD).Trim()
-if ($LASTEXITCODE -ne 0 -or $head -cne $expectedHead) { throw 'jianshan-candidate-head-mismatch' }
-if ((& git -C $candidate status --porcelain).Count -ne 0) { throw 'jianshan-candidate-not-clean' }
-$exe = Join-Path $candidate 'jianshan-rust\target\release\jianshan.exe'
+$expectedTemplateHash = '510398aeff0f567bf351aa2ce025cbb6989a6865328115f726032549821a3fae'
+$exe = Join-Path $runtime 'jianshan.exe'
 $item = Get-Item -LiteralPath $exe -ErrorAction Stop
 if ($item.Length -ne 9840128) { throw 'jianshan-exe-size-mismatch' }
 $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $exe).Hash.ToLowerInvariant()
 if ($hash -cne $expectedExeHash) { throw 'jianshan-exe-hash-mismatch' }
+$template = Join-Path $runtime 'jianshan-flock-v1.toml'
+$templateHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $template).Hash.ToLowerInvariant()
+if ($templateHash -cne $expectedTemplateHash) { throw 'jianshan-safe-template-mismatch' }
 'JIANSHAN_CANDIDATE_IDENTITY_PASS'
 ```
 
 当前源码侧本机证据：Rust 164/164、Python 46/46，AMD Radeon 8060S / DX12 的显式 GPU observer
 4/4，真实生产 client 的 synthetic probe 已与 JanVim 当前 TCP 接收器完成一次 8 秒静音挂接；
 `status=Ready`、0 rejected，结束后 JanVim `clean:true`、descriptor inactive、固定声音端口释放。
-该结果只解除源码/协议/本机 GPU 抽样的准备风险，不解除 EXE、相机、完整资产、画面或听感验收。
+转存 EXE、完整资产与安全待机模板已解除“文件尚未到机”的阻塞；仍不替代真实应用中的 GPU 状态、
+相机、画面或听感验收。
 
 ## A：准备长文和声音
 
@@ -128,8 +126,8 @@ $env:JIANSHAN_CONFIG_PATH = 'D:\NEW_RUNTIME\jianshan-rust\jianshan-flock-v1.toml
 ```
 
 副屏就绪后点击一次 Start Rehearsal。静止/idle 阶段风声不响不一定是故障。
-对方鉴定二进制及完整运行依赖未实际传到本展示机前，只能做源码、接收端或 synthetic probe 验证，
-不能称真实主程序 GPU 联调通过。
+精确二进制和完整依赖虽已在隔离目录就绪，但在本轮有人值守启动并实际看到真实鸟群前，
+仍不能称真实主程序 GPU 联调通过。
 本轮只接声音，未实现《见山》对 SCREEN-3 的自动接管。Show 就绪后还需人工确认《见山》窗口未被安全占位遮住、未最小化且仍在持续绘制；若不满足，先 Stop Show 并保留现场情况，不直接判定声音入口故障。
 
 本次默认声音 600 秒；如需更长，可在 Prepare 时加 `-Duration 1800`。最长仍为 3600 秒，不是全天版。

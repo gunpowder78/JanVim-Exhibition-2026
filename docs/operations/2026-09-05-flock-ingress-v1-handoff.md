@@ -29,14 +29,33 @@ Python 46/46；AMD Radeon 8060S / DX12 的四项显式 GPU observer 测试 4/4�
 
 本机 Rust/Cargo 1.97.1 的首次干净 release 构建生成 9,763,328 bytes、SHA-256
 `818cf44d3cb03425f3573c22b3aa8fd656de1c2196f30aa5188e78ddd083b18f`，与对方鉴定 EXE 不同。
-仓库没有 `rust-toolchain` 锁，因此当前只能把它视为本机重现构建，不能冒充对方鉴定二进制。
-对方精确 EXE、VC144 运行 DLL和 HP ZIP 尚未传到本机；没有启动 GUI 或相机。
+对方随后确认原构建使用 stable Rust/Cargo 1.94.1；仓库没有 `rust-toolchain` 锁，因此本机 1.97.1
+产物只作为重现记录保留，不进入联调，也不冒充对方鉴定二进制。
+
+对方转存到 `D:/JianShan-flock-ingress-v1-handoff/` 的两个文件已在本展示机重新计算指纹：
+
+- `candidate/jianshan.exe`：9,840,128 bytes，SHA-256
+  `d9cae3bcd850fc55d180c5d1bc9ab16fc4fc91b39dfd5c771a9caad96c030417`；
+- `hp-fallback/JianShan-Rust-2.1.0-Exhibition-HP-VC144.zip`：35,197,667 bytes，SHA-256
+  `93c8e0ac9d7e26ca4f9ac8a7914df756c65fd23cc6ba9576b534109796a9c0d3`。
+
+ZIP 目录表审计为 14 个条目、解压后 82,955,056 bytes、单一顶层目录；路径穿越、重复路径、
+符号链接和异常膨胀检查均通过。它只被解到新的外部候选根
+`D:/VirtualData/JanVim-Exhibition-Rehearsals/jianshan-flock-candidate-20260906T050050385Z-fde7b0c71412/`。
+ZIP 内原 EXE 保存在该根的 `provenance/jianshan.hp-original.exe`，没有覆盖交接文件或 HP ZIP；
+`runtime/jianshan-rust/jianshan.exe` 已换入上述精确候选并复核。DLL、MediaPipe 模型与启动资产齐全。
+
+`runtime/jianshan-rust/jianshan-flock-v1.toml` 是安全待机模板，SHA-256
+`510398aeff0f567bf351aa2ce025cbb6989a6865328115f726032549821a3fae`。结构级比较确认它只把
+HP 的 `audio.enabled` 改为 `false`，并新增关闭的旧 OSC 与关闭的新 flock 入口；鸟数仍为 40,000，
+其余画面、GPU、相机和手势配置保持 HP 值。尚未启动 GUI 或相机；真实联调时必须复制该模板，
+只在当次副本中启用入口并写入当次 descriptor 路径。
 
 按对方最终指南与本冻结稿逐项做静态交叉核对，attach/ACK、凭证宽度、CRLF、1024/256 字节、
 500 ms 原期限、epoch、唯一 owner、一小时上限和统一 Stop 语义没有发现接口漂移。随后在当前
 JanVim 候选上重跑 `flock-input.check.mjs` 与 `flock-transport.check.mjs`：51/51、exit 0；
 包含本机 TCP 和静音 SC 产品链，未开启硬件输出。这证明接收端仍符合冻结协议，不替代对方
-EXE 到机后的 synthetic probe，也不替代真实 GPU、相机、画面和人工听感验收。
+精确 EXE 的真实 GUI 运行，也不替代真实 GPU 状态、相机、画面和人工听感验收。
 
 ## 2026-09-06：有人值守范围的最新修复与验证
 
