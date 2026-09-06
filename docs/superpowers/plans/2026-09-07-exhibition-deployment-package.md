@@ -32,6 +32,7 @@
 
 **Files:**
 - Commit existing tracked and untracked Site Mix v2 files already present in the worktree.
+- Modify test fixtures only: `tests/content-profiles.test.ts`, `tests/select-show-profile.test.ts`, `tests/first-loop.test.ts`, `tests/recovery.test.ts`, `tests/start-show.test.ts`, `apps/controller/tests/controller-main.test.ts`, `apps/controller/tests/g2-runtime-adapters.test.ts`, `apps/controller/tests/run-telemetry.test.ts`
 - Do not modify: `docs/superpowers/specs/2026-09-07-exhibition-deployment-package-design.md`
 - Verify external: `D:\VirtualData\JanVim-Exhibition-Rehearsals\joint-session-20260906T151629220Z-6176c30955c0\attended-hardware-acceptance.json`
 
@@ -76,6 +77,10 @@ npm run build
 
 Expected: all four commands exit 0, and the Electron verifier reports 547,650 bytes with SHA-256 `bb63c48dcf63756392e730224b2cbe929b00feafa1c2738ea608f5b9764f4b90`.
 
+- [ ] **Step 3a: Decouple legacy behavioral fixtures from the active long-paper manifest**
+
+If the full gate reports missing legacy `cue-*` IDs because `content/fixture/show.manifest.json` is the accepted `songfeng-source-r8` long-paper profile, keep that active manifest unchanged. Make legacy behavioral tests explicitly load the locked `p0-baseline` manifest, initialize selector/launcher fixtures from that baseline, and make the content gate require the active manifest to byte-match any reviewed locked profile. Confirm the original failure first, then rerun all affected suites and the full gate.
+
 - [ ] **Step 4: Stage only the reviewed Site Mix v2 files**
 
 Use this exact reviewed list, excluding the already committed design specification and implementation plan:
@@ -89,6 +94,9 @@ $reviewedSiteMixPaths = @(
   'apps/controller/tests/show-run-coordinator.test.ts'
   'apps/controller/tests/show-runtime-adapters.test.ts'
   'apps/controller/tests/show-sound-client.test.ts'
+  'apps/controller/tests/controller-main.test.ts'
+  'apps/controller/tests/g2-runtime-adapters.test.ts'
+  'apps/controller/tests/run-telemetry.test.ts'
   'apps/secondary-screen/src/model.ts'
   'apps/secondary-screen/src/ready-page.ts'
   'apps/secondary-screen/src/scene-controller.ts'
@@ -120,7 +128,12 @@ $reviewedSiteMixPaths = @(
   'sound/tests/render.scd'
   'sound/tests/site-mix.check.mjs'
   'sound/tests/wav.check.mjs'
+  'tests/content-profiles.test.ts'
   'tests/electron-build-smoke.test.ts'
+  'tests/first-loop.test.ts'
+  'tests/recovery.test.ts'
+  'tests/select-show-profile.test.ts'
+  'tests/start-show.test.ts'
 )
 git add -- $reviewedSiteMixPaths
 $staged = @(git diff --cached --name-only)
