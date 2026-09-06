@@ -18,6 +18,9 @@ param(
     [ValidateSet('OfflineRequired', 'DiagnosticConnected')]
     [string]$NetworkPolicy,
 
+    [ValidateSet('Operator', 'Automatic')]
+    [string]$StartPolicy = 'Operator',
+
     [string]$SoundRunRoot
 )
 
@@ -3341,6 +3344,12 @@ $networkPolicyFlag = if ($NetworkPolicy -ceq 'OfflineRequired') {
 else {
     'diagnostic-connected'
 }
+$startPolicyFlag = if ($StartPolicy -ceq 'Automatic') {
+    'automatic'
+}
+else {
+    'operator'
+}
 $showModeFlag = $Mode.ToLowerInvariant()
 $evidenceMode = if ($Mode -ceq 'Show') { 'Show' } else { 'Soak3' }
 $watchdogClock = [Diagnostics.Stopwatch]::StartNew()
@@ -3357,6 +3366,7 @@ while ($true) {
         "--run-id=$RunId"
         "--controller-run-id=$controllerRunId"
         "--network-policy=$networkPolicyFlag"
+        "--start-policy=$startPolicyFlag"
     )
     if ($PSBoundParameters.ContainsKey('SoundRunRoot')) {
         if ($SoundRunRoot -match '["\r\n\x00]') {

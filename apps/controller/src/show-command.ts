@@ -6,6 +6,8 @@ import {
 } from "./g2-command.js";
 import { resolveBelowRoot } from "./runtime-adapter-common.js";
 
+export type ShowStartPolicy = "Operator" | "Automatic";
+
 export type ShowCommand = {
   mode: "ValidateOnly" | "Soak3" | "Show";
   rehearsalRoot: string;
@@ -13,6 +15,7 @@ export type ShowCommand = {
   runId: string;
   controllerRunId: string;
   networkPolicy: "OfflineRequired" | "DiagnosticConnected";
+  startPolicy: ShowStartPolicy;
   soundRunRoot?: string;
 };
 
@@ -28,6 +31,7 @@ const KNOWN_FLAGS = new Set([
   "run-id",
   "controller-run-id",
   "network-policy",
+  "start-policy",
   "sound-run-root",
 ]);
 
@@ -80,6 +84,9 @@ export function parseShowCommand(
   const networkPolicy = parseNetworkPolicy(
     requiredFlag(flags, "network-policy"),
   );
+  const startPolicy = flags.has("start-policy")
+    ? parseStartPolicy(flags.get("start-policy")!)
+    : "Operator";
 
   const rawRehearsalRoot = requiredFlag(flags, "rehearsal-root");
   const rawDisplayMapPath = requiredFlag(flags, "display-map");
@@ -121,6 +128,7 @@ export function parseShowCommand(
     runId,
     controllerRunId,
     networkPolicy,
+    startPolicy,
     ...(flags.has("sound-run-root") ? { soundRunRoot: flags.get("sound-run-root")! } : {}),
   };
 }
@@ -164,6 +172,12 @@ function parseNetworkPolicy(value: string): ShowCommand["networkPolicy"] {
   if (value === "offline-required") return "OfflineRequired";
   if (value === "diagnostic-connected") return "DiagnosticConnected";
   throw new Error("Show network policy is invalid");
+}
+
+function parseStartPolicy(value: string): ShowStartPolicy {
+  if (value === "operator") return "Operator";
+  if (value === "automatic") return "Automatic";
+  throw new Error("Show start policy is invalid");
 }
 
 function rejectForbiddenEvidencePath(

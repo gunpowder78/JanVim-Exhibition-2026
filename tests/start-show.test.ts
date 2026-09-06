@@ -3851,6 +3851,7 @@ describe("offline show launcher and external watchdog", () => {
           `--run-id=${fixture.runId}`,
           `--controller-run-id=${controllerRunId}`,
           "--network-policy=offline-required",
+          "--start-policy=operator",
         ]);
         const marker = JSON.parse(readFileSync(fixture.terminalMarker, "utf8")) as {
           outcome: string;
@@ -3862,6 +3863,28 @@ describe("offline show launcher and external watchdog", () => {
     },
     15_000,
   );
+
+  it("forwards the explicit automatic start policy exactly once", () => {
+    const fixture = makeLauncherFixture();
+    try {
+      const result = runLauncher(
+        fixture,
+        [
+          ...launcherArguments(fixture, "ValidateOnly"),
+          "-StartPolicy",
+          "Automatic",
+        ],
+        { behavior: "matching-success" },
+      );
+
+      expect(result.status, output(result)).toBe(0);
+      const records = invocations(fixture);
+      expect(records).toHaveLength(1);
+      expect(flag(records[0]!.arguments, "start-policy")).toBe("automatic");
+    } finally {
+      fixture.cleanup();
+    }
+  }, 15_000);
 
   it("accepts matching single-display-preview terminal evidence", () => {
     const fixture = makeLauncherFixture();

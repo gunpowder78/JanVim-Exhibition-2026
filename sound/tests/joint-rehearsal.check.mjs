@@ -60,6 +60,7 @@ param(
     [Parameter(Mandatory)][string] $DisplayMapPath,
     [Parameter(Mandatory)][string] $RunId,
     [Parameter(Mandatory)][ValidateSet('OfflineRequired', 'DiagnosticConnected')][string] $NetworkPolicy,
+    [ValidateSet('Operator', 'Automatic')][string] $StartPolicy = 'Operator',
     [string] $SoundRunRoot
 )
 $record = [ordered]@{
@@ -69,6 +70,7 @@ $record = [ordered]@{
     displayMapPath = $DisplayMapPath
     runId = $RunId
     networkPolicy = $NetworkPolicy
+    startPolicy = $StartPolicy
     soundRunRoot = $SoundRunRoot
 }
 [IO.File]::AppendAllText($env:JOINT_CAPTURE, (($record | ConvertTo-Json -Compress) + [Environment]::NewLine))
@@ -359,14 +361,19 @@ test("Show is blocked before READY and after a terminal summary", async t => {
   assert.deepEqual(await captureRecords(fixture), []);
 });
 
-test("Show propagates exact roots through validation and launch with both network policies", async t => {
+test("Show propagates exact roots, network policy, and start policy", async t => {
   const fixture = await makeFixture(t);
   const selected = await prepareSession(t, fixture);
   await writeReady(selected);
 
   const connected = await fixture.run(["-Action", "Show", "-SessionFile", selected.sessionFile]);
   assert.equal(connected.exitCode, 0, `Show should follow successful validation: ${connected.stderr}`);
-  const offline = await fixture.run(["-Action", "Show", "-SessionFile", selected.sessionFile, "-OfflineRequired"]);
+  const offline = await fixture.run([
+    "-Action", "Show",
+    "-SessionFile", selected.sessionFile,
+    "-OfflineRequired",
+    "-StartPolicy", "Automatic",
+  ]);
   assert.equal(offline.exitCode, 0, `explicit OfflineRequired should launch: ${offline.stderr}`);
   const records = await captureRecords(fixture);
   assert.equal(records.length, 4);
@@ -380,6 +387,7 @@ test("Show propagates exact roots through validation and launch with both networ
       displayMapPath: path.join(selected.validateRoot, "display-map.json"),
       runId: path.basename(selected.validateRoot),
       networkPolicy,
+      startPolicy: "Operator",
       soundRunRoot: selected.soundRoot,
     });
     assert.deepEqual(show, {
@@ -389,9 +397,22 @@ test("Show propagates exact roots through validation and launch with both networ
       displayMapPath: path.join(selected.showRoot, "display-map.json"),
       runId: path.basename(selected.showRoot),
       networkPolicy,
+      startPolicy: index === 0 ? "Operator" : "Automatic",
       soundRunRoot: selected.soundRoot,
     });
   }
+});
+
+test("non-Show actions reject the automatic start policy", async t => {
+  const fixture = await makeFixture(t);
+  const result = await fixture.run([
+    "-Action", "Status",
+    "-SessionFile", path.join(fixture.root, "missing-session.json"),
+    "-StartPolicy", "Automatic",
+  ]);
+  assert.notEqual(result.exitCode, 0);
+  assert.match(result.stderr, /startpolicy.*only.*show|start policy.*only.*show/iu);
+  assert.deepEqual(await captureRecords(fixture), []);
 });
 
 test("Show propagates ValidateOnly failure and never invokes Show", async t => {

@@ -25,7 +25,10 @@ param(
 
     [switch] $Listen,
 
-    [switch] $OfflineRequired
+    [switch] $OfflineRequired,
+
+    [ValidateSet('Operator', 'Automatic')]
+    [string] $StartPolicy = 'Operator'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -379,6 +382,9 @@ if ($Listen -and $Action -cne 'Sound') {
 if ($OfflineRequired -and $Action -cne 'Show') {
     throw 'OfflineRequired is valid only for the Show action'
 }
+if ($StartPolicy -cne 'Operator' -and $Action -cne 'Show') {
+    throw 'StartPolicy is valid only for the Show action'
+}
 
 if ($Action -ceq 'Prepare') {
     if ([string]::IsNullOrWhiteSpace($DisplayMapPath)) {
@@ -458,6 +464,7 @@ switch ($Action) {
             '-DisplayMapPath', $validateDisplayMap,
             '-RunId', ([IO.Path]::GetFileName($paths.ValidateRoot)),
             '-NetworkPolicy', $networkPolicy,
+            '-StartPolicy', 'Operator',
             '-SoundRunRoot', $paths.SoundRoot
         )
         & $powerShell @validateArguments
@@ -474,6 +481,7 @@ switch ($Action) {
             '-DisplayMapPath', $showDisplayMap,
             '-RunId', ([IO.Path]::GetFileName($paths.ShowRoot)),
             '-NetworkPolicy', $networkPolicy,
+            '-StartPolicy', $StartPolicy,
             '-SoundRunRoot', $paths.SoundRoot
         )
         & $powerShell @showArguments

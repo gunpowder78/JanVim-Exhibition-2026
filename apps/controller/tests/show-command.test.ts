@@ -76,7 +76,39 @@ describe("Task 9 show command parser", () => {
       runId: "show-001",
       controllerRunId: "controller-001",
       networkPolicy: "OfflineRequired",
+      startPolicy: "Operator",
     });
+  });
+
+  it("defaults existing callers to operator start", () => {
+    expect(
+      parseShowCommand(validArguments("show"), repositoryRoot).startPolicy,
+    ).toBe("Operator");
+  });
+
+  it("accepts only the explicit automatic start policy", () => {
+    expect(
+      parseShowCommand(
+        [...validArguments("show"), "--start-policy=automatic"],
+        repositoryRoot,
+      ).startPolicy,
+    ).toBe("Automatic");
+    expect(() =>
+      parseShowCommand(
+        [...validArguments("show"), "--start-policy=auto"],
+        repositoryRoot,
+      ),
+    ).toThrow(/start policy/i);
+    expect(() =>
+      parseShowCommand(
+        [
+          ...validArguments("show"),
+          "--start-policy=automatic",
+          "--start-policy=operator",
+        ],
+        repositoryRoot,
+      ),
+    ).toThrow(/duplicate/i);
   });
 
   it("accepts the explicit connected diagnostic policy without changing paths", () => {
