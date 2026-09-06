@@ -15,6 +15,9 @@ $forbiddenRuntimeNames = @(
     'active-deployment.json', 'flock-input.json', 'run-lease.json',
     'control.json', 'ready.json', 'summary.json'
 )
+$script:AllowedWorkspaceLinks = [Collections.Generic.Dictionary[string, string]]::new(
+    [StringComparer]::OrdinalIgnoreCase
+)
 
 function Resolve-BuilderPath {
     param([string] $Path, [string] $Reason)
@@ -45,7 +48,19 @@ function Assert-PlainTree {
         $directory = $pending.Pop()
         foreach ($item in Get-ChildItem -LiteralPath $directory -Force) {
             if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-                throw 'copy-source-reparse-rejected'
+                $expectedTarget = $null
+                if (-not $script:AllowedWorkspaceLinks.TryGetValue($item.FullName, [ref]$expectedTarget)) {
+                    throw 'copy-source-reparse-rejected'
+                }
+                $actualTarget = (Resolve-Path -LiteralPath $item.FullName -ErrorAction Stop).ProviderPath
+                if (-not [string]::Equals(
+                    [IO.Path]::GetFullPath($actualTarget),
+                    [IO.Path]::GetFullPath($expectedTarget),
+                    [StringComparison]::OrdinalIgnoreCase
+                )) {
+                    throw 'copy-source-reparse-rejected'
+                }
+                continue
             }
             if ($item.PSIsContainer) {
                 $pending.Push($item.FullName)
@@ -63,6 +78,7 @@ function Copy-PlainTree {
     Assert-PlainTree -Path $Source
     if (Test-Path -LiteralPath $Destination) { throw 'copy-destination-exists' }
     Copy-Item -LiteralPath $Source -Destination $Destination -Recurse
+    Assert-PlainTree -Path $Destination
 }
 
 function Assert-Identity {
@@ -80,6 +96,22 @@ $output = Resolve-BuilderPath -Path $OutputParent -Reason 'output-parent'
 [void](Assert-PlainItem -Path $source -Kind Container -Reason 'source-root')
 [void](Assert-PlainItem -Path $candidate -Kind Container -Reason 'jianshan-candidate')
 [void](Assert-PlainItem -Path $output -Kind Container -Reason 'output-parent')
+$script:AllowedWorkspaceLinks.Add(
+    (Join-Path $source 'node_modules\@janvim-exhibition\controller'),
+    (Join-Path $source 'apps\controller')
+)
+$script:AllowedWorkspaceLinks.Add(
+    (Join-Path $source 'node_modules\@janvim-exhibition\display-configurator'),
+    (Join-Path $source 'apps\display-configurator')
+)
+$script:AllowedWorkspaceLinks.Add(
+    (Join-Path $source 'node_modules\@janvim-exhibition\secondary-screen'),
+    (Join-Path $source 'apps\secondary-screen')
+)
+$script:AllowedWorkspaceLinks.Add(
+    (Join-Path $source 'node_modules\@janvim-exhibition\show-schema'),
+    (Join-Path $source 'packages\show-schema')
+)
 
 $gitStatus = @(& git -C $source status --porcelain=v1 --untracked-files=all)
 if ($LASTEXITCODE -ne 0 -or $gitStatus.Count -ne 0) { throw 'source-worktree-not-clean' }
