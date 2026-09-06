@@ -178,4 +178,17 @@ describe("deployment package manifest", () => {
     }
     expect(existsSync(manifestTool)).toBe(true);
   });
+
+  it("validates a whitelisted workspace junction against its real target", () => {
+    const builder = readFileSync(
+      join(repositoryRoot, "deployment", "build-deployment-package.ps1"),
+      "utf8",
+    );
+
+    expect(builder).toContain("$actualTargets = @($item.Target)");
+    expect(builder).toContain("$actualTargets.Count -ne 1");
+    expect(builder).not.toContain(
+      "(Resolve-Path -LiteralPath $item.FullName -ErrorAction Stop).ProviderPath",
+    );
+  });
 });

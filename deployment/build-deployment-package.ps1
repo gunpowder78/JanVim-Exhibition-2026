@@ -52,7 +52,15 @@ function Assert-PlainTree {
                 if (-not $script:AllowedWorkspaceLinks.TryGetValue($item.FullName, [ref]$expectedTarget)) {
                     throw 'copy-source-reparse-rejected'
                 }
-                $actualTarget = (Resolve-Path -LiteralPath $item.FullName -ErrorAction Stop).ProviderPath
+                $actualTargets = @($item.Target)
+                if (
+                    $item.LinkType -cne 'Junction' -or
+                    $actualTargets.Count -ne 1 -or
+                    -not [IO.Path]::IsPathFullyQualified([string]$actualTargets[0])
+                ) {
+                    throw 'copy-source-reparse-rejected'
+                }
+                $actualTarget = [string]$actualTargets[0]
                 if (-not [string]::Equals(
                     [IO.Path]::GetFullPath($actualTarget),
                     [IO.Path]::GetFullPath($expectedTarget),
