@@ -191,4 +191,14 @@ describe("deployment package manifest", () => {
       "(Resolve-Path -LiteralPath $item.FullName -ErrorAction Stop).ProviderPath",
     );
   });
+
+  it("matches the configured SuperCollider endpoint by string value", () => {
+    const verifier = readFileSync(
+      join(repositoryRoot, "deployment", "operator", "Verify-Deployment.ps1"),
+      "utf8",
+    );
+
+    expect(verifier).toContain("devices.includesEqual(target)");
+    expect(verifier).not.toContain("devices.includes(target)");
+  });
 });

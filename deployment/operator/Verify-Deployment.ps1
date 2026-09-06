@@ -170,7 +170,7 @@ $probeSource = @"
 (
 var target = "$targetDevice";
 var devices = ServerOptions.outDevices;
-if(devices.includes(target), {
+if(devices.includesEqual(target), {
     "SC_AUDIO_ENDPOINT_PASS".postln;
     0.exit;
 }, {
