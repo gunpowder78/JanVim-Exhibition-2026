@@ -2415,6 +2415,38 @@ describe("show run coordinator", () => {
     ]);
   });
 
+  it("uses the existing ready gate for one automatic start", async () => {
+    const harness = createHarness();
+    await bootReady(harness);
+
+    expect(harness.coordinator.requestAutomaticStart()).toBe(true);
+    expect(harness.coordinator.requestAutomaticStart()).toBe(false);
+    expect(harness.coordinator.diagnostics()).toMatchObject({
+      state: "running",
+      startedLoops: 1,
+      currentLoopId: "g1-loop-1",
+    });
+    expect(harness.driverOptions).toHaveLength(1);
+    expect(harness.telemetries).toHaveLength(1);
+  });
+
+  it("routes a public operator stop through the existing exactly-once shutdown", async () => {
+    const harness = createHarness({ mode: "Show" });
+    await bootReady(harness);
+
+    expect(harness.coordinator.requestOperatorStop()).toBe(true);
+    expect(harness.coordinator.requestOperatorStop()).toBe(false);
+    await expect(harness.coordinator.completion).resolves.toEqual({
+      ok: true,
+      reason: "operator-stop",
+    });
+    expect(harness.coordinator.diagnostics().transitions).toEqual([
+      { from: "booting", to: "ready" },
+      { from: "ready", to: "shutting-down", reason: "operator-stop" },
+      { from: "shutting-down", to: "stopped", reason: "operator-stop" },
+    ]);
+  });
+
   it("correlates one critical cue on both endpoints using only the controller clock", async () => {
     const harness = createHarness();
     await startRunning(harness);

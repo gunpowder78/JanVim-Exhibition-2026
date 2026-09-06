@@ -1,6 +1,13 @@
 import { resolve } from "node:path";
 
-import { app, BrowserWindow, ipcMain, screen, session } from "electron";
+import {
+  app,
+  BrowserWindow,
+  globalShortcut,
+  ipcMain,
+  screen,
+  session,
+} from "electron";
 
 import { parseDisplayConfigCommand } from "./display-config-command.js";
 import {
@@ -21,6 +28,7 @@ import {
   selectElectronCommandFamily,
 } from "./show-command.js";
 import { runShowElectronCommand } from "./show-electron-command.js";
+import { bindShowStopShortcut } from "./show-global-shortcut.js";
 import {
   controllerStartedAtUtc,
   createShowRuntimeAdapters,
@@ -65,22 +73,27 @@ void runElectronLifecycle(
 
       const command = parseShowCommand(argv, repositoryRoot);
       const startedAtUtc = controllerStartedAtUtc(process.getCreationTime());
+      const runtimeAdapters = createShowRuntimeAdapters({
+        repositoryRoot,
+        BrowserWindow: BrowserWindow as unknown as G2BrowserWindowConstructor,
+        ipcMain,
+        screen,
+        controllerProcess: {
+          pid: process.pid,
+          startedAtUtc,
+          on: (event, listener) => process.on(event, listener),
+          removeListener: (event, listener) =>
+            process.removeListener(event, listener),
+        },
+        electronApp: app as unknown as ShowElectronAppAdapter,
+      });
       return await runShowElectronCommand(
         command,
-        createShowRuntimeAdapters({
-          repositoryRoot,
-          BrowserWindow: BrowserWindow as unknown as G2BrowserWindowConstructor,
-          ipcMain,
-          screen,
-          controllerProcess: {
-            pid: process.pid,
-            startedAtUtc,
-            on: (event, listener) => process.on(event, listener),
-            removeListener: (event, listener) =>
-              process.removeListener(event, listener),
-          },
-          electronApp: app as unknown as ShowElectronAppAdapter,
-        }),
+        {
+          ...runtimeAdapters,
+          bindOperatorStopShortcut: (listener) =>
+            bindShowStopShortcut(globalShortcut, listener),
+        },
       );
     } catch {
       return 1;

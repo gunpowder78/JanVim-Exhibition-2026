@@ -21,6 +21,8 @@ export type RunShowCommand = Omit<ShowCommand, "mode"> & {
 export interface ShowCoordinatorAdapter {
   boot(): Promise<ShowBootOutcome>;
   readonly completion: Promise<ShowRunResult>;
+  requestAutomaticStart(): boolean;
+  requestOperatorStop(): boolean;
   requestEmergencyStop(reason: EmergencyStopReason): Promise<void>;
   terminalShutdownStarted(): boolean;
 }
@@ -33,12 +35,15 @@ export interface ShowElectronCommandAdapters {
     ShowRunCoordinator,
     | "boot"
     | "completion"
+    | "requestAutomaticStart"
+    | "requestOperatorStop"
     | "requestEmergencyStop"
     | "terminalShutdownStarted"
   >;
   bindEmergencyLifecycle(
     listener: (reason: EmergencyStopReason) => void,
   ): () => void;
+  bindOperatorStopShortcut(listener: () => void): (() => void) | undefined;
 }
 
 export async function runShowElectronCommand(
@@ -62,13 +67,28 @@ export async function runShowElectronCommand(
   }
 
   let disposeLifecycle: (() => void) | undefined;
+  let disposeShortcut: (() => void) | undefined;
   try {
     disposeLifecycle = adapters.bindEmergencyLifecycle((reason) => {
       void coordinator.requestEmergencyStop(reason).catch(() => undefined);
     });
+    disposeShortcut = adapters.bindOperatorStopShortcut(() => {
+      try {
+        coordinator.requestOperatorStop();
+      } catch {
+        // A shortcut callback cannot bypass the coordinator's bounded cleanup.
+      }
+    });
+    if (disposeShortcut === undefined) return 3;
     const boot = await coordinator.boot();
     if (!boot.ready) {
       return boot.outcome === "configuration-required" ? 2 : 1;
+    }
+    if (
+      command.startPolicy === "Automatic" &&
+      !coordinator.requestAutomaticStart()
+    ) {
+      return 1;
     }
     const result = await coordinator.completion;
     return result.ok ? 0 : 1;
@@ -86,6 +106,11 @@ export async function runShowElectronCommand(
       await coordinator.completion;
     } catch {
       // A rejected terminal promise is classified by the nonzero dispatcher result.
+    }
+    try {
+      disposeShortcut?.();
+    } catch {
+      // Shortcut disposal cannot bypass terminal cleanup.
     }
     try {
       disposeLifecycle?.();

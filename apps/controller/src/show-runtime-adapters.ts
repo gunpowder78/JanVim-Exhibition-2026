@@ -302,9 +302,14 @@ interface NormalizedShowHost {
   readonly removeRunLease: (path: string, lease: RunLease) => Promise<boolean>;
 }
 
+export type ShowRuntimeCommandAdapters = Pick<
+  ShowElectronCommandAdapters,
+  "validate" | "createCoordinator" | "bindEmergencyLifecycle"
+>;
+
 export function createShowRuntimeAdapters(
   source: ShowRuntimeAdapterHost,
-): ShowElectronCommandAdapters {
+): ShowRuntimeCommandAdapters {
   const host = normalizeShowHost(source);
   const lifecycle = new EmergencyLifecycleHub(
     source.controllerProcess,

@@ -548,6 +548,14 @@ export class ShowRunCoordinator {
     return this.handleCurrentRendererEvent(event);
   }
 
+  public requestAutomaticStart(): boolean {
+    return this.requestReadyStart("automatic");
+  }
+
+  public requestOperatorStop(): boolean {
+    return this.handleStopAction();
+  }
+
   public requestEmergencyStop(
     reason:
       | "sigint"
@@ -971,11 +979,7 @@ export class ShowRunCoordinator {
 
     switch (event.action) {
       case "start":
-        if (this.state !== "ready" || !this.operatorArmed) {
-          this.ignore("start-not-ready");
-          return false;
-        }
-        return this.startRun();
+        return this.requestReadyStart("renderer");
       case "restart-loop":
         if (this.state === "running") {
           this.ignore("restart-while-running");
@@ -1001,6 +1005,15 @@ export class ShowRunCoordinator {
       case "stop-show":
         return this.handleStopAction();
     }
+  }
+
+  private requestReadyStart(source: "automatic" | "renderer"): boolean {
+    if (this.state !== "ready" || !this.operatorArmed) {
+      this.ignore("start-not-ready");
+      return false;
+    }
+    this.log({ type: "start-request", source });
+    return this.startRun();
   }
 
   private handleStopAction(): boolean {

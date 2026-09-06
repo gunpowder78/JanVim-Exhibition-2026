@@ -13,7 +13,10 @@ import type {
   ShowRunResult,
 } from "../src/show-run-coordinator.ts";
 
-function command(mode: ShowCommand["mode"]): ShowCommand {
+function command(
+  mode: ShowCommand["mode"],
+  startPolicy: ShowCommand["startPolicy"] = "Operator",
+): ShowCommand {
   return {
     mode,
     rehearsalRoot: "D:\\VirtualData\\JanVim-Exhibition-Rehearsals\\show-001",
@@ -22,6 +25,7 @@ function command(mode: ShowCommand["mode"]): ShowCommand {
     runId: "show-001",
     controllerRunId: "controller-001",
     networkPolicy: "OfflineRequired",
+    startPolicy,
   };
 }
 
@@ -43,6 +47,8 @@ function createHarness(options: {
   completion?: ShowRunResult;
   deferredCompletion?: boolean;
   terminalShutdownStarted?: boolean;
+  shortcutAvailable?: boolean;
+  automaticStartAccepted?: boolean;
 } = {}) {
   const pendingCompletion = deferred<ShowRunResult>();
   const lifecycleReasons: EmergencyStopReason[] = [];
@@ -54,12 +60,17 @@ function createHarness(options: {
   let bootCount = 0;
   let bindCount = 0;
   let disposeCount = 0;
+  let shortcutBindCount = 0;
+  let shortcutDisposeCount = 0;
+  let shortcutListener: (() => void) | undefined;
+  const callOrder: string[] = [];
   const factoryCommands: RunShowCommand[] = [];
   const completion = options.deferredCompletion === true
     ? pendingCompletion.promise
     : Promise.resolve(options.completion ?? { ok: true, reason: "soak-complete" as const });
   const coordinator = {
     boot: vi.fn(async () => {
+      callOrder.push("boot");
       bootCount += 1;
       if (options.bootFailure === true) throw new Error("boot-failed");
       return options.boot ?? { ready: true as const };
@@ -73,6 +84,11 @@ function createHarness(options: {
     terminalShutdownStarted: vi.fn(
       () => options.terminalShutdownStarted ?? false,
     ),
+    requestAutomaticStart: vi.fn(() => {
+      callOrder.push("automatic-start");
+      return options.automaticStartAccepted ?? true;
+    }),
+    requestOperatorStop: vi.fn(() => true),
   };
   const adapters: ShowElectronCommandAdapters = {
     validate: async () => {
@@ -86,6 +102,7 @@ function createHarness(options: {
       return coordinator;
     },
     bindEmergencyLifecycle: (listener) => {
+      callOrder.push("lifecycle-bind");
       bindCount += 1;
       lifecycleListener = listener;
       let disposed = false;
@@ -93,6 +110,18 @@ function createHarness(options: {
         if (disposed) return;
         disposed = true;
         disposeCount += 1;
+      };
+    },
+    bindOperatorStopShortcut: (listener) => {
+      callOrder.push("shortcut-bind");
+      shortcutBindCount += 1;
+      if (options.shortcutAvailable === false) return undefined;
+      shortcutListener = listener;
+      let disposed = false;
+      return () => {
+        if (disposed) return;
+        disposed = true;
+        shortcutDisposeCount += 1;
       };
     },
   };
@@ -104,6 +133,10 @@ function createHarness(options: {
     emitLifecycle: (reason: EmergencyStopReason) => {
       if (lifecycleListener === undefined) throw new Error("lifecycle not bound");
       lifecycleListener(reason);
+    },
+    emitShortcut: () => {
+      if (shortcutListener === undefined) throw new Error("shortcut not bound");
+      shortcutListener();
     },
     resolveCompletion: (result: ShowRunResult) => pendingCompletion.resolve(result),
     rejectCompletion: (error: unknown) => pendingCompletion.reject(error),
@@ -124,6 +157,15 @@ function createHarness(options: {
     },
     get disposeCount() {
       return disposeCount;
+    },
+    get shortcutBindCount() {
+      return shortcutBindCount;
+    },
+    get shortcutDisposeCount() {
+      return shortcutDisposeCount;
+    },
+    get callOrder() {
+      return callOrder;
     },
   };
 }
@@ -189,10 +231,72 @@ describe("Task 9 Electron command dispatcher", () => {
       expect(harness.bootCount).toBe(1);
       expect(harness.bindCount).toBe(1);
       expect(harness.disposeCount).toBe(1);
+      expect(harness.shortcutBindCount).toBe(1);
+      expect(harness.shortcutDisposeCount).toBe(1);
       expect(harness.coordinator.requestEmergencyStop).toHaveBeenCalledTimes(1);
       expect(harness.lifecycleReasons).toEqual(["electron-quit"]);
     },
   );
+
+  it("binds normal stop before boot and starts Automatic policy exactly once", async () => {
+    const harness = createHarness();
+
+    await expect(
+      runShowElectronCommand(command("Show", "Automatic"), harness.adapters),
+    ).resolves.toBe(0);
+
+    expect(harness.callOrder).toEqual([
+      "lifecycle-bind",
+      "shortcut-bind",
+      "boot",
+      "automatic-start",
+    ]);
+    expect(harness.coordinator.requestAutomaticStart).toHaveBeenCalledTimes(1);
+    expect(harness.shortcutDisposeCount).toBe(1);
+  });
+
+  it("keeps Operator policy idle and routes the shortcut to normal stop", async () => {
+    const harness = createHarness({ deferredCompletion: true });
+    const pending = runShowElectronCommand(command("Show"), harness.adapters);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(harness.coordinator.requestAutomaticStart).not.toHaveBeenCalled();
+    harness.emitShortcut();
+    expect(harness.coordinator.requestOperatorStop).toHaveBeenCalledTimes(1);
+    harness.resolveCompletion({ ok: true, reason: "operator-stop" });
+
+    await expect(pending).resolves.toBe(0);
+    expect(harness.shortcutDisposeCount).toBe(1);
+  });
+
+  it("returns exit 3 and cleans up when the global stop shortcut is unavailable", async () => {
+    const harness = createHarness({ shortcutAvailable: false });
+
+    await expect(
+      runShowElectronCommand(command("Show", "Automatic"), harness.adapters),
+    ).resolves.toBe(3);
+
+    expect(harness.bootCount).toBe(0);
+    expect(harness.coordinator.requestAutomaticStart).not.toHaveBeenCalled();
+    expect(harness.coordinator.requestEmergencyStop).toHaveBeenCalledWith(
+      "electron-quit",
+    );
+    expect(harness.disposeCount).toBe(1);
+    expect(harness.shortcutDisposeCount).toBe(0);
+  });
+
+  it("returns nonzero when automatic start is rejected and disposes once", async () => {
+    const harness = createHarness({ automaticStartAccepted: false });
+
+    await expect(
+      runShowElectronCommand(command("Show", "Automatic"), harness.adapters),
+    ).resolves.toBe(1);
+
+    expect(harness.coordinator.requestAutomaticStart).toHaveBeenCalledTimes(1);
+    expect(harness.shortcutDisposeCount).toBe(1);
+    expect(harness.disposeCount).toBe(1);
+  });
 
   it("returns nonzero when strict evidence downgrades an otherwise successful run", async () => {
     const harness = createHarness({
