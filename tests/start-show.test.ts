@@ -3886,6 +3886,91 @@ describe("offline show launcher and external watchdog", () => {
     }
   }, 15_000);
 
+  it("uses one explicit absolute Node path even when PATH contains another Node", () => {
+    const fixture = makeLauncherFixture();
+    const alternateNodeDirectory = join(fixture.root, "alternate-explicit-node");
+    mkdirSync(alternateNodeDirectory);
+    copyFileSync(
+      fixture.nodeExecutable,
+      join(alternateNodeDirectory, "node.exe"),
+    );
+    try {
+      const result = runLauncher(
+        fixture,
+        [
+          ...launcherArguments(fixture, "ValidateOnly"),
+          "-NodeExecutable",
+          fixture.nodeExecutable,
+        ],
+        {
+          additionalNodePath: alternateNodeDirectory,
+          behavior: "matching-success",
+        },
+      );
+
+      expect(result.status, output(result)).toBe(0);
+      expect(invocations(fixture)).toHaveLength(1);
+    } finally {
+      fixture.cleanup();
+    }
+  }, 15_000);
+
+  it("rejects relative, missing, reparse-traversing, and wrong-version explicit Node paths", () => {
+    const cases = [
+      {
+        name: "relative",
+        path: "bin\\node.exe",
+        arrange: (_fixture: LauncherFixture): RunOptions => ({}),
+      },
+      {
+        name: "missing",
+        path: "D:\\missing-janvim-deployment-node.exe",
+        arrange: (_fixture: LauncherFixture): RunOptions => ({}),
+      },
+      {
+        name: "wrong-version",
+        path: "fixture-node",
+        arrange: (_fixture: LauncherFixture): RunOptions => ({
+          nodeVersion: "v22.23.1",
+        }),
+      },
+      {
+        name: "reparse",
+        path: "fixture-reparse",
+        arrange: (fixture: LauncherFixture): RunOptions => {
+          const link = join(fixture.root, "node-junction");
+          symlinkSync(dirname(fixture.nodeExecutable), link, "junction");
+          return {};
+        },
+      },
+    ] as const;
+
+    for (const testCase of cases) {
+      const fixture = makeLauncherFixture();
+      try {
+        const options = testCase.arrange(fixture);
+        const path = testCase.path === "fixture-node"
+          ? fixture.nodeExecutable
+          : testCase.path === "fixture-reparse"
+            ? join(fixture.root, "node-junction", "node.exe")
+            : testCase.path;
+        const result = runLauncher(
+          fixture,
+          [
+            ...launcherArguments(fixture, "ValidateOnly"),
+            "-NodeExecutable",
+            path,
+          ],
+          { ...options, behavior: "matching-success" },
+        );
+        expect(result.status, `${testCase.name}: ${output(result)}`).not.toBe(0);
+        expect(invocations(fixture), testCase.name).toHaveLength(0);
+      } finally {
+        fixture.cleanup();
+      }
+    }
+  }, 30_000);
+
   it("accepts matching single-display-preview terminal evidence", () => {
     const fixture = makeLauncherFixture();
     try {

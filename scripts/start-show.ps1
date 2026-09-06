@@ -21,7 +21,9 @@ param(
     [ValidateSet('Operator', 'Automatic')]
     [string]$StartPolicy = 'Operator',
 
-    [string]$SoundRunRoot
+    [string]$SoundRunRoot,
+
+    [string]$NodeExecutable
 )
 
 $ErrorActionPreference = 'Stop'
@@ -3078,30 +3080,40 @@ $watchdogAttemptsStream = $null
 $watchdogAttemptsWriter = $null
 try {
 
-$nodeCandidates = @(Get-Command -Name 'node' -CommandType Application -All -ErrorAction SilentlyContinue)
-$normalizedNodeCommands = [Collections.Generic.List[string]]::new()
-$seenNodeCommands = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
-foreach ($nodeCandidate in $nodeCandidates) {
-    if ($nodeCandidate.Source -isnot [string] -or [string]::IsNullOrWhiteSpace($nodeCandidate.Source)) {
-        throw 'node-command-invalid'
-    }
-    $normalizedNodeCommand = Resolve-ShowFullPath -Path $nodeCandidate.Source -Label 'node-command'
-    Assert-RequiredLeaf -Path $normalizedNodeCommand -Reason 'node-command-missing'
-    Assert-NoReparseTraversal -Path $normalizedNodeCommand -Reason 'node-command-reparse-rejected'
-    $normalizedNodeCommand = [IO.Path]::GetFullPath(
-        (Get-Item -LiteralPath $normalizedNodeCommand -Force -ErrorAction Stop).FullName
+if (-not [string]::IsNullOrWhiteSpace($NodeExecutable)) {
+    $nodeCommand = Resolve-ShowFullPath -Path $NodeExecutable -Label 'node-command'
+    Assert-RequiredLeaf -Path $nodeCommand -Reason 'node-command-missing'
+    Assert-NoReparseTraversal -Path $nodeCommand -Reason 'node-command-reparse-rejected'
+    $nodeCommand = [IO.Path]::GetFullPath(
+        (Get-Item -LiteralPath $nodeCommand -Force -ErrorAction Stop).FullName
     )
-    if ($seenNodeCommands.Add($normalizedNodeCommand)) {
-        $normalizedNodeCommands.Add($normalizedNodeCommand)
+}
+else {
+    $nodeCandidates = @(Get-Command -Name 'node' -CommandType Application -All -ErrorAction SilentlyContinue)
+    $normalizedNodeCommands = [Collections.Generic.List[string]]::new()
+    $seenNodeCommands = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($nodeCandidate in $nodeCandidates) {
+        if ($nodeCandidate.Source -isnot [string] -or [string]::IsNullOrWhiteSpace($nodeCandidate.Source)) {
+            throw 'node-command-invalid'
+        }
+        $normalizedNodeCommand = Resolve-ShowFullPath -Path $nodeCandidate.Source -Label 'node-command'
+        Assert-RequiredLeaf -Path $normalizedNodeCommand -Reason 'node-command-missing'
+        Assert-NoReparseTraversal -Path $normalizedNodeCommand -Reason 'node-command-reparse-rejected'
+        $normalizedNodeCommand = [IO.Path]::GetFullPath(
+            (Get-Item -LiteralPath $normalizedNodeCommand -Force -ErrorAction Stop).FullName
+        )
+        if ($seenNodeCommands.Add($normalizedNodeCommand)) {
+            $normalizedNodeCommands.Add($normalizedNodeCommand)
+        }
     }
+    if ($normalizedNodeCommands.Count -lt 1) {
+        throw 'node-command-missing'
+    }
+    if ($normalizedNodeCommands.Count -ne 1) {
+        throw 'node-command-ambiguous'
+    }
+    $nodeCommand = $normalizedNodeCommands[0]
 }
-if ($normalizedNodeCommands.Count -lt 1) {
-    throw 'node-command-missing'
-}
-if ($normalizedNodeCommands.Count -ne 1) {
-    throw 'node-command-ambiguous'
-}
-$nodeCommand = $normalizedNodeCommands[0]
 $nodeClaimSpecifications = @(
     New-FrozenInputClaimSpecification `
         -Path $nodeCommand `

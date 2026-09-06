@@ -28,7 +28,9 @@ param(
     [switch] $OfflineRequired,
 
     [ValidateSet('Operator', 'Automatic')]
-    [string] $StartPolicy = 'Operator'
+    [string] $StartPolicy = 'Operator',
+
+    [string] $NodeExecutable
 )
 
 $ErrorActionPreference = 'Stop'
@@ -386,6 +388,13 @@ if ($StartPolicy -cne 'Operator' -and $Action -cne 'Show') {
     throw 'StartPolicy is valid only for the Show action'
 }
 
+$resolvedNodeExecutable = $null
+if (-not [string]::IsNullOrWhiteSpace($NodeExecutable)) {
+    . (Join-Path $PSScriptRoot 'node-runtime.ps1')
+    $resolvedNodeExecutable = Resolve-JanVimNodeExecutable `
+        -ExplicitPath $NodeExecutable
+}
+
 if ($Action -ceq 'Prepare') {
     if ([string]::IsNullOrWhiteSpace($DisplayMapPath)) {
         $DisplayMapPath = Read-Host 'DisplayMapPath (absolute)'
@@ -444,6 +453,9 @@ switch ($Action) {
         if ($Listen) {
             $childArguments += '-Listen'
         }
+        if ($null -ne $resolvedNodeExecutable) {
+            $childArguments += @('-NodeExecutable', $resolvedNodeExecutable)
+        }
         & $powerShell @childArguments
         exit $LASTEXITCODE
     }
@@ -467,6 +479,9 @@ switch ($Action) {
             '-StartPolicy', 'Operator',
             '-SoundRunRoot', $paths.SoundRoot
         )
+        if ($null -ne $resolvedNodeExecutable) {
+            $validateArguments += @('-NodeExecutable', $resolvedNodeExecutable)
+        }
         & $powerShell @validateArguments
         $validationExitCode = $LASTEXITCODE
         if ($validationExitCode -ne 0) {
@@ -484,6 +499,9 @@ switch ($Action) {
             '-StartPolicy', $StartPolicy,
             '-SoundRunRoot', $paths.SoundRoot
         )
+        if ($null -ne $resolvedNodeExecutable) {
+            $showArguments += @('-NodeExecutable', $resolvedNodeExecutable)
+        }
         & $powerShell @showArguments
         exit $LASTEXITCODE
     }
@@ -512,7 +530,14 @@ switch ($Action) {
     'StopSound' {
         Write-Output "StopSound targets current sound root: $($paths.SoundRoot)"
         Write-Output 'Full artwork Stop is the existing Stop Show button.'
-        & $powerShell -NoLogo -NoProfile -NonInteractive -File $stopSound -RunRoot $paths.SoundRoot
+        $stopArguments = @(
+            '-NoLogo', '-NoProfile', '-NonInteractive', '-File', $stopSound,
+            '-RunRoot', $paths.SoundRoot
+        )
+        if ($null -ne $resolvedNodeExecutable) {
+            $stopArguments += @('-NodeExecutable', $resolvedNodeExecutable)
+        }
+        & $powerShell @stopArguments
         $stopExitCode = $LASTEXITCODE
         if ($stopExitCode -ne 0) {
             exit $stopExitCode

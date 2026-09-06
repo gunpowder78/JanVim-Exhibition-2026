@@ -11,22 +11,17 @@ param(
     [Alias('Input')]
     [string] $SoundInput = 'Simulated',
 
-    [switch] $FlockIngress
+    [switch] $FlockIngress,
+
+    [string] $NodeExecutable
 )
 
 $ErrorActionPreference = 'Stop'
 if ($FlockIngress -and $SoundInput -ne 'RealCursor') {
     throw 'FlockIngress requires -Input RealCursor'
 }
-$verifiedNode = 'C:\Users\hxj\AppData\Local\hermes\node\node.exe'
-$node = if (Test-Path -LiteralPath $verifiedNode -PathType Leaf) {
-    $verifiedNode
-} else {
-    (Get-Command node.exe -CommandType Application -ErrorAction Stop).Source
-}
-if ((& $node --version) -ne 'v22.23.0') {
-    throw "JanVim sound requires Node 22.23.0: $node"
-}
+. (Join-Path $PSScriptRoot 'node-runtime.ps1')
+$node = Resolve-JanVimNodeExecutable -ExplicitPath $NodeExecutable
 
 $runScript = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot 'run.mjs'))
 $arguments = [System.Collections.Generic.List[string]]::new()

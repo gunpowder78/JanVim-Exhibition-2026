@@ -569,6 +569,53 @@ test("PowerShell start and stop wrappers work from an unrelated cwd with no prel
   }
 });
 
+test("PowerShell wrappers accept and use one explicit absolute Node executable", async () => {
+  const runRoot = freshRunRoot("wrappers-explicit-node");
+  const start = spawnCaptured(
+    "pwsh.exe",
+    [
+      "-NoProfile",
+      "-NonInteractive",
+      "-File",
+      START_SCRIPT,
+      "-RunRoot",
+      runRoot,
+      "-Duration",
+      "30",
+      "-NodeExecutable",
+      process.execPath,
+    ],
+    UNRELATED_CWD,
+  );
+  try {
+    const ready = await waitForJson(path.join(runRoot, "ready.json"), start);
+    assert.equal(
+      path.resolve(ready.nodeExecutable).toLowerCase(),
+      path.resolve(process.execPath).toLowerCase(),
+    );
+    const stop = spawnCaptured(
+      "pwsh.exe",
+      [
+        "-NoProfile",
+        "-NonInteractive",
+        "-File",
+        STOP_SCRIPT,
+        "-RunRoot",
+        runRoot,
+        "-NodeExecutable",
+        process.execPath,
+      ],
+      UNRELATED_CWD,
+    );
+    const stopResult = await waitForCompletion(stop, 5_000);
+    assert.equal(stopResult.exitCode, 0, stopResult.stdout + stopResult.stderr);
+    const startResult = await waitForCompletion(start, 20_000);
+    assert.equal(startResult.exitCode, 0, startResult.stdout + startResult.stderr);
+  } finally {
+    await terminateOwnedTree(start);
+  }
+});
+
 for (const attached of [false, true]) {
 test(`real-input transport fixture: ${attached ? "controlled plucks and manual Stop" : "no attach is recorded silence"}`, async () => {
   const runRoot = freshRunRoot(attached ? "real-transport" : "real-no-attach");

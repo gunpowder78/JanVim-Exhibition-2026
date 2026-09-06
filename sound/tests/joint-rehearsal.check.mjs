@@ -29,7 +29,8 @@ param(
     [double] $Duration,
     [string] $RunRoot,
     [Alias('Input')][string] $SoundInput,
-    [switch] $FlockIngress
+    [switch] $FlockIngress,
+    [string] $NodeExecutable
 )
 $record = [ordered]@{
     launcher = 'start-sound'
@@ -39,14 +40,16 @@ $record = [ordered]@{
     input = $SoundInput
     flockIngress = [bool]$FlockIngress
 }
+if (-not [string]::IsNullOrWhiteSpace($NodeExecutable)) { $record.nodeExecutable = $NodeExecutable }
 [IO.File]::AppendAllText($env:JOINT_CAPTURE, (($record | ConvertTo-Json -Compress) + [Environment]::NewLine))
 if ($env:JOINT_SOUND_EXIT) { exit [int]$env:JOINT_SOUND_EXIT }
 exit 0
 `;
 
 const stopSoundFixture = String.raw`[CmdletBinding()]
-param([Parameter(Mandatory)][string] $RunRoot)
+param([Parameter(Mandatory)][string] $RunRoot, [string] $NodeExecutable)
 $record = [ordered]@{ launcher = 'stop-sound'; runRoot = $RunRoot }
+if (-not [string]::IsNullOrWhiteSpace($NodeExecutable)) { $record.nodeExecutable = $NodeExecutable }
 [IO.File]::AppendAllText($env:JOINT_CAPTURE, (($record | ConvertTo-Json -Compress) + [Environment]::NewLine))
 Write-Output 'STOP_REQUESTED'
 if ($env:JOINT_STOP_EXIT) { exit [int]$env:JOINT_STOP_EXIT }
@@ -61,7 +64,8 @@ param(
     [Parameter(Mandatory)][string] $RunId,
     [Parameter(Mandatory)][ValidateSet('OfflineRequired', 'DiagnosticConnected')][string] $NetworkPolicy,
     [ValidateSet('Operator', 'Automatic')][string] $StartPolicy = 'Operator',
-    [string] $SoundRunRoot
+    [string] $SoundRunRoot,
+    [string] $NodeExecutable
 )
 $record = [ordered]@{
     launcher = 'start-show'
@@ -73,6 +77,7 @@ $record = [ordered]@{
     startPolicy = $StartPolicy
     soundRunRoot = $SoundRunRoot
 }
+if (-not [string]::IsNullOrWhiteSpace($NodeExecutable)) { $record.nodeExecutable = $NodeExecutable }
 [IO.File]::AppendAllText($env:JOINT_CAPTURE, (($record | ConvertTo-Json -Compress) + [Environment]::NewLine))
 if ($Mode -eq 'ValidateOnly' -and $env:JOINT_VALIDATE_EXIT) { exit [int]$env:JOINT_VALIDATE_EXIT }
 exit 0
@@ -133,6 +138,10 @@ async function makeFixture(t) {
     if (error.code !== "ENOENT") throw error;
     await writeFile(path.join(sound, "joint-rehearsal.ps1"), "# Missing behavior under TDD.\n");
   }
+  await copyFile(
+    path.join(REPOSITORY_ROOT, "sound", "node-runtime.ps1"),
+    path.join(sound, "node-runtime.ps1"),
+  );
   await writeFile(path.join(sound, "start-sound.ps1"), startSoundFixture);
   await writeFile(path.join(sound, "stop-sound.ps1"), stopSoundFixture);
   await writeFile(path.join(scripts, "start-show.ps1"), startShowFixture);
@@ -401,6 +410,53 @@ test("Show propagates exact roots, network policy, and start policy", async t =>
       soundRunRoot: selected.soundRoot,
     });
   }
+});
+
+test("Sound, Show, and StopSound forward one explicit absolute Node executable", async t => {
+  const fixture = await makeFixture(t);
+  const selected = await prepareSession(t, fixture);
+  await writeReady(selected);
+
+  const sound = await fixture.run([
+    "-Action", "Sound",
+    "-SessionFile", selected.sessionFile,
+    "-NodeExecutable", process.execPath,
+  ]);
+  assert.equal(sound.exitCode, 0, sound.stderr);
+  const show = await fixture.run([
+    "-Action", "Show",
+    "-SessionFile", selected.sessionFile,
+    "-NodeExecutable", process.execPath,
+  ]);
+  assert.equal(show.exitCode, 0, show.stderr);
+  const stop = await fixture.run([
+    "-Action", "StopSound",
+    "-SessionFile", selected.sessionFile,
+    "-NodeExecutable", process.execPath,
+  ]);
+  assert.equal(stop.exitCode, 0, stop.stderr);
+
+  const records = await captureRecords(fixture);
+  assert.equal(records.length, 4);
+  assert.deepEqual(records.map(record => record.launcher), [
+    "start-sound",
+    "start-show",
+    "start-show",
+    "stop-sound",
+  ]);
+  assert.ok(records.every(record => record.nodeExecutable === process.execPath));
+});
+
+test("joint actions reject a relative explicit Node path before delegation", async t => {
+  const fixture = await makeFixture(t);
+  const selected = await prepareSession(t, fixture);
+  const result = await fixture.run([
+    "-Action", "Sound",
+    "-SessionFile", selected.sessionFile,
+    "-NodeExecutable", "runtime\\node\\node.exe",
+  ]);
+  assert.notEqual(result.exitCode, 0);
+  assert.deepEqual(await captureRecords(fixture), []);
 });
 
 test("non-Show actions reject the automatic start policy", async t => {
