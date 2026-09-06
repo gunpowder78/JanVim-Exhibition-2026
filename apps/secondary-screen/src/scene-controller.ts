@@ -39,6 +39,7 @@ export class SecondarySceneController {
   private readonly startButton: HTMLButtonElement;
   private readonly restartButton: HTMLButtonElement;
   private readonly stopButton: HTMLButtonElement;
+  private readonly stopShortcutHint: HTMLElement;
   private readonly soundMixControls: HTMLElement;
   private readonly soundMixPersistence: HTMLElement;
   private readonly windMix: import("./model").SoundMixRowElements;
@@ -70,6 +71,7 @@ export class SecondarySceneController {
     this.startButton = elements.startButton;
     this.restartButton = elements.restartButton;
     this.stopButton = elements.stopButton;
+    this.stopShortcutHint = elements.stopShortcutHint;
     this.soundMixControls = elements.soundMixControls;
     this.soundMixPersistence = elements.soundMixPersistence;
     this.windMix = elements.windMix;
@@ -313,6 +315,7 @@ export class SecondarySceneController {
       visible.restart === true,
     );
     this.setButtonState(this.stopButton, "stop-show", visible.stop === true);
+    this.stopShortcutHint.hidden = visible.stop !== true;
   }
 
   private setButtonState(

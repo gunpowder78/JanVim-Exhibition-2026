@@ -226,6 +226,32 @@ describe("secondary scene controller", () => {
     unbind();
   });
 
+  it("shows the global shortcut hint directly beneath an available Stop button", () => {
+    const { root, controller } = makeController();
+    const hint = root.querySelector<HTMLElement>("[data-stop-shortcut-hint]");
+
+    expect(hint?.textContent).toBe("快捷停止：Ctrl + Shift + S");
+    expect(hint?.hidden).toBe(true);
+    controller.applyEvent({
+      schema: 1,
+      type: "run-status",
+      generationId: 1,
+      state: "running",
+    });
+    expect(hint?.hidden).toBe(false);
+    expect(hint?.previousElementSibling?.getAttribute("data-action")).toBe(
+      "stop-show",
+    );
+
+    controller.applyEvent({
+      schema: 1,
+      type: "run-status",
+      generationId: 1,
+      state: "stopped",
+    });
+    expect(hint?.hidden).toBe(true);
+  });
+
   it("site sound mix adjusts each stem independently and exposes autosave state", () => {
     const { root, controller } = makeController();
     const frames = new FakeAnimationFrames();

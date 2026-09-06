@@ -141,7 +141,11 @@ export function createReadyPage(
   stopButton.textContent = "STOP SHOW";
   stopButton.disabled = true;
   stopButton.hidden = true;
-  showActions.append(startButton, restartButton, stopButton);
+  const stopShortcutHint = document.createElement("span");
+  stopShortcutHint.dataset.stopShortcutHint = "";
+  stopShortcutHint.textContent = "快捷停止：Ctrl + Shift + S";
+  stopShortcutHint.hidden = true;
+  showActions.append(startButton, restartButton, stopButton, stopShortcutHint);
   operatorControls.append(soundMixControls, showActions);
   ready.append(readyTitle, readyStatus);
 
@@ -155,6 +159,7 @@ export function createReadyPage(
     startButton,
     restartButton,
     stopButton,
+    stopShortcutHint,
     soundMixControls,
     soundMixPersistence,
     windMix,

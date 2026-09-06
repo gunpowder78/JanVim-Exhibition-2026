@@ -50,6 +50,7 @@ export interface SceneElements {
   startButton: HTMLButtonElement;
   restartButton: HTMLButtonElement;
   stopButton: HTMLButtonElement;
+  stopShortcutHint: HTMLElement;
   soundMixControls: HTMLElement;
   soundMixPersistence: HTMLElement;
   windMix: SoundMixRowElements;

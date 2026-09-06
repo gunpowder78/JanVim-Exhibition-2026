@@ -261,7 +261,18 @@ body {
 
 .operator-show-actions {
   display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 0.8rem;
+}
+
+[data-stop-shortcut-hint] {
+  flex-basis: 100%;
+  color: #9db8b8;
+  font-family: "Cascadia Mono", "Microsoft YaHei UI", monospace;
+  font-size: clamp(12px, 0.85vw, 17px);
+  letter-spacing: 0.05em;
+  text-align: right;
 }
 
 .operator-controls button {
