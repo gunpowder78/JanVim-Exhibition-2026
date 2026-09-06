@@ -28,6 +28,15 @@ not represent the secondary screen as a JanVim Float.
 - [Repository and replay decision](docs/adr/0001-separate-show-repository-and-deterministic-replay.md)
 - [Dual-projector design](docs/specs/2026-08-28-dual-projector-generative-performance-design.md)
 - [Four-day delivery plan](docs/plans/2026-08-28-four-day-dual-projector-delivery.md)
+- [Attended three-screen deployment design](docs/superpowers/specs/2026-09-07-exhibition-deployment-package-design.md)
+- [Deployment implementation plan](docs/superpowers/plans/2026-09-07-exhibition-deployment-package.md)
+- [Package builder](deployment/build-deployment-package.ps1)
+- [Deployment guide](deployment/docs/README-DEPLOYMENT.md)
+
+The deployment package is for an attended three-screen installation. It automatically starts the
+rehearsal, places the black/white JianShan surface on SCREEN-3 as an interactive topmost window,
+and provides `Ctrl+Shift+S` as the normal global stop. It makes no offline, forced-recovery,
+HP-performance, hot-plug self-healing, or unattended-operation claim.
 
 ## Relationship to JanVim
 

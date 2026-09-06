@@ -1,0 +1,63 @@
+# 同规格展览主机部署
+
+本包用于有人值守的 Windows 11 Pro x64 三屏展演。安装根固定为
+`D:\github\JanVim-Exhibition-Deploy`，运行证据和现场配置固定写入
+`D:\VirtualData\JanVim-Exhibition-Rehearsals`。不要从源码工作树直接开演。
+
+## 第三方准备
+
+目标机必须具备：
+
+- PowerShell 7.6.5 x64；`pwsh.exe` 可由 PATH 唯一找到。
+- SuperCollider 3.14.1，安装于 `C:\Program Files\SuperCollider-3.14.1`。
+- 当前 GPU 的 Windows 11 驱动，并能运行 DX12 Compute。
+- UVC 相机驱动；Windows“隐私和安全性 → 相机”允许桌面应用访问。
+- 有线耳机端点 `Windows WASAPI : Headphones (Senary Audio)`，48 kHz、立体声。
+- 三台显示设备采用 Windows“扩展这些显示器”，不要求沿用旧接口或旧显示器 ID。
+
+Node.js 22.23.0、Electron、JavaScript 依赖、《见山》VC144/MediaPipe/OpenCV 文件和手势模型
+已经随包提供。目标机不需要 Git、npm、Rust、Cargo、Python、Visual Studio 或 ASIO。
+
+## 拷贝与首次验证
+
+1. 将 ZIP 和 `deployment-handoff.json` 一并复制到目标机。先以
+   `Get-FileHash -Algorithm SHA256 -LiteralPath '<ZIP>'` 对照回执中的 `archive.sha256`。
+2. 确认 `D:\github\JanVim-Exhibition-Deploy` 不存在。若有旧包，先由技术人员把整个目录
+   改名备份；不要覆盖安装。
+3. 解压 ZIP 内容到唯一目录 `D:\github\JanVim-Exhibition-Deploy`。
+4. 在 PowerShell 7 执行：
+
+   ```powershell
+   Set-Location 'D:\github\JanVim-Exhibition-Deploy'
+   pwsh -NoProfile -File '.\operator\Verify-Deployment.ps1' `
+     -HandoffReceiptPath '<deployment-handoff.json 的绝对路径>'
+   ```
+
+   只有看到 `DEPLOYMENT_VERIFY_PASS` 才继续。校验不会打开相机、GUI 或播放声音。
+
+## 三屏配置
+
+接好三屏并设为扩展模式后执行：
+
+```powershell
+pwsh -NoProfile -File 'D:\github\JanVim-Exhibition-Deploy\operator\Configure-Displays.ps1'
+```
+
+按配置器画面把 A、B、C 对应为 `SCREEN-1`、`SCREEN-2`、`SCREEN-3`，保存并关闭。
+配置写入外部 `site-config\display-map.json`，不会改部署包。换接口、投影仪、缩放或拓扑后，
+由技术人员重新执行本步骤。
+
+## 第一次开演
+
+先把耳机音量调低并确认相机无遮挡，然后执行：
+
+```powershell
+pwsh -NoProfile -File 'D:\github\JanVim-Exhibition-Deploy\operator\Start-Exhibition.ps1'
+```
+
+系统自动启动声音、《见山》和 JanVim 展演，不再点击 `Start Rehearsal`。《见山》应自动位于
+C 屏、最大化、永久置顶、黑底白鸟；鼠标移入后仍可显示、点击。A 屏持续长文回写，B 屏显示
+叙事和声音控制。正常停止使用 `Ctrl+Shift+S`；也可点击 B 屏 `STOP SHOW`。
+
+每次会话最多 3,600 秒，且需要工作人员在场。本包不声明断网、强制恢复、HP 性能、热插拔
+自愈或 7×24 小时无人值守能力。
