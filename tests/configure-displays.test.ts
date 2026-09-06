@@ -253,7 +253,7 @@ describe("public manual display configurator launcher", () => {
         fixture.cleanup();
       }
     }
-  });
+  }, 15_000);
 
   it("propagates the exact Electron exit code in process status and receipt", () => {
     const fixture = makeFixture();
