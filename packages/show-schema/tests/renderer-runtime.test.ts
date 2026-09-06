@@ -76,6 +76,46 @@ describe("Task 9 renderer runtime schema", () => {
     ).toThrow();
   });
 
+  it("accepts only strict site sound mix events", () => {
+    const { parseRendererEvent, parseRendererToControllerEvent } = runtimeExports(rendererSchema);
+    const adjustment = {
+      schema: 1,
+      type: "sound-mix-adjust",
+      target: "wind",
+      deltaDb: -1,
+    } as const;
+    const status = {
+      schema: 1,
+      type: "sound-mix-status",
+      windGainDb: -6,
+      instrumentGainDb: 2,
+      persistence: "saved",
+      pendingTargets: ["wind", "instrument"],
+    } as const;
+
+    expect(parseRendererToControllerEvent(adjustment)).toEqual(adjustment);
+    expect(parseRendererEvent(status)).toEqual(status);
+
+    for (const invalid of [
+      { ...adjustment, target: "master" },
+      { ...adjustment, deltaDb: 0 },
+      { ...adjustment, deltaDb: 2 },
+      { ...adjustment, extra: true },
+    ]) {
+      expect(() => parseRendererToControllerEvent(invalid)).toThrow();
+    }
+    for (const invalid of [
+      { ...status, windGainDb: -25 },
+      { ...status, instrumentGainDb: 6.5 },
+      { ...status, persistence: "pending" },
+      { ...status, pendingTargets: ["wind", "wind"] },
+      { ...status, pendingTargets: ["instrument", "wind"] },
+      { ...status, extra: true },
+    ]) {
+      expect(() => parseRendererEvent(invalid)).toThrow();
+    }
+  });
+
   it("requires positive safe generations and bounded control-free correlation ids", () => {
     const { parseRendererToControllerEvent } = runtimeExports(rendererSchema);
     const presentation = {

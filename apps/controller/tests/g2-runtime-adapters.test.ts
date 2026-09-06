@@ -26,7 +26,14 @@ const showConfig = readFileSync(
   join(repositoryFixtureRoot, "show", "janvim-show.toml"),
 );
 const manifestText = readFileSync(
-  join(repositoryFixtureRoot, "content", "fixture", "show.manifest.json"),
+  join(
+    repositoryFixtureRoot,
+    "content",
+    "p0.1",
+    "profiles",
+    "p0-baseline",
+    "show.manifest.json",
+  ),
 );
 const poemText = readFileSync(
   join(repositoryFixtureRoot, "content", "fixture", "poem.txt"),

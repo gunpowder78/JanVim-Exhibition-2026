@@ -1,8 +1,8 @@
 (
 var assert, outputDirectory, synthsPath, synthFactory, definitions, hasDefinition;
 var options, addDefinitions, addScoreCleanup;
-var mainScore, watchdogScore, captureCapScore, renderScore;
-var mainCapture, watchdogCapture, captureCapCapture, captureCapEngineCapture;
+var mainScore, watchdogScore, captureCapScore, gainScore, renderScore;
+var mainCapture, watchdogCapture, captureCapCapture, captureCapEngineCapture, gainCapture;
 
 assert = { |condition, message|
     if(condition.not) { Error("ASSERTION FAILED: " ++ message).throw };
@@ -89,6 +89,19 @@ try {
     captureCapScore.add([0.50, [\b_free, 0]]);
     captureCapScore.add([0.55, [\c_set, 0, 0]]);
 
+    gainCapture = outputDirectory +/+ "gain-capture.wav";
+    gainScore = Score.new;
+    addDefinitions.value(gainScore);
+    gainScore.add([0.01, [\s_new, \jvMix, 4000, 0, 0,
+        \inBus, 16, \outBus, 18, \heartbeat, 0, \armed, 0]]);
+    gainScore.add([0.01, [\s_new, \jvOutput, 4001, 1, 0,
+        \inBus, 18, \hardware, 1]]);
+    gainScore.add([0.01, [\s_new, \jvWind, 4200, 2, 4000,
+        \outBus, 16, \energy, 0.65, \pan, 0, \gate, 1, \gain, 1]]);
+    gainScore.add([1.00, [\n_set, 4200, \gain, -12.dbamp]]);
+    gainScore.add([2.00, [\n_set, 4200, \gain, 1]]);
+    addScoreCleanup.value(gainScore, 4001, 4200, 3.0);
+
     renderScore = { |score, scoreName, capturePath, engineDuration, action|
         score.recordNRT(
             oscFilePath: outputDirectory +/+ (scoreName ++ ".osc"),
@@ -111,8 +124,16 @@ try {
                 captureCapEngineCapture,
                 0.6,
                 {
-                    "PASS: sound/tests/render.scd".postln;
-                    0.exit;
+                    renderScore.value(
+                        gainScore,
+                        "gain",
+                        gainCapture,
+                        3.2,
+                        {
+                            "PASS: sound/tests/render.scd".postln;
+                            0.exit;
+                        }
+                    );
                 }
             );
         });

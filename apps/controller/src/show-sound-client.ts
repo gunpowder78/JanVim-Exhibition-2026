@@ -3,7 +3,11 @@ import { Socket } from "node:net";
 import { win32 } from "node:path";
 import { z } from "zod";
 
-import type { AgentCursorObservation } from "@janvim-exhibition/show-schema";
+import type {
+  AgentCursorObservation,
+  SoundMixPersistence,
+  SoundMixTarget,
+} from "@janvim-exhibition/show-schema";
 import type { AgentCursorTiming } from "./bridge-server.js";
 import { G2_REHEARSAL_PARENT } from "./g2-command.js";
 import type { OneLoopTimerAdapter, OneLoopTimerHandle } from "./one-loop-driver.js";
@@ -13,7 +17,16 @@ export interface ShowSoundClient {
   beginLoop(generationId: number, loopId: string): void;
   observe(event: AgentCursorObservation, timing?: AgentCursorTiming): void;
   reset(): void;
+  adjustMix(target: SoundMixTarget, deltaDb: -1 | 1): boolean;
+  onMixStatus(listener: (status: SoundMixStatus) => void): () => void;
   stop(reason: string): void;
+}
+
+export interface SoundMixStatus {
+  windGainDb: number;
+  instrumentGainDb: number;
+  persistence: SoundMixPersistence;
+  pendingTargets: readonly SoundMixTarget[];
 }
 
 export interface ShowSoundClientOptions {
@@ -34,6 +47,26 @@ const receiptSchema = z.object({
   runRoot: z.string(), token: z.string().regex(/^[0-9a-f]{64}$/),
   version: z.literal(1), input: z.literal("real-cursor"),
 }).strict();
+const gainDbSchema = z.number().int().min(-24).max(6);
+const mixReplySchema = z.discriminatedUnion("ok", [
+  z.object({
+    command: z.literal("site-mix"),
+    requestId: z.number().int().min(1).max(INT32_MAX),
+    ok: z.literal(true),
+    windGainDb: gainDbSchema,
+    instrumentGainDb: gainDbSchema,
+    persistence: z.enum(["saved", "save-error"]),
+  }).strict(),
+  z.object({
+    command: z.literal("site-mix"),
+    requestId: z.number().int().min(1).max(INT32_MAX),
+    ok: z.literal(false),
+    reason: z.literal("save-failed"),
+    windGainDb: gainDbSchema,
+    instrumentGainDb: gainDbSchema,
+    persistence: z.literal("save-error"),
+  }).strict(),
+]);
 
 function samePath(left: string, right: string): boolean {
   return win32.resolve(left).toLowerCase() === win32.resolve(right).toLowerCase();
@@ -96,6 +129,12 @@ export function createShowSoundClient(options: ShowSoundClientOptions): ShowSoun
   let pulse: OneLoopTimerHandle | undefined;
   let attachedAt: number | undefined;
   let reply = "";
+  let mixReply = "";
+  let mixRequestId = 0;
+  const pendingMix = new Map<number, SoundMixTarget | null>();
+  const pendingTargets = new Set<SoundMixTarget>();
+  const mixListeners = new Set<(status: SoundMixStatus) => void>();
+  let mixStatus: Omit<SoundMixStatus, "pendingTargets"> | undefined;
   let generationId = 1;
   let loopId = "idle";
   let announce = true;
@@ -123,6 +162,11 @@ export function createShowSoundClient(options: ShowSoundClientOptions): ShowSoun
     reference = latest = undefined;
     receipt = undefined;
     reply = "";
+    mixReply = "";
+    pendingMix.clear();
+    pendingTargets.clear();
+    mixStatus = undefined;
+    mixListeners.clear();
   };
   const disable = (reason: string): void => {
     if (terminal) return;
@@ -138,6 +182,77 @@ export function createShowSoundClient(options: ShowSoundClientOptions): ShowSoun
       if (!socket.write(`${line}\n`)) blockedAt = now();
       return true;
     } catch { disable("sound-send-failed"); return false; }
+  };
+  const currentMixStatus = (): SoundMixStatus | undefined => mixStatus === undefined
+    ? undefined
+    : {
+        ...mixStatus,
+        pendingTargets: (["wind", "instrument"] as const).filter(target => pendingTargets.has(target)),
+      };
+  const emitMixStatus = (): void => {
+    const status = currentMixStatus();
+    if (status === undefined) return;
+    for (const listener of mixListeners) {
+      try { listener(status); } catch { /* Renderer listeners cannot affect Show sound. */ }
+    }
+  };
+  const nextMixRequestId = (): number | undefined => {
+    if (mixRequestId >= INT32_MAX) {
+      disable("sound-mix-sequence-exhausted");
+      return undefined;
+    }
+    return ++mixRequestId;
+  };
+  const requestMixStatus = (): void => {
+    if (terminal || attachedAt === undefined || receipt === undefined || mixStatus !== undefined ||
+        mixListeners.size === 0 || [...pendingMix.values()].includes(null)) return;
+    const requestId = nextMixRequestId();
+    if (requestId === undefined) return;
+    pendingMix.set(requestId, null);
+    if (!write({ command: "get-site-mix", token: receipt.token, runId: options.runId,
+      controllerRunId: options.controllerRunId, requestId })) pendingMix.delete(requestId);
+  };
+  const acceptMixReply = (line: string): void => {
+    try {
+      const value = mixReplySchema.parse(JSON.parse(line));
+      if (JSON.stringify(value) !== line || !pendingMix.has(value.requestId)) {
+        disable("sound-mix-reply-invalid");
+        return;
+      }
+      const target = pendingMix.get(value.requestId)!;
+      if (target === null && !value.ok) {
+        disable("sound-mix-reply-invalid");
+        return;
+      }
+      pendingMix.delete(value.requestId);
+      if (target !== null) pendingTargets.delete(target);
+      mixStatus = {
+        windGainDb: value.windGainDb,
+        instrumentGainDb: value.instrumentGainDb,
+        persistence: value.persistence,
+      };
+      emitMixStatus();
+    } catch {
+      disable("sound-mix-reply-invalid");
+    }
+  };
+  const acceptMixData = (chunk: Buffer): void => {
+    if (chunk.length > 4096) {
+      disable("sound-mix-reply-invalid");
+      return;
+    }
+    mixReply += chunk.toString("utf8");
+    let end: number;
+    while (!terminal && (end = mixReply.indexOf("\n")) >= 0) {
+      const line = mixReply.slice(0, end);
+      mixReply = mixReply.slice(end + 1);
+      if (Buffer.byteLength(line) > 1024 || line.includes("\r")) {
+        disable("sound-mix-reply-invalid");
+        return;
+      }
+      acceptMixReply(line);
+    }
+    if (!terminal && Buffer.byteLength(mixReply) > 1024) disable("sound-mix-reply-invalid");
   };
   const send = (command: "heartbeat" | "cursor", at: number, features?: { x: number; y: number; motion: number }): boolean => {
     if (attachedAt === undefined || receipt === undefined) return false;
@@ -175,7 +290,11 @@ export function createShowSoundClient(options: ShowSoundClientOptions): ShowSoun
   }
   function onData(chunk: Buffer): void {
     if (terminal) return;
-    if (attachedAt !== undefined || Buffer.byteLength(reply) + chunk.length > 1024) {
+    if (attachedAt !== undefined) {
+      acceptMixData(chunk);
+      return;
+    }
+    if (Buffer.byteLength(reply) + chunk.length > 1024) {
       disable("sound-attach-rejected"); return;
     }
     reply += chunk.toString("utf8");
@@ -187,6 +306,7 @@ export function createShowSoundClient(options: ShowSoundClientOptions): ShowSoun
     if (deadline !== undefined) timers.clearTimeout(deadline);
     deadline = undefined;
     pulse = timers.setInterval(flush, 125);
+    requestMixStatus();
     flush();
   }
   function onDrain(): void {
@@ -249,6 +369,34 @@ export function createShowSoundClient(options: ShowSoundClientOptions): ShowSoun
       flush();
     },
     reset() { reference = latest = undefined; },
+    adjustMix(target, deltaDb) {
+      if (terminal || attachedAt === undefined || receipt === undefined || mixStatus === undefined ||
+          blockedAt !== undefined || !["wind", "instrument"].includes(target) ||
+          ![-1, 1].includes(deltaDb) || pendingTargets.has(target)) return false;
+      const requestId = nextMixRequestId();
+      if (requestId === undefined) return false;
+      pendingMix.set(requestId, target);
+      pendingTargets.add(target);
+      if (!write({ command: "adjust-site-mix", token: receipt.token, runId: options.runId,
+        controllerRunId: options.controllerRunId, requestId, target, deltaDb })) {
+        pendingMix.delete(requestId);
+        pendingTargets.delete(target);
+        return false;
+      }
+      emitMixStatus();
+      return true;
+    },
+    onMixStatus(listener) {
+      if (terminal) return () => {};
+      mixListeners.add(listener);
+      const status = currentMixStatus();
+      if (status !== undefined) {
+        try { listener(status); } catch { /* Renderer listeners cannot affect Show sound. */ }
+      } else {
+        requestMixStatus();
+      }
+      return () => mixListeners.delete(listener);
+    },
     stop(_reason) {
       if (terminal) return;
       terminal = true; // Latch before any callbacks or asynchronous visual cleanup.

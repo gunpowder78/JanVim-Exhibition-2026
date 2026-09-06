@@ -52,8 +52,27 @@ export type ControllerStatusEvent = {
 
 export type OperatorAction = "start" | "restart-loop" | "stop-show";
 
+export type SoundMixTarget = "wind" | "instrument";
+
+export type SoundMixPersistence = "saved" | "save-error";
+
+export type SoundMixStatusEvent = {
+  schema: 1;
+  type: "sound-mix-status";
+  windGainDb: number;
+  instrumentGainDb: number;
+  persistence: SoundMixPersistence;
+  pendingTargets: SoundMixTarget[];
+};
+
 export type RendererToControllerEvent =
   | { schema: 1; type: "operator-action"; action: OperatorAction }
+  | {
+      schema: 1;
+      type: "sound-mix-adjust";
+      target: SoundMixTarget;
+      deltaDb: -1 | 1;
+    }
   | {
       schema: 1;
       type: "presentation-ack";
@@ -87,7 +106,12 @@ export type RunStatusEvent = {
   reason?: string;
 };
 
-export type RendererEvent = Cue | ControllerStatusEvent | RunCueEvent | RunStatusEvent;
+export type RendererEvent =
+  | Cue
+  | ControllerStatusEvent
+  | RunCueEvent
+  | RunStatusEvent
+  | SoundMixStatusEvent;
 
 const textEncoder = new TextEncoder();
 const nonCommandText = z
@@ -226,6 +250,17 @@ const operatorActionEventSchema = z
   })
   .strict();
 
+const soundMixTargetSchema = z.enum(["wind", "instrument"]);
+
+const soundMixAdjustEventSchema = z
+  .object({
+    schema: z.literal(1),
+    type: z.literal("sound-mix-adjust"),
+    target: soundMixTargetSchema,
+    deltaDb: z.union([z.literal(-1), z.literal(1)]),
+  })
+  .strict();
+
 const presentationAckEventSchema = z
   .object({
     schema: z.literal(1),
@@ -238,6 +273,7 @@ const presentationAckEventSchema = z
 
 const rendererToControllerEventSchema = z.discriminatedUnion("type", [
   operatorActionEventSchema,
+  soundMixAdjustEventSchema,
   presentationAckEventSchema,
 ]);
 
@@ -287,6 +323,27 @@ const runStatusEventSchema = z
     }
   });
 
+const soundMixStatusEventSchema = z
+  .object({
+    schema: z.literal(1),
+    type: z.literal("sound-mix-status"),
+    windGainDb: z.number().int().min(-24).max(6),
+    instrumentGainDb: z.number().int().min(-24).max(6),
+    persistence: z.enum(["saved", "save-error"]),
+    pendingTargets: z.array(soundMixTargetSchema).max(2),
+  })
+  .strict()
+  .superRefine((event, context) => {
+    const canonical = ["", "wind", "instrument", "wind,instrument"];
+    if (!canonical.includes(event.pendingTargets.join(","))) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["pendingTargets"],
+        message: "pending targets must be unique and canonically ordered",
+      });
+    }
+  });
+
 export function parseRendererToControllerEvent(value: unknown): RendererToControllerEvent {
   return rendererToControllerEventSchema.parse(value) as RendererToControllerEvent;
 }
@@ -306,6 +363,9 @@ export function parseRendererEvent(value: unknown): RendererEvent {
     }
     if (value.type === "run-status") {
       return runStatusEventSchema.parse(value) as RunStatusEvent;
+    }
+    if (value.type === "sound-mix-status") {
+      return soundMixStatusEventSchema.parse(value) as SoundMixStatusEvent;
     }
   }
   return manifestCueSchema.parse(value) as Cue;

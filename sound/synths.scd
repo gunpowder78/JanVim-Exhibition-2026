@@ -1,12 +1,13 @@
 (
 {
     [
-        SynthDef(\jvPluck, { |outBus = 16, midi = 60, motion = 0.5, pan = 0|
-            var safeMidi, safeMotion, safePan, trigger, delay, excitation, body, envelope;
+        SynthDef(\jvPluck, { |outBus = 16, midi = 60, motion = 0.5, pan = 0, gain = 1|
+            var safeMidi, safeMotion, safePan, safeGain, trigger, delay, excitation, body, envelope;
 
             safeMidi = midi.clip(36, 96);
             safeMotion = motion.clip(0, 1);
             safePan = pan.clip(-0.8, 0.8);
+            safeGain = Lag.kr(gain.clip(0.0630957, 1.9952623), 0.05);
             trigger = Impulse.kr(0);
             delay = safeMidi.midicps.reciprocal;
             excitation = PinkNoise.ar(1.8) * Decay2.kr(trigger, 0.001, 0.035);
@@ -22,14 +23,15 @@
                 Env.perc(0.002, 0.65 + (safeMotion * 1.35), curve: -4),
                 doneAction: Done.freeSelf
             );
-            Out.ar(outBus, Pan2.ar(body * envelope, safePan));
+            Out.ar(outBus, Pan2.ar(body * envelope * safeGain, safePan));
         }),
 
-        SynthDef(\jvWind, { |outBus = 16, energy = 0, pan = 0, gate = 1|
-            var safeEnergy, safePan, amplitude, center, source, envelope;
+        SynthDef(\jvWind, { |outBus = 16, energy = 0, pan = 0, gate = 1, gain = 1|
+            var safeEnergy, safePan, safeGain, amplitude, center, source, envelope;
 
             safeEnergy = Lag.kr(energy.clip(0, 1), 0.5);
             safePan = Lag.kr(pan.clip(-0.8, 0.8), 0.5);
+            safeGain = Lag.kr(gain.clip(0.0630957, 1.9952623), 0.05);
             amplitude = 0.015 + (safeEnergy * 0.35);
             center = Lag.kr(350 + (safeEnergy * 1650), 0.6);
             source = BPF.ar(PinkNoise.ar(amplitude), center, 0.45);
@@ -38,7 +40,7 @@
                 gate.clip(0, 1),
                 doneAction: Done.freeSelf
             );
-            Out.ar(outBus, Pan2.ar(source * envelope, safePan));
+            Out.ar(outBus, Pan2.ar(source * envelope * safeGain, safePan));
         }),
 
         SynthDef(\jvMix, {

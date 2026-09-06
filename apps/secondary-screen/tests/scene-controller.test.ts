@@ -19,7 +19,13 @@ import { SecondarySceneController } from "../src/scene-controller.ts";
 type VisualKind = Exclude<CueKind, "editor-action">;
 
 const fixtureManifest = JSON.parse(
-  readFileSync(join(process.cwd(), "content/fixture/show.manifest.json"), "utf8"),
+  readFileSync(
+    join(
+      process.cwd(),
+      "content/p0.1/profiles/p0-baseline/show.manifest.json",
+    ),
+    "utf8",
+  ),
 ) as ShowManifest;
 
 const fixtureCue = (id: string): Cue => {
@@ -218,6 +224,77 @@ describe("secondary scene controller", () => {
 
     unbind();
     unbind();
+  });
+
+  it("site sound mix adjusts each stem independently and exposes autosave state", () => {
+    const { root, controller } = makeController();
+    const frames = new FakeAnimationFrames();
+    const sent: RendererToControllerEvent[] = [];
+    bindTask9Runtime(controller, frames, sent);
+    const panel = root.querySelector<HTMLElement>("[data-sound-mix]");
+    const persistence = root.querySelector<HTMLElement>("[data-mix-persistence]");
+    const wind = root.querySelector<HTMLElement>("[data-mix-target='wind']");
+    const instrument = root.querySelector<HTMLElement>("[data-mix-target='instrument']");
+    const windMinus = wind?.querySelector<HTMLButtonElement>("[data-delta-db='-1']");
+    const windPlus = wind?.querySelector<HTMLButtonElement>("[data-delta-db='1']");
+    const instrumentPlus = instrument?.querySelector<HTMLButtonElement>("[data-delta-db='1']");
+
+    expect(panel).toBeInstanceOf(HTMLElement);
+    expect(panel?.hidden).toBe(true);
+    controller.applyEvent({
+      schema: 1,
+      type: "sound-mix-status",
+      windGainDb: -6,
+      instrumentGainDb: 2,
+      persistence: "saved",
+      pendingTargets: [],
+    });
+    expect(panel?.hidden).toBe(false);
+    expect(wind?.querySelector("[data-mix-value]")?.textContent).toBe("-6 dB");
+    expect(instrument?.querySelector("[data-mix-value]")?.textContent).toBe("+2 dB");
+    expect(persistence?.textContent).toBe("SAVED");
+    expect(windMinus?.disabled).toBe(true);
+
+    controller.applyEvent({
+      schema: 1,
+      type: "run-status",
+      generationId: 1,
+      state: "ready",
+    });
+    expect(windMinus?.disabled).toBe(false);
+    expect(instrumentPlus?.disabled).toBe(false);
+    instrumentPlus?.click();
+    instrumentPlus?.click();
+    windMinus?.click();
+    expect(sent).toEqual([
+      { schema: 1, type: "sound-mix-adjust", target: "instrument", deltaDb: 1 },
+      { schema: 1, type: "sound-mix-adjust", target: "wind", deltaDb: -1 },
+    ]);
+    expect(instrumentPlus?.disabled).toBe(true);
+    expect(windPlus?.disabled).toBe(true);
+
+    controller.applyEvent({
+      schema: 1,
+      type: "sound-mix-status",
+      windGainDb: -24,
+      instrumentGainDb: 6,
+      persistence: "save-error",
+      pendingTargets: [],
+    });
+    expect(wind?.querySelector("[data-mix-value]")?.textContent).toBe("-24 dB");
+    expect(instrument?.querySelector("[data-mix-value]")?.textContent).toBe("+6 dB");
+    expect(persistence?.textContent).toBe("SAVE ERR");
+    expect(windMinus?.disabled).toBe(false);
+    expect(windPlus?.disabled).toBe(false);
+    expect(instrumentPlus?.disabled).toBe(false);
+
+    controller.applyEvent({
+      schema: 1,
+      type: "run-status",
+      generationId: 1,
+      state: "shutting-down",
+    });
+    expect(windPlus?.disabled).toBe(true);
   });
 
   it("acknowledges a contextual cue only after two animation frames", () => {

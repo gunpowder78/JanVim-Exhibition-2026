@@ -2,6 +2,7 @@ import type {
   RendererToControllerEvent,
   RunCueEvent,
   RunStatusEvent,
+  SoundMixStatusEvent,
 } from "@janvim-exhibition/show-schema";
 
 import type { ShowSecondarySurface } from "./show-run-coordinator.js";
@@ -85,7 +86,7 @@ export class ShowSurfaceGroup implements ShowSecondarySurface {
     this.childDisposers = staged;
   }
 
-  public send(event: RunCueEvent | RunStatusEvent): void {
+  public send(event: RunCueEvent | RunStatusEvent | SoundMixStatusEvent): void {
     if (this.closed) return;
     if (this.previewSafety === undefined || event.type !== "run-status") {
       this.narrative.send(event);

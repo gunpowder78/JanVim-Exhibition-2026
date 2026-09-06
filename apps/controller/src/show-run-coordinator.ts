@@ -4,6 +4,8 @@ import {
   type RendererToControllerEvent,
   type RunCueEvent,
   type RunStatusEvent,
+  type SoundMixStatusEvent,
+  type SoundMixTarget,
 } from "@janvim-exhibition/show-schema";
 
 import {
@@ -33,6 +35,7 @@ import type {
 } from "./run-telemetry.js";
 import type { DisplayConfigurationReason } from "./display-router.js";
 import { RestartBudget } from "./supervisor.js";
+import type { SoundMixStatus } from "./show-sound-client.js";
 
 const SHOW_LOOP_DURATION_MS = 90_000;
 const STARTUP_PHASE_TIMEOUT_MS = 35_000;
@@ -104,7 +107,7 @@ type StagedLoopCallbackGate = {
 
 export interface ShowSecondarySurface {
   readonly rendererPid: number;
-  send(event: RunCueEvent | RunStatusEvent): void;
+  send(event: RunCueEvent | RunStatusEvent | SoundMixStatusEvent): void;
   onEvent(listener: (event: RendererToControllerEvent) => void): () => void;
   onDestroyed(listener: () => void): () => void;
   close(): void;
@@ -189,6 +192,8 @@ export interface ShowRunCoordinatorDependencies {
   nextLoopId(generationId: number, loopNumber: number): string;
   nowMs(): number;
   log(event: Record<string, unknown>): void;
+  adjustSoundMix?(target: SoundMixTarget, deltaDb: -1 | 1): boolean;
+  onSoundMixStatus?(listener: (status: SoundMixStatus) => void): () => void;
 }
 
 export type CoordinatorTransition = {
@@ -367,6 +372,8 @@ export class ShowRunCoordinator {
   private readonly surfaceDisposers = new Set<() => void>();
   private readonly sessionDisposers = new Set<() => void>();
   private topologyGuard: ShowDisplayTopologyGuard | undefined;
+  private latestSoundMix: SoundMixStatus | undefined;
+  private disposeSoundMixListener: (() => void) | undefined;
   private readonly ignoredReasonBuckets = new Set<string>();
   private readonly transitions: CoordinatorTransition[] = [];
   private readonly loops: CoordinatorLoopSummary[] = [];
@@ -406,6 +413,16 @@ export class ShowRunCoordinator {
     this.completion = new Promise<ShowRunResult>((resolve) => {
       this.resolveCompletion = resolve;
     });
+    if (this.dependencies.onSoundMixStatus !== undefined) {
+      try {
+        this.disposeSoundMixListener = this.dependencies.onSoundMixStatus((status) => {
+          this.latestSoundMix = { ...status, pendingTargets: [...status.pendingTargets] };
+          this.sendSoundMixStatus();
+        });
+      } catch {
+        this.log({ type: "sound-mix-unavailable" });
+      }
+    }
   }
 
   public async boot(): Promise<ShowBootOutcome> {
@@ -425,6 +442,7 @@ export class ShowRunCoordinator {
           reason: "display-configuration-required",
         };
         this.transition("stopped", result.reason);
+        this.disposeSoundMixStatusListener();
         this.resolveCompletion(result);
         return {
           ready: false,
@@ -899,6 +917,7 @@ export class ShowRunCoordinator {
     }
     for (const dispose of stagedDisposers) this.surfaceDisposers.add(dispose);
     this.surface = surface;
+    this.sendSoundMixStatus();
   }
 
   private bindSession(session: ShowRunSession, generationId: number): void {
@@ -933,6 +952,21 @@ export class ShowRunCoordinator {
   private handleCurrentRendererEvent(event: RendererToControllerEvent): boolean {
     if (event.type === "presentation-ack") {
       return this.handlePresentationAck(event);
+    }
+    if (event.type === "sound-mix-adjust") {
+      if ((this.state !== "ready" && this.state !== "running") ||
+          this.dependencies.adjustSoundMix === undefined) {
+        this.ignore("sound-mix-not-available");
+        return false;
+      }
+      try {
+        if (this.dependencies.adjustSoundMix(event.target, event.deltaDb)) return true;
+      } catch {
+        // Optional sound adjustment cannot affect the visual Show lifecycle.
+      }
+      this.sendSoundMixStatus();
+      this.ignore("sound-mix-adjust-rejected");
+      return false;
     }
 
     switch (event.action) {
@@ -2462,6 +2496,7 @@ export class ShowRunCoordinator {
     this.incrementGeneration();
     this.logShutdownPhase("invalidate-generation");
     this.sendStatus();
+    this.disposeSoundMixStatusListener();
     this.revokeBoundaryOperation();
     this.revokeHeldCleanupSequence();
     this.cancelBoundedPhases();
@@ -2815,6 +2850,19 @@ export class ShowRunCoordinator {
     bestEffortSync(() => this.surface?.send(event));
   }
 
+  private sendSoundMixStatus(): void {
+    if (this.surface === undefined || this.latestSoundMix === undefined) return;
+    const event: SoundMixStatusEvent = {
+      schema: 1,
+      type: "sound-mix-status",
+      windGainDb: this.latestSoundMix.windGainDb,
+      instrumentGainDb: this.latestSoundMix.instrumentGainDb,
+      persistence: this.latestSoundMix.persistence,
+      pendingTargets: [...this.latestSoundMix.pendingTargets],
+    };
+    bestEffortSync(() => this.surface?.send(event));
+  }
+
   private transition(next: ShowCoordinatorState, reason?: string): void {
     if (!ALLOWED_TRANSITIONS[this.state].has(next)) {
       throw new Error(`illegal coordinator transition ${this.state} -> ${next}`);
@@ -2868,6 +2916,13 @@ export class ShowRunCoordinator {
   private disposeSessionListeners(): void {
     for (const dispose of this.sessionDisposers) bestEffortSync(dispose);
     this.sessionDisposers.clear();
+  }
+
+  private disposeSoundMixStatusListener(): void {
+    if (this.disposeSoundMixListener !== undefined) {
+      bestEffortSync(this.disposeSoundMixListener);
+    }
+    this.disposeSoundMixListener = undefined;
   }
 }
 

@@ -27,6 +27,9 @@ export type {
   RendererToControllerEvent,
   RunCueEvent,
   RunStatusEvent,
+  SoundMixPersistence,
+  SoundMixStatusEvent,
+  SoundMixTarget,
 } from "./renderer-event.js";
 
 export type ShowManifest = {

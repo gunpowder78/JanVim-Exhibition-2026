@@ -68,6 +68,15 @@ test("before attach only bounded service heartbeats are due; attach needs a prod
   assert.equal(input.accept(cursor(1, 250)), false);
 });
 
+test("pre-attach service heartbeat survives a sub-millisecond sender clock offset", async () => {
+  const { createRealAdmission, createRealInput } = await import("../real-input.mjs");
+  const input = createRealInput({ nowMs: () => 1000, onStop: () => {} });
+  const admit = createRealAdmission({ nowMs: () => 999.25 });
+
+  const [serviceHeartbeat] = input.take();
+  assert.equal(admit(serviceHeartbeat), true);
+});
+
 test("latest cursor replaces earlier samples, emits once, and cannot exceed eight Hz", async () => {
   const { input, at } = await fixture();
   input.attach(identity);

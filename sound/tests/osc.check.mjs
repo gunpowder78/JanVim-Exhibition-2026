@@ -47,7 +47,7 @@ test("flock-mute adds only epoch and revision to the common wire fields", () => 
 });
 
 test("the additive paths preserve every legacy path and reject lookalike paths", () => {
-  for (const name of ["start", "heartbeat", "cursor", "flock", "stop"]) {
+  for (const name of ["start", "heartbeat", "cursor", "flock", "site-mix", "stop"]) {
     assert.doesNotThrow(() => encodeMessage(`/janvim/sound/v1/${name}`, []));
   }
   for (const name of ["flock-live/", "flock-muted", "Flock-live", "flock-live/stop"]) {

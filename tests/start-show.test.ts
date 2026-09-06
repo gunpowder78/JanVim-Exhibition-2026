@@ -1434,7 +1434,18 @@ function makeLauncherFixture(): LauncherFixture {
   const showConfig = copyFixtureFile("show/janvim-show.toml", root);
   const displayLayout = copyFixtureFile("show/display-layout.json", root);
   const poem = copyFixtureFile("content/fixture/poem.txt", root);
-  const manifest = copyFixtureFile("content/fixture/show.manifest.json", root);
+  const manifest = join(root, "content", "fixture", "show.manifest.json");
+  copyFileSync(
+    join(
+      repositoryRoot,
+      "content",
+      "p0.1",
+      "profiles",
+      "p0-baseline",
+      "show.manifest.json",
+    ),
+    manifest,
+  );
   const contentLock = copyFixtureFile("content/p0.1/content-lock.json", root);
   const contentProfiles = join(root, "content", "p0.1", "profiles");
   cpSync(join(repositoryRoot, "content", "p0.1", "profiles"), contentProfiles, {

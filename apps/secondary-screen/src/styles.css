@@ -253,8 +253,15 @@ body {
   bottom: 2.4vh;
   z-index: 4;
   display: flex;
+  flex-direction: column;
+  align-items: flex-end;
   gap: 0.8rem;
   cursor: default;
+}
+
+.operator-show-actions {
+  display: flex;
+  gap: 0.8rem;
 }
 
 .operator-controls button {
@@ -277,6 +284,53 @@ body {
 .operator-controls button:focus-visible {
   outline: 3px solid #b7472a;
   outline-offset: 5px;
+}
+
+.sound-mix-controls {
+  box-sizing: border-box;
+  width: min(30rem, 72vw);
+  padding: 0.8rem 1rem;
+  border: 1px solid #355d62;
+  background: rgb(7 16 20 / 94%);
+  color: #e8ece8;
+  font-family: "Cascadia Mono", "Microsoft YaHei UI", monospace;
+}
+
+.sound-mix-header,
+.sound-mix-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 0.65rem;
+}
+
+.sound-mix-header {
+  margin-bottom: 0.55rem;
+  color: #6e9da1;
+  font-size: clamp(12px, 0.85vw, 17px);
+  letter-spacing: 0.08em;
+}
+
+.sound-mix-row {
+  grid-template-columns: minmax(7rem, 1fr) 2.8rem 5.5rem 2.8rem;
+  min-height: 3rem;
+  font-size: clamp(14px, 1vw, 20px);
+  letter-spacing: 0.04em;
+}
+
+.sound-mix-row output {
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.operator-controls .sound-mix-row button {
+  min-width: 0;
+  padding: 0.35em 0;
+  font-size: clamp(16px, 1.1vw, 22px);
+}
+
+[data-mix-persistence="save-error"] {
+  color: #e28c72;
 }
 
 .secondary-screen[data-scene="black"] .show-header,

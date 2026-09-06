@@ -10,6 +10,7 @@ const ALLOWED_PATHS = new Set([
   "/janvim/sound/v1/flock",
   "/janvim/sound/v1/flock-live",
   "/janvim/sound/v1/flock-mute",
+  "/janvim/sound/v1/site-mix",
   "/janvim/sound/v1/stop",
 ]);
 

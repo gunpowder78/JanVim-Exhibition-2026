@@ -97,7 +97,19 @@ function makeController(overrides: Partial<ControllerDependencies> = {}) {
 const resetOrderFixtureRoot = join(process.cwd(), "content", "fixture");
 const resetOrderPoem = readFileSync(join(resetOrderFixtureRoot, "poem.txt"), "utf8");
 const resetOrderManifest = parseShowManifest(
-  JSON.parse(readFileSync(join(resetOrderFixtureRoot, "show.manifest.json"), "utf8")),
+  JSON.parse(
+    readFileSync(
+      join(
+        process.cwd(),
+        "content",
+        "p0.1",
+        "profiles",
+        "p0-baseline",
+        "show.manifest.json",
+      ),
+      "utf8",
+    ),
+  ),
 );
 const resetOrderToken = "controller-reset-order-token-2026";
 

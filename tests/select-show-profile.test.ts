@@ -33,7 +33,17 @@ function fixture(): Fixture {
   copyFileSync(productionScript, script);
   copyFileSync(join(repositoryRoot, "AGENTS.md"), join(root, "AGENTS.md"));
   copyFileSync(join(repositoryRoot, "content", "fixture", "poem.txt"), join(root, "content", "fixture", "poem.txt"));
-  copyFileSync(join(repositoryRoot, "content", "fixture", "show.manifest.json"), active);
+  copyFileSync(
+    join(
+      repositoryRoot,
+      "content",
+      "p0.1",
+      "profiles",
+      "p0-baseline",
+      "show.manifest.json",
+    ),
+    active,
+  );
   cpSync(join(repositoryRoot, "content", "p0.1"), join(root, "content", "p0.1"), { recursive: true });
   return { root, script, active, cleanup: () => rmSync(root, { recursive: true, force: true }) };
 }

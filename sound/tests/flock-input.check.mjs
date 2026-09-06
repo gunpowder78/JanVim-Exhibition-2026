@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Buffer } from "node:buffer";
-import { parseFlockAttach, parseFlockFrame, createFlockFramer } from "../flock-protocol.mjs";
+import {
+  createFlockFramer,
+  parseFlockAttach,
+  parseFlockAttachV2,
+  parseFlockControl,
+  parseFlockFrame,
+} from "../flock-protocol.mjs";
 import { createFlockInput, createFlockAdmission } from "../flock-input.mjs";
 
 // Synthetic protocol fixtures only: no JianShan GPU or human hearing evidence.
@@ -364,6 +370,34 @@ test("strict attach accepts only exact fieldset and lowercase fixed-width matchi
   }
   const duplicate = Buffer.from(JSON.stringify(attach).replace('"token":', '"to\\u006ben":"wrong","token":'));
   assert.equal(parseFlockAttach(duplicate, token), null);
+});
+
+test("v1 remains compatible while v2 control codecs require exact bounded shapes", () => {
+  const v1 = { version: 1, command: "attach-flock", token, sourceId };
+  assert.deepEqual(parseFlockAttach(bytes(v1), token), { sourceId });
+  assert.equal(parseFlockAttachV2(bytes(v1), token), null);
+
+  const v2 = { version: 2, command: "attach-flock", token, sourceId };
+  assert.deepEqual(parseFlockAttachV2(bytes(v2), token), { sourceId });
+  assert.equal(parseFlockAttach(bytes(v2), token), null);
+
+  const adjustment = {
+    version: 2, command: "adjust-wind-gain", sourceId, requestId: 1, deltaDb: 1,
+  };
+  assert.deepEqual(parseFlockControl(bytes(adjustment)), adjustment);
+  for (const extra of [
+    { version: 1 }, { command: "adjust-gain" }, { sourceId: "A".repeat(32) },
+    { requestId: 0 }, { requestId: 2147483648 }, { requestId: 1.5 },
+    { deltaDb: 0 }, { deltaDb: 2 }, { deltaDb: -1.5 }, { extra: true },
+  ]) assert.equal(parseFlockControl(bytes({ ...adjustment, ...extra })), null);
+  for (const key of Object.keys(adjustment)) {
+    const incomplete = { ...adjustment };
+    delete incomplete[key];
+    assert.equal(parseFlockControl(bytes(incomplete)), null);
+  }
+  const duplicate = Buffer.from(JSON.stringify(adjustment)
+    .replace('"requestId":1', '"request\\u0049d":2,"requestId":1'));
+  assert.equal(parseFlockControl(duplicate), null);
 });
 
 test("codec accepts only the frozen sample and non-sample fieldsets without coercion", () => {

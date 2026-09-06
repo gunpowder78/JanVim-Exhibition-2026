@@ -36,6 +36,13 @@ export type TokenStreamCue = RendererCueBase & {
     | { text?: string; accepted: true; summary: string };
 };
 
+export interface SoundMixRowElements {
+  row: HTMLElement;
+  minusButton: HTMLButtonElement;
+  value: HTMLOutputElement;
+  plusButton: HTMLButtonElement;
+}
+
 export interface SceneElements {
   ready: HTMLElement;
   readyStatus: HTMLElement;
@@ -43,6 +50,10 @@ export interface SceneElements {
   startButton: HTMLButtonElement;
   restartButton: HTMLButtonElement;
   stopButton: HTMLButtonElement;
+  soundMixControls: HTMLElement;
+  soundMixPersistence: HTMLElement;
+  windMix: SoundMixRowElements;
+  instrumentMix: SoundMixRowElements;
   promptContent: HTMLElement;
   responseContent: HTMLElement;
   acceptance: HTMLElement;

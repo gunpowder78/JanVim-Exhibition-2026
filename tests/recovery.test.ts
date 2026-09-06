@@ -76,7 +76,14 @@ const fixtureShowConfig = readFileSync(
   join(repositoryRoot, "show", "janvim-show.toml"),
 );
 const fixtureManifest = readFileSync(
-  join(repositoryRoot, "content", "fixture", "show.manifest.json"),
+  join(
+    repositoryRoot,
+    "content",
+    "p0.1",
+    "profiles",
+    "p0-baseline",
+    "show.manifest.json",
+  ),
 );
 const fixturePoem = readFileSync(
   join(repositoryRoot, "content", "fixture", "poem.txt"),

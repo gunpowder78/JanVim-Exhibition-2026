@@ -77,7 +77,8 @@ export function createRealInput({ nowMs, onStop }) {
       const now = nowMs();
       if (!live(now)) return [];
       const events = [];
-      if (!owner && now - lastHeartbeatMs >= 250) heartbeat = { kind: "heartbeat", expiresAtMs: now + 500 };
+      // Leave one heartbeat interval for harmless cross-process clock offsets.
+      if (!owner && now - lastHeartbeatMs >= 250) heartbeat = { kind: "heartbeat", expiresAtMs: now + 250 };
       if (heartbeat && now > heartbeat.expiresAtMs) heartbeat = null;
       if (latest && now > latest.expiresAtMs) latest = null;
       if (heartbeat && now - lastHeartbeatMs >= 250) {

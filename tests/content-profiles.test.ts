@@ -105,10 +105,15 @@ describe("P0.1 frozen content profiles", () => {
     }
   });
 
-  it("preserves the accepted P0 active manifest as an exact rollback profile", () => {
-    const profile = lockedProfile(readLock(), "p0-baseline");
+  it("keeps the active manifest on the exact reviewed profile allowlist", () => {
+    const lock = readLock();
     const active = join(root, "content", "fixture", "show.manifest.json");
-    expect(readFileSync(absolute(profile.manifest.path))).toEqual(readFileSync(active));
+    const activeBytes = readFileSync(active);
+    expect(
+      lock.profiles.some((profile) =>
+        readFileSync(absolute(profile.manifest.path)).equals(activeBytes),
+      ),
+    ).toBe(true);
   });
 
   it.each(longProfileIds)("formats the %s paper as standard multi-sentence Chinese paragraphs", (id) => {

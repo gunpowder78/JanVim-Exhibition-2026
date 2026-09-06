@@ -575,6 +575,12 @@ function createCoordinator(
     nextLoopId: (generationId, loopNumber) =>
       createShowLoopId(command.runId, generationId, loopNumber),
     nowMs: host.nowMonotonic,
+    ...(sound === undefined
+      ? {}
+      : {
+          adjustSoundMix: (target, deltaDb) => sound.adjustMix(target, deltaDb),
+          onSoundMixStatus: (listener) => sound.onMixStatus(listener),
+        }),
     log: (event) => {
       // The first shutdown phase is synchronous, before waiting for startup/recovery.
       // It also covers emergency shutdown before any session has been published.

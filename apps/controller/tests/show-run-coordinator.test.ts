@@ -5,6 +5,7 @@ import type {
   RendererToControllerEvent,
   RunCueEvent,
   RunStatusEvent,
+  SoundMixStatusEvent,
 } from "@janvim-exhibition/show-schema";
 import {
   MultiLoopDriver,
@@ -211,7 +212,7 @@ class FakeTimers implements OneLoopTimerAdapter {
 
 class FakeSurface implements ShowSecondarySurface {
   public readonly rendererPid = 2026;
-  public readonly sent: Array<RunCueEvent | RunStatusEvent> = [];
+  public readonly sent: Array<RunCueEvent | RunStatusEvent | SoundMixStatusEvent> = [];
   public closeCalls = 0;
   public eventDisposeCalls = 0;
   public destroyedDisposeCalls = 0;
@@ -233,7 +234,7 @@ class FakeSurface implements ShowSecondarySurface {
 
   public constructor(private readonly trace: string[]) {}
 
-  public send(event: RunCueEvent | RunStatusEvent): void {
+  public send(event: RunCueEvent | RunStatusEvent | SoundMixStatusEvent): void {
     if (this.rejectStatusSends && event.type === "run-status") {
       throw new Error("renderer is already destroyed");
     }
@@ -746,6 +747,8 @@ interface HarnessOptions {
       >
     | undefined
   )[];
+  soundMix?: boolean;
+  soundMixAdjustmentAccepted?: boolean;
 }
 
 function createHarness(options: HarnessOptions = {}) {
@@ -780,6 +783,9 @@ function createHarness(options: HarnessOptions = {}) {
   let topologyGuardDisposed = false;
   let firstHeldCleanupBlocked = false;
   let replacementHeldCleanupBlocked = false;
+  type MixStatus = Omit<SoundMixStatusEvent, "schema" | "type">;
+  let soundMixListener: ((status: MixStatus) => void) | undefined;
+  const soundMixAdjustments: Array<{ target: "wind" | "instrument"; deltaDb: -1 | 1 }> = [];
   const traceLoopConstruction =
     options.loopConstructionFailure !== undefined ||
     options.rollbackRuntimeStopFailure === true ||
@@ -1148,6 +1154,20 @@ function createHarness(options: HarnessOptions = {}) {
         trace.push(`shutdown-phase:${String(event.phase)}`);
       }
     },
+    ...(options.soundMix === true
+      ? {
+          adjustSoundMix: (target: "wind" | "instrument", deltaDb: -1 | 1) => {
+            soundMixAdjustments.push({ target, deltaDb });
+            return options.soundMixAdjustmentAccepted ?? true;
+          },
+          onSoundMixStatus: (listener: (status: MixStatus) => void) => {
+            soundMixListener = listener;
+            return () => {
+              if (soundMixListener === listener) soundMixListener = undefined;
+            };
+          },
+        }
+      : {}),
   };
 
   const coordinator = new ShowRunCoordinator(dependencies);
@@ -1169,6 +1189,11 @@ function createHarness(options: HarnessOptions = {}) {
     terminalMarkers,
     evidenceSignals,
     terminalMarkerSignals,
+    soundMixAdjustments,
+    emitSoundMix: (status: MixStatus) => {
+      if (soundMixListener === undefined) throw new Error("sound mix listener unavailable");
+      soundMixListener(status);
+    },
     triggerTopologyChange: () => {
       if (topologyChanged === undefined) {
         throw new Error("topology guard callback unavailable");
@@ -1454,6 +1479,105 @@ async function runLoggerSafetyScenario(
 }
 
 describe("show run coordinator", () => {
+  it("site sound mix is gated by run state and replayed to a recovered surface", async () => {
+    const harness = createHarness({ mode: "Show", soundMix: true });
+    harness.emitSoundMix({
+      windGainDb: -6,
+      instrumentGainDb: 2,
+      persistence: "saved",
+      pendingTargets: [],
+    });
+    await bootReady(harness);
+    expect(harness.surfaces[0]!.sent).toContainEqual({
+      schema: 1,
+      type: "sound-mix-status",
+      windGainDb: -6,
+      instrumentGainDb: 2,
+      persistence: "saved",
+      pendingTargets: [],
+    });
+    expect(harness.coordinator.handleRendererEvent({
+      schema: 1,
+      type: "sound-mix-adjust",
+      target: "instrument",
+      deltaDb: 1,
+    })).toBe(true);
+    expect(harness.coordinator.handleRendererEvent(startEvent())).toBe(true);
+    expect(harness.coordinator.handleRendererEvent({
+      schema: 1,
+      type: "sound-mix-adjust",
+      target: "wind",
+      deltaDb: -1,
+    })).toBe(true);
+    expect(harness.soundMixAdjustments).toEqual([
+      { target: "instrument", deltaDb: 1 },
+      { target: "wind", deltaDb: -1 },
+    ]);
+
+    harness.emitSoundMix({
+      windGainDb: -7,
+      instrumentGainDb: 3,
+      persistence: "saved",
+      pendingTargets: ["wind"],
+    });
+    harness.surfaces[0]!.destroy();
+    await settle();
+    expect(harness.coordinator.handleRendererEvent({
+      schema: 1,
+      type: "sound-mix-adjust",
+      target: "instrument",
+      deltaDb: -1,
+    })).toBe(false);
+    await harness.timers.fireTimeout(1_000);
+    await settle();
+    expect(harness.surfaces[1]!.sent).toContainEqual({
+      schema: 1,
+      type: "sound-mix-status",
+      windGainDb: -7,
+      instrumentGainDb: 3,
+      persistence: "saved",
+      pendingTargets: ["wind"],
+    });
+
+    await harness.coordinator.requestEmergencyStop("sigint");
+    expect(harness.coordinator.handleRendererEvent({
+      schema: 1,
+      type: "sound-mix-adjust",
+      target: "wind",
+      deltaDb: 1,
+    })).toBe(false);
+  });
+
+  it("site sound mix replays confirmed status when the sound client rejects an adjustment", async () => {
+    const harness = createHarness({
+      mode: "Show",
+      soundMix: true,
+      soundMixAdjustmentAccepted: false,
+    });
+    const confirmed = {
+      windGainDb: -6,
+      instrumentGainDb: 2,
+      persistence: "saved" as const,
+      pendingTargets: [],
+    };
+    harness.emitSoundMix(confirmed);
+    await bootReady(harness);
+    const surface = harness.surfaces[0]!;
+    surface.sent.length = 0;
+
+    expect(harness.coordinator.handleRendererEvent({
+      schema: 1,
+      type: "sound-mix-adjust",
+      target: "instrument",
+      deltaDb: 1,
+    })).toBe(false);
+    expect(surface.sent).toEqual([{
+      schema: 1,
+      type: "sound-mix-status",
+      ...confirmed,
+    }]);
+  });
+
   it("stops directly on configuration-required validation without runtime side effects", async () => {
     const harness = createHarness({
       mode: "Show",

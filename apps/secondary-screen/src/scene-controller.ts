@@ -6,6 +6,8 @@ import type {
   RendererToControllerEvent,
   RunCueEvent,
   RunStatusEvent,
+  SoundMixStatusEvent,
+  SoundMixTarget,
 } from "@janvim-exhibition/show-schema";
 
 import { KeyOverlay } from "./key-overlay";
@@ -37,6 +39,10 @@ export class SecondarySceneController {
   private readonly startButton: HTMLButtonElement;
   private readonly restartButton: HTMLButtonElement;
   private readonly stopButton: HTMLButtonElement;
+  private readonly soundMixControls: HTMLElement;
+  private readonly soundMixPersistence: HTMLElement;
+  private readonly windMix: import("./model").SoundMixRowElements;
+  private readonly instrumentMix: import("./model").SoundMixRowElements;
   private readonly p1Layer: HTMLElement;
   private readonly pendingOperatorActions = new Set<OperatorAction>();
   private runtime?: SecondaryRendererRuntime;
@@ -46,6 +52,9 @@ export class SecondarySceneController {
   private presentationEpoch = 0;
   private activeGenerationId?: number;
   private statusKey = "";
+  private soundMixStatus?: SoundMixStatusEvent;
+  private readonly pendingSoundMixTargets = new Set<SoundMixTarget>();
+  private soundMixControlsArmed = false;
 
   public constructor(
     private readonly root: HTMLElement,
@@ -61,6 +70,10 @@ export class SecondarySceneController {
     this.startButton = elements.startButton;
     this.restartButton = elements.restartButton;
     this.stopButton = elements.stopButton;
+    this.soundMixControls = elements.soundMixControls;
+    this.soundMixPersistence = elements.soundMixPersistence;
+    this.windMix = elements.windMix;
+    this.instrumentMix = elements.instrumentMix;
     this.p1Layer = elements.p1Layer;
   }
 
@@ -70,6 +83,10 @@ export class SecondarySceneController {
       return;
     }
     if ("type" in event) {
+      if (event.type === "sound-mix-status") {
+        this.applySoundMixStatus(event);
+        return;
+      }
       if (event.type === "run-status") {
         if (!this.adoptGeneration(event.generationId)) return;
         this.applyRunStatus(event);
@@ -95,13 +112,25 @@ export class SecondarySceneController {
     const restart = (): void =>
       this.emitOperatorAction("restart-loop", this.restartButton);
     const stop = (): void => this.emitOperatorAction("stop-show", this.stopButton);
+    const windDown = (): void => this.emitSoundMixAdjustment("wind", -1);
+    const windUp = (): void => this.emitSoundMixAdjustment("wind", 1);
+    const instrumentDown = (): void => this.emitSoundMixAdjustment("instrument", -1);
+    const instrumentUp = (): void => this.emitSoundMixAdjustment("instrument", 1);
     this.startButton.addEventListener("click", start);
     this.restartButton.addEventListener("click", restart);
     this.stopButton.addEventListener("click", stop);
+    this.windMix.minusButton.addEventListener("click", windDown);
+    this.windMix.plusButton.addEventListener("click", windUp);
+    this.instrumentMix.minusButton.addEventListener("click", instrumentDown);
+    this.instrumentMix.plusButton.addEventListener("click", instrumentUp);
     this.releaseRuntimeListeners = () => {
       this.startButton.removeEventListener("click", start);
       this.restartButton.removeEventListener("click", restart);
       this.stopButton.removeEventListener("click", stop);
+      this.windMix.minusButton.removeEventListener("click", windDown);
+      this.windMix.plusButton.removeEventListener("click", windUp);
+      this.instrumentMix.minusButton.removeEventListener("click", instrumentDown);
+      this.instrumentMix.plusButton.removeEventListener("click", instrumentUp);
     };
 
     let bound = true;
@@ -118,9 +147,12 @@ export class SecondarySceneController {
     this.releaseRuntimeListeners = undefined;
     this.runtime = undefined;
     this.pendingOperatorActions.clear();
+    this.pendingSoundMixTargets.clear();
+    this.soundMixControlsArmed = false;
     this.startButton.disabled = true;
     this.restartButton.disabled = true;
     this.stopButton.disabled = true;
+    this.renderSoundMix();
   }
 
   public apply(cue: Cue): void {
@@ -177,6 +209,8 @@ export class SecondarySceneController {
 
   private applyStatus(event: ControllerStatusEvent): void {
     this.root.dataset.controllerState = event.state;
+    this.soundMixControlsArmed = false;
+    this.renderSoundMix();
 
     switch (event.state) {
       case "booting":
@@ -210,6 +244,8 @@ export class SecondarySceneController {
 
   private applyRunStatus(event: RunStatusEvent): void {
     this.root.dataset.controllerState = event.state;
+    this.soundMixControlsArmed = event.state === "ready" || event.state === "running";
+    this.renderSoundMix();
     const key = `run:${event.generationId}:${event.state}:${event.reason ?? ""}`;
 
     switch (event.state) {
@@ -307,6 +343,48 @@ export class SecondarySceneController {
       type: "operator-action",
       action,
     });
+  }
+
+  private applySoundMixStatus(event: SoundMixStatusEvent): void {
+    this.soundMixStatus = event;
+    this.pendingSoundMixTargets.clear();
+    for (const target of event.pendingTargets) this.pendingSoundMixTargets.add(target);
+    this.soundMixControls.hidden = false;
+    this.renderSoundMix();
+  }
+
+  private emitSoundMixAdjustment(target: SoundMixTarget, deltaDb: -1 | 1): void {
+    const status = this.soundMixStatus;
+    if (this.runtime === undefined || status === undefined || !this.soundMixControlsArmed ||
+        this.pendingSoundMixTargets.has(target)) return;
+    this.pendingSoundMixTargets.add(target);
+    this.renderSoundMix();
+    this.runtime.sendRendererEvent({
+      schema: 1,
+      type: "sound-mix-adjust",
+      target,
+      deltaDb,
+    });
+  }
+
+  private renderSoundMix(): void {
+    const status = this.soundMixStatus;
+    if (status === undefined) return;
+    this.soundMixPersistence.textContent = status.persistence === "saved" ? "SAVED" : "SAVE ERR";
+    this.soundMixPersistence.dataset.mixPersistence = status.persistence;
+    this.renderSoundMixRow("wind", status.windGainDb, this.windMix);
+    this.renderSoundMixRow("instrument", status.instrumentGainDb, this.instrumentMix);
+  }
+
+  private renderSoundMixRow(
+    target: SoundMixTarget,
+    gainDb: number,
+    row: import("./model").SoundMixRowElements,
+  ): void {
+    row.value.textContent = `${gainDb > 0 ? "+" : ""}${gainDb} dB`;
+    const blocked = !this.soundMixControlsArmed || this.pendingSoundMixTargets.has(target);
+    row.minusButton.disabled = blocked;
+    row.plusButton.disabled = blocked;
   }
 
   private schedulePresentationAck(event: RunCueEvent): void {

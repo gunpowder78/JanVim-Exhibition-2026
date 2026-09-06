@@ -34,11 +34,16 @@ class Clock implements OneLoopTimerAdapter {
 }
 
 type Frame = Record<string, unknown>;
-async function peer(reply = '{"ok":true,"input":"real-cursor"}\n') {
+async function peer(
+  reply = '{"ok":true,"input":"real-cursor"}\n',
+  mixMode: "saved" | "save-error" | "manual" = "saved",
+) {
   await mkdir(parent, { recursive: true });
   const root = await mkdtemp(join(parent, "task3-peer-"));
   const frames: Frame[] = [];
   const sockets: Socket[] = [];
+  let windGainDb = 0;
+  let instrumentGainDb = 0;
   const server = createServer(socket => {
     sockets.push(socket);
     socket.setEncoding("utf8");
@@ -51,6 +56,20 @@ async function peer(reply = '{"ok":true,"input":"real-cursor"}\n') {
         const frame = JSON.parse(buffer.slice(0, end)) as Frame;
         buffer = buffer.slice(end + 1); frames.push(frame);
         if (frame.command === "attach" && reply) socket.write(frame.token === receipt.token ? reply : '{"ok":false}\n');
+        if (mixMode !== "manual" && frame.command === "get-site-mix") {
+          socket.write(`${JSON.stringify({ command: "site-mix", requestId: frame.requestId, ok: true,
+            windGainDb, instrumentGainDb, persistence: "saved" })}\n`);
+        }
+        if (mixMode !== "manual" && frame.command === "adjust-site-mix") {
+          if (mixMode === "saved") {
+            if (frame.target === "wind") windGainDb += frame.deltaDb as number;
+            if (frame.target === "instrument") instrumentGainDb += frame.deltaDb as number;
+          }
+          socket.write(`${JSON.stringify({ command: "site-mix", requestId: frame.requestId,
+            ok: mixMode === "saved", ...(mixMode === "save-error" ? { reason: "save-failed" } : {}),
+            windGainDb, instrumentGainDb,
+            persistence: mixMode === "saved" ? "saved" : "save-error" })}\n`);
+        }
         if (frame.command === "stop") socket.end('{"ok":true}\n');
       }
     });
@@ -158,6 +177,91 @@ describe("optional Show sound client", () => {
     const second = setup(q.root); second.client.start(); await until(() => second.diagnostics.length === 1);
     expect(q.frames.map(f => f.command)).toEqual(["attach"]);
     expect(second.clock.jobs.size).toBe(0);
+  });
+  it("site sound mix loads, adjusts one stem immediately, and reports autosave state", async () => {
+    const p = await peer();
+    const { rawClient, diagnostics } = setup(p.root);
+    const statuses: Array<{
+      windGainDb: number;
+      instrumentGainDb: number;
+      persistence: string;
+      pendingTargets: string[];
+    }> = [];
+    const dispose = rawClient.onMixStatus(status => statuses.push({
+      ...status,
+      pendingTargets: [...status.pendingTargets],
+    }));
+    cleanup.push(dispose);
+
+    rawClient.start();
+    await until(() => statuses.length === 1);
+    expect(statuses[0]).toEqual({
+      windGainDb: 0,
+      instrumentGainDb: 0,
+      persistence: "saved",
+      pendingTargets: [],
+    });
+    expect(p.frames.map(frame => frame.command)).toEqual(["attach", "get-site-mix", "heartbeat"]);
+
+    expect(rawClient.adjustMix("instrument", 1)).toBe(true);
+    expect(statuses.at(-1)).toEqual({
+      windGainDb: 0,
+      instrumentGainDb: 0,
+      persistence: "saved",
+      pendingTargets: ["instrument"],
+    });
+    expect(rawClient.adjustMix("instrument", 1)).toBe(false);
+    expect(rawClient.adjustMix("wind", 0 as -1)).toBe(false);
+    await until(() => statuses.at(-1)?.instrumentGainDb === 1);
+    expect(statuses.at(-1)).toEqual({
+      windGainDb: 0,
+      instrumentGainDb: 1,
+      persistence: "saved",
+      pendingTargets: [],
+    });
+    expect(p.frames.find(frame => frame.command === "adjust-site-mix")).toEqual({
+      command: "adjust-site-mix",
+      token: p.receipt.token,
+      runId: "show-001",
+      controllerRunId: "controller-001",
+      requestId: 2,
+      target: "instrument",
+      deltaDb: 1,
+    });
+    expect(diagnostics).toEqual([]);
+  });
+  it("site sound mix preserves confirmed gains and surfaces an autosave failure", async () => {
+    const p = await peer('{"ok":true,"input":"real-cursor"}\n', "save-error");
+    const { rawClient, diagnostics } = setup(p.root);
+    const statuses: Array<{ windGainDb: number; instrumentGainDb: number;
+      persistence: string; pendingTargets: readonly string[] }> = [];
+    cleanup.push(rawClient.onMixStatus(status => statuses.push(status)));
+    rawClient.start();
+    await until(() => statuses.length === 1);
+    expect(rawClient.adjustMix("wind", -1)).toBe(true);
+    await until(() => statuses.at(-1)?.persistence === "save-error");
+    expect(statuses.at(-1)).toEqual({
+      windGainDb: 0,
+      instrumentGainDb: 0,
+      persistence: "save-error",
+      pendingTargets: [],
+    });
+    expect(diagnostics).toEqual([]);
+  });
+  it("site sound mix rejects a duplicate or unsolicited bounded reply", async () => {
+    const p = await peer('{"ok":true,"input":"real-cursor"}\n', "manual");
+    const { rawClient, diagnostics, clock } = setup(p.root);
+    const statuses: unknown[] = [];
+    cleanup.push(rawClient.onMixStatus(status => statuses.push(status)));
+    rawClient.start();
+    await until(() => p.frames.some(frame => frame.command === "get-site-mix"));
+    const reply = '{"command":"site-mix","requestId":1,"ok":true,"windGainDb":0,"instrumentGainDb":0,"persistence":"saved"}\n';
+    p.sockets[0]!.write(reply);
+    await until(() => statuses.length === 1);
+    p.sockets[0]!.write(reply);
+    await until(() => diagnostics.length === 1);
+    expect(clock.jobs.size).toBe(0);
+    expect(diagnostics).toEqual(["sound-mix-reply-invalid"]);
   });
   it("bounds attach to one second and ignores a late ACK", async () => {
     const p = await peer(""); const { client, clock, diagnostics } = setup(p.root); client.start();

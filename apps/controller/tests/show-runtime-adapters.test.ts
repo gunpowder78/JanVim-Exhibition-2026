@@ -39,7 +39,14 @@ const showConfig = readFileSync(
   join(fixtureRoot, "show", "janvim-show.toml"),
 );
 const manifest = readFileSync(
-  join(fixtureRoot, "content", "fixture", "show.manifest.json"),
+  join(
+    fixtureRoot,
+    "content",
+    "p0.1",
+    "profiles",
+    "p0-baseline",
+    "show.manifest.json",
+  ),
 );
 const poem = readFileSync(
   join(fixtureRoot, "content", "fixture", "poem.txt"),
@@ -1873,6 +1880,8 @@ describe("real Task 9 show runtime adapters", () => {
       beginLoop: (generation, loop) => { events.push(`loop:${generation}:${loop}`); },
       observe: (event, timing) => { events.push(`observe:${event.seq}:age:${timing?.ageMs}`); },
       reset: () => { events.push("reset"); },
+      adjustMix: () => false,
+      onMixStatus: () => () => {},
       stop: reason => { events.push(`stop:${reason}`); },
     };
     return { events, client };
@@ -1959,7 +1968,9 @@ describe("real Task 9 show runtime adapters", () => {
     await settlePromises();
     for (let loop = 0; loop < 3; loop++) {
       for (const delta of [5001, 7001, 33001, 10001, 23001, 12001]) {
-        harness.timers.advanceBy(delta); await harness.timers.fireInterval(16); await settlePromises();
+        harness.timers.advanceBy(delta);
+        await harness.timers.fireInterval(16);
+        await settlePromises();
       }
     }
     await expect(coordinator.completion).resolves.toMatchObject({ ok: true });

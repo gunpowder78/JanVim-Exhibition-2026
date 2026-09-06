@@ -12,12 +12,13 @@ const exactKeys = (value, keys) => value !== null && Object.keys(value).length =
   keys.every(key => Object.hasOwn(value, key));
 const DATA_KEYS = ["version", "command", "sourceId", "seq", "epoch", "sampledAtMs", "state"];
 const SAMPLE_KEYS = [...DATA_KEYS, "energy", "centroidX"];
+const CONTROL_KEYS = ["version", "command", "sourceId", "requestId", "deltaDb"];
 // Keep BOM visible so it cannot silently become valid JSON.
 const utf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 
 // A bounded, nonrecursive JSON tokenizer. Decode keys before duplicate checks;
 // JSON.parse alone would silently keep the last spelling of an escaped duplicate.
-function parseFlatJson(bytes) {
+export function parseFlatJson(bytes) {
   if (!Buffer.isBuffer(bytes) || bytes.length > MAX_FRAME_BYTES) return null;
   try {
     const text = utf8.decode(bytes);
@@ -61,14 +62,30 @@ function parseFlatJson(bytes) {
 }
 
 // Inputs are frame payloads, without CR/LF; credentials never leave this function.
-export function parseFlockAttach(bytes, expectedToken) {
+function parseAttach(bytes, expectedToken, version) {
   if (!token(expectedToken)) return null;
   const frame = parseFlatJson(bytes);
   if (!exactKeys(frame, ["version", "command", "token", "sourceId"]) ||
-      frame.version !== 1 || frame.command !== "attach-flock" ||
+      frame.version !== version || frame.command !== "attach-flock" ||
       !token(frame.token) || !sourceId(frame.sourceId) ||
       !timingSafeEqual(Buffer.from(frame.token, "hex"), Buffer.from(expectedToken, "hex"))) return null;
   return { sourceId: frame.sourceId };
+}
+
+export function parseFlockAttach(bytes, expectedToken) {
+  return parseAttach(bytes, expectedToken, 1);
+}
+
+export function parseFlockAttachV2(bytes, expectedToken) {
+  return parseAttach(bytes, expectedToken, 2);
+}
+
+export function parseFlockControl(bytes) {
+  const frame = parseFlatJson(bytes);
+  if (!exactKeys(frame, CONTROL_KEYS) || frame.version !== 2 ||
+      frame.command !== "adjust-wind-gain" || !sourceId(frame.sourceId) ||
+      !int32(frame.requestId) || ![-1, 1].includes(frame.deltaDb)) return null;
+  return frame;
 }
 
 export function parseFlockFrame(bytes) {

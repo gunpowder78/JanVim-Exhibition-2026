@@ -49,7 +49,7 @@ async function reply(socket, value) {
 }
 const closed = socket => socket.destroyed ? Promise.resolve() : bounded(new Promise(resolve => socket.once("close", resolve)));
 
-async function fixture(t, enabled = true, descriptorFailure = false) {
+async function fixture(t, enabled = true, descriptorFailure = false, siteMixEnabled = false) {
   const runRoot = await run.prepareRunRoot(null);
   let ms = 10000;
   const stops = [];
@@ -59,13 +59,27 @@ async function fixture(t, enabled = true, descriptorFailure = false) {
   const flockInput = enabled ? createFlockInput({ nowMs: () => ms, onDisable: reason => {
     disabled.push(reason); control?.disableFlock(reason);
   } }) : null;
+  const siteMixPath = path.join(runRoot, "site-config", "sound-mix-v1.json");
+  if (siteMixEnabled === "invalid") {
+    await mkdir(path.dirname(siteMixPath));
+    await writeFile(siteMixPath, '{"schema":1,"windGainDb":99,"instrumentGainDb":0}\n');
+  }
+  const siteMix = siteMixEnabled
+    ? await (await import("../site-mix.mjs")).openSiteMixStore({ profilePath: siteMixPath })
+    : null;
   if (descriptorFailure) await mkdir(path.join(runRoot, "flock-input.json"));
-  control = await run.startControlServer(runRoot, () => stops.push("manual"), { realInput, flockInput });
+  control = await run.startControlServer(runRoot, () => stops.push("manual"), { realInput, flockInput, siteMix });
   t.after(async () => { await control.close(); await rm(runRoot, { recursive: true, force: true }); });
   const attachBird = async () => {
     assert.ok(control.flockReceipt, "enabled listener publishes the independent descriptor");
     const bird = await connect(t, control.flockReceipt);
-    assert.equal(await reply(bird, { version: 1, command: "attach-flock", token: control.flockReceipt.token, sourceId }), successAck);
+    const version = siteMix ? 2 : 1;
+    const mix = siteMix?.snapshot();
+    const expected = siteMix
+      ? `${JSON.stringify({ version: 2, ok: true, input: "jianshan-flock-ndjson-v2",
+        gainDb: mix.windGainDb, persistence: mix.persistence })}\n`
+      : successAck;
+    assert.equal(await reply(bird, { version, command: "attach-flock", token: control.flockReceipt.token, sourceId }), expected);
     return bird;
   };
   const attachShow = async () => {
@@ -76,7 +90,8 @@ async function fixture(t, enabled = true, descriptorFailure = false) {
     await delay(20);
     return show;
   };
-  return { control, runRoot, stops, disabled, realInput, flockInput, attachBird, attachShow, at: value => { ms = value; } };
+  return { control, runRoot, stops, disabled, realInput, flockInput, siteMix, attachBird, attachShow,
+    at: value => { ms = value; } };
 }
 
 test("flock ingress CLI requires the exact explicit real-cursor opt-in", () => {
@@ -122,6 +137,119 @@ test("one independent bird owner shares the existing listener and cannot be repl
   assert.equal(await reply(replacement, { version: 1, command: "attach-flock", token: descriptor.token, sourceId }), rejectedAck);
   await f.control.close();
   assert.equal(JSON.parse(await readFile(path.join(f.runRoot, "flock-input.json"), "utf8")).active, false);
+});
+
+test("v2 bird control saves wind gain without changing v1 telemetry or Show lease", async t => {
+  const f = await fixture(t, true, false, true);
+  assert.deepEqual({ ...f.control.flockReceipt, token: "redacted" }, {
+    version: 2, active: true, host: "127.0.0.1", port: f.control.receipt.port,
+    protocol: "jianshan-flock-ndjson-v2", token: "redacted",
+  });
+  const bird = await f.attachBird();
+  bird.write(encode(sample()));
+  await delay(20);
+  assert.equal(f.flockInput.take({ showAuthorized: true }).kind, "flock-live");
+
+  assert.equal(await reply(bird, {
+    version: 2, command: "adjust-wind-gain", sourceId, requestId: 1, deltaDb: -1,
+  }), '{"version":2,"command":"wind-gain","requestId":1,"ok":true,"gainDb":-1}\n');
+  assert.equal(
+    await readFile(path.join(f.runRoot, "site-config", "sound-mix-v1.json"), "utf8"),
+    '{"schema":1,"windGainDb":-1,"instrumentGainDb":0}\n',
+  );
+  assert.deepEqual(f.siteMix.take(), {
+    kind: "site-mix", windGainDb: -1, instrumentGainDb: 0,
+  });
+  assert.deepEqual(f.stops, [], "mix traffic must not act as a Show heartbeat or Stop");
+});
+
+test("authenticated real owner gets and adjusts the same persisted full mix pair", async t => {
+  const f = await fixture(t, true, false, true);
+  const show = await f.attachShow();
+  const common = { token: f.control.receipt.token, ...identity };
+  assert.equal(await reply(show, { command: "get-site-mix", requestId: 1, ...common }),
+    '{"command":"site-mix","requestId":1,"ok":true,"windGainDb":0,"instrumentGainDb":0,"persistence":"saved"}\n');
+  assert.equal(await reply(show, {
+    command: "adjust-site-mix", requestId: 2, target: "instrument", deltaDb: 1, ...common,
+  }), '{"command":"site-mix","requestId":2,"ok":true,"windGainDb":0,"instrumentGainDb":1,"persistence":"saved"}\n');
+  assert.deepEqual(f.siteMix.snapshot(), {
+    windGainDb: 0, instrumentGainDb: 1, persistence: "saved",
+  });
+  assert.equal(f.realInput.isShowAuthorized(), true);
+  assert.deepEqual(f.stops, []);
+});
+
+test("site sound mix save failure returns exact failure replies and preserves the invalid profile", async t => {
+  const f = await fixture(t, true, false, "invalid");
+  const invalid = '{"schema":1,"windGainDb":99,"instrumentGainDb":0}\n';
+  const bird = await f.attachBird();
+  assert.equal(await reply(bird, {
+    version: 2, command: "adjust-wind-gain", sourceId, requestId: 1, deltaDb: 1,
+  }), '{"version":2,"command":"wind-gain","requestId":1,"ok":false,"reason":"save-failed"}\n');
+
+  const show = await f.attachShow();
+  const common = { token: f.control.receipt.token, ...identity };
+  assert.equal(await reply(show, { command: "get-site-mix", requestId: 1, ...common }),
+    '{"command":"site-mix","requestId":1,"ok":true,"windGainDb":0,"instrumentGainDb":0,"persistence":"save-error"}\n');
+  assert.equal(await reply(show, {
+    command: "adjust-site-mix", requestId: 2, target: "instrument", deltaDb: -1, ...common,
+  }), '{"command":"site-mix","requestId":2,"ok":false,"reason":"save-failed","windGainDb":0,"instrumentGainDb":0,"persistence":"save-error"}\n');
+  assert.equal(await readFile(path.join(f.runRoot, "site-config", "sound-mix-v1.json"), "utf8"), invalid);
+});
+
+test("site sound mix save wait does not pause v1 flock telemetry", async t => {
+  const runRoot = await run.prepareRunRoot(null);
+  let finishSave;
+  const siteMix = {
+    snapshot: () => ({ windGainDb: 0, instrumentGainDb: 0, persistence: "saved" }),
+    adjust: () => new Promise(resolve => { finishSave = resolve; }),
+    take: () => null,
+  };
+  let ms = 10000;
+  const realInput = createRealInput({ nowMs: () => ms, onStop: () => {} });
+  const flockInput = createFlockInput({ nowMs: () => ms, onDisable: () => {} });
+  const control = await run.startControlServer(runRoot, () => {}, { realInput, flockInput, siteMix });
+  t.after(async () => { await control.close(); await rm(runRoot, { recursive: true, force: true }); });
+  const bird = await connect(t, control.flockReceipt);
+  assert.equal(await reply(bird, { version: 2, command: "attach-flock",
+    token: control.flockReceipt.token, sourceId }),
+  '{"version":2,"ok":true,"input":"jianshan-flock-ndjson-v2","gainDb":0,"persistence":"saved"}\n');
+
+  const saved = reply(bird, {
+    version: 2, command: "adjust-wind-gain", sourceId, requestId: 1, deltaDb: 1,
+  });
+  bird.write(encode(sample()));
+  await delay(20);
+  assert.equal(flockInput.take({ showAuthorized: true }).kind, "flock-live");
+  finishSave({ ok: true, windGainDb: 1, instrumentGainDb: 0 });
+  assert.equal(await saved,
+    '{"version":2,"command":"wind-gain","requestId":1,"ok":true,"gainDb":1}\n');
+});
+
+test("site sound mix control cannot replace bird identity or renew the Show lease", async t => {
+  const identityProbe = await fixture(t, true, false, true);
+  const show = await identityProbe.attachShow();
+  const bird = await identityProbe.attachBird();
+  assert.equal(await reply(bird, {
+    version: 2, command: "adjust-wind-gain", sourceId: "cd".repeat(16),
+    requestId: 1, deltaDb: 1,
+  }), '{"version":2,"ok":false,"reason":"rejected"}\n');
+  await closed(bird);
+  assert.equal(show.destroyed, false);
+  assert.deepEqual(identityProbe.siteMix.snapshot(), {
+    windGainDb: 0, instrumentGainDb: 0, persistence: "saved",
+  });
+
+  const lease = await fixture(t, true, false, true);
+  const owner = await lease.attachShow();
+  const common = { token: lease.control.receipt.token, ...identity };
+  for (let requestId = 1; requestId <= 5; requestId++) {
+    assert.match(await reply(owner, { command: "get-site-mix", requestId, ...common }),
+      /"command":"site-mix"/u);
+    await delay(300);
+  }
+  await delay(650);
+  assert.deepEqual(lease.stops, ["producer-timeout"]);
 });
 
 test("bird token cannot authenticate Stop heartbeat or cursor and malformed bird closes only bird", async t => {
@@ -256,7 +384,8 @@ async function productionClockHandler(realInput, flockInput, nowMs) {
   assert.equal(registrations?.length, 1, "expected the actual supervisor sender-message registration");
   const sender = { child: new EventEmitter() };
   let reply;
-  const context = createContext({ sender, realInput, flockInput, takeInputReply: run.takeInputReply,
+  const context = createContext({ sender, realInput, flockInput, siteMix: null,
+    takeInputReply: run.takeInputReply,
     performance: { timeOrigin: 100000, now: () => nowMs() - 100000 },
     receiverAnchor: { clock: 10, epochMilliseconds: 101000 },
     sendIpc: (child, value) => {
@@ -344,6 +473,76 @@ function readOsc(packet) {
   });
   return { address, tags, values };
 }
+
+test("site sound mix events use the sole sender sequence and bypass freshness admission", async t => {
+  const receiver = dgram.createSocket({ type: "udp4", reuseAddr: false });
+  await bounded(new Promise((resolve, reject) => {
+    receiver.once("error", reject);
+    receiver.bind({ address: "127.0.0.1", port: 57140, exclusive: true }, resolve);
+  }));
+  t.after(() => receiver.close());
+  const child = spawn(process.execPath, [path.resolve("sound/run.mjs"), "--internal-sender"], {
+    stdio: ["ignore", "pipe", "pipe", "ipc"], windowsHide: true,
+  });
+  t.after(async () => {
+    if (child.exitCode === null && child.signalCode === null) child.kill();
+    await bounded(new Promise(resolve => {
+      if (child.exitCode !== null || child.signalCode !== null) resolve();
+      else child.once("exit", resolve);
+    }));
+  });
+  let stderr = "";
+  child.stderr.on("data", chunk => { stderr += chunk; });
+  const packets = [];
+  let sentDynamic = false;
+  const finished = bounded(new Promise((resolve, reject) => {
+    child.once("error", reject);
+    child.once("exit", code => { if (code !== 0) reject(new Error(`sender exit ${code}: ${stderr}`)); });
+    child.on("message", message => {
+      if (message.type === "failed") reject(new Error(JSON.stringify(message)));
+      if (message.type === "finished") resolve(message);
+      if (message.type !== "clock") return;
+      const dynamic = message.takeRealInput && !sentDynamic
+        ? { kind: "site-mix", windGainDb: -4, instrumentGainDb: 2 }
+        : null;
+      if (dynamic) sentDynamic = true;
+      child.send({
+        type: "clock", requestId: message.requestId, value: 1,
+        sampledAtMs: performance.timeOrigin + performance.now(), events: [], mixEvent: dynamic,
+      });
+    });
+  }), 4000);
+  receiver.on("message", packet => {
+    const decoded = readOsc(packet);
+    packets.push(decoded);
+    if (decoded.address.endsWith("/start")) child.send({ type: "ackStart" });
+    if (decoded.address.endsWith("/site-mix") &&
+        packets.filter(value => value.address.endsWith("/site-mix")).length === 2) {
+      child.send({ type: "stop" });
+    }
+    if (decoded.address.endsWith("/stop")) child.send({ type: "ackStop" });
+  });
+  child.send({
+    type: "initialize", duration: 30, input: "real-cursor",
+    session: "01".repeat(16),
+    siteMix: { kind: "site-mix", windGainDb: -3, instrumentGainDb: 1 },
+  });
+
+  await finished.catch(error => {
+    throw new Error(`${error.message}; packets=${JSON.stringify(packets)}; stderr=${stderr}`, { cause: error });
+  });
+  assert.equal(stderr, "");
+  assert.deepEqual(packets.map(packet => packet.address), [
+    "/janvim/sound/v1/start",
+    "/janvim/sound/v1/site-mix",
+    "/janvim/sound/v1/site-mix",
+    "/janvim/sound/v1/stop",
+  ]);
+  const mixes = packets.slice(1, 3);
+  assert.ok(mixes.every(packet => packet.tags === ",sidff"));
+  assert.deepEqual(mixes.map(packet => packet.values.slice(3)), [[-3, 1], [-4, 2]]);
+  assert.deepEqual(packets.map(packet => packet.values[1]), [1, 2, 3, 4]);
+});
 
 async function senderScenario(t, runFile = path.resolve("sound/run.mjs")) {
   const receiver = dgram.createSocket({ type: "udp4", reuseAddr: false });
@@ -436,7 +635,7 @@ test("sender mutation checks catch renewed SC deadline and removed final admissi
     await t.test(name, async sub => {
       const root = await run.prepareRunRoot(null);
       sub.after(() => rm(root, { recursive: true, force: true }));
-      for (const file of ["osc.mjs", "real-input.mjs", "flock-input.mjs", "flock-protocol.mjs"]) {
+      for (const file of ["osc.mjs", "real-input.mjs", "flock-input.mjs", "flock-protocol.mjs", "site-mix.mjs"]) {
         await copyFile(path.resolve("sound", file), path.join(root, file));
       }
       const source = await readFile(path.resolve("sound/run.mjs"), "utf8");
@@ -528,7 +727,17 @@ test("silent production supervisor joins TCP and unique sender to SC; expiry gat
   show.write(encode({ ...heartbeat(), token: receipt.token }) + encode({ ...heartbeat(2), command: "cursor",
     token: receipt.token, x: 0.5, y: 0.5, motion: 1 }));
   const bird = await connect(t, descriptor);
-  assert.equal(await reply(bird, { version: 1, command: "attach-flock", token: descriptor.token, sourceId }), successAck);
+  assert.equal(descriptor.version, 2);
+  assert.equal(descriptor.protocol, "jianshan-flock-ndjson-v2");
+  const birdAck = JSON.parse(await reply(bird, {
+    version: 2, command: "attach-flock", token: descriptor.token, sourceId,
+  }));
+  assert.deepEqual(Object.keys(birdAck).sort(), ["gainDb", "input", "ok", "persistence", "version"]);
+  assert.equal(birdAck.version, 2);
+  assert.equal(birdAck.ok, true);
+  assert.equal(birdAck.input, "jianshan-flock-ndjson-v2");
+  assert.ok(Number.isInteger(birdAck.gainDb) && birdAck.gainDb >= -24 && birdAck.gainDb <= 6);
+  assert.ok(["saved", "save-error"].includes(birdAck.persistence));
   const origin = performance.now();
   bird.write(encode(sample()));
   const live = await until(tree, nodes => nodes.some(node => node.name === "jvWind" && node.controls.gate === 1), "real sender live wind");

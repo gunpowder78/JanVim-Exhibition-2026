@@ -14,7 +14,17 @@ import {
 
 const fixtureManifest = parseShowManifest(
   JSON.parse(
-    readFileSync(join(process.cwd(), "content", "fixture", "show.manifest.json"), "utf8"),
+    readFileSync(
+      join(
+        process.cwd(),
+        "content",
+        "p0.1",
+        "profiles",
+        "p0-baseline",
+        "show.manifest.json",
+      ),
+      "utf8",
+    ),
   ),
 );
 const fixtureInsertCue = fixtureManifest.cues.find((cue) => cue.id === "cue-insert");

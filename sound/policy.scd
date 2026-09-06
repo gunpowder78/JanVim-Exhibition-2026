@@ -12,9 +12,10 @@
         "/janvim/sound/v1/heartbeat",
         "/janvim/sound/v1/cursor",
         "/janvim/sound/v1/flock",
-        "/janvim/sound/v1/stop"
+        "/janvim/sound/v1/stop",
+        "/janvim/sound/v1/site-mix"
     ];
-    lengths = [4, 4, 7, 6, 4];
+    lengths = [4, 4, 7, 6, 4, 6];
     if(flockIngress == true) {
         paths = paths ++ ["/janvim/sound/v1/flock-live", "/janvim/sound/v1/flock-mute"];
         lengths = lengths ++ [9, 6];
@@ -95,7 +96,7 @@
     handle = { |msg, now|
         var timeoutAction, valid, path, pathIndex, seq, sentAt;
         var x, y, motion, energy, centroid, noteIndex;
-        var epoch, revision, expiresAt;
+        var epoch, revision, expiresAt, windGainDb, instrumentGainDb;
 
         if(finiteFloat.value(now).not) {
             reject.value
@@ -155,7 +156,18 @@
                             finiteFloat.value(msg.at(5))
                         };
                     };
-                    if(valid and: { pathIndex >= 5 }) {
+                    if(valid and: { pathIndex == 5 }) {
+                        windGainDb = msg.at(4);
+                        instrumentGainDb = msg.at(5);
+                        valid = finiteFloat.value(windGainDb) and: {
+                            windGainDb >= -24.0 and: { windGainDb <= 6.0 and: {
+                                finiteFloat.value(instrumentGainDb) and: {
+                                    instrumentGainDb >= -24.0 and: { instrumentGainDb <= 6.0 }
+                                }
+                            } }
+                        };
+                    };
+                    if(valid and: { pathIndex >= 6 }) {
                         epoch = msg.at(4);
                         revision = msg.at(5);
                         valid = epoch.isInteger and: {
@@ -168,7 +180,7 @@
                             } }
                         };
                     };
-                    if(valid and: { pathIndex == 5 }) {
+                    if(valid and: { pathIndex == 6 }) {
                         energy = msg.at(6);
                         centroid = msg.at(7);
                         expiresAt = msg.at(8);
@@ -246,18 +258,23 @@
                                         if(pathIndex == 4) {
                                             stop.value(\requested)
                                         } {
-                                            // The sender admits samples at 20Hz. Apply each new
-                                            // watermark here immediately, including epoch/mute
-                                            // changes less than 50ms apart. Never renew the lease.
-                                            flockEpoch = epoch;
-                                            flockRevision = revision;
                                             if(pathIndex == 5) {
-                                                windExpiresAt = expiresAt;
-                                                acceptedFlocks = saturatingIncrement.value(acceptedFlocks);
-                                                (type: \wind, energy: energy, pan: (centroid * 1.6) - 0.8)
+                                                (type: \siteMix, windGainDb: windGainDb,
+                                                    instrumentGainDb: instrumentGainDb)
                                             } {
-                                                windExpiresAt = nil;
-                                                (type: \windMute)
+                                                // The sender admits samples at 20Hz. Apply each new
+                                                // watermark here immediately, including epoch/mute
+                                                // changes less than 50ms apart. Never renew the lease.
+                                                flockEpoch = epoch;
+                                                flockRevision = revision;
+                                                if(pathIndex == 6) {
+                                                    windExpiresAt = expiresAt;
+                                                    acceptedFlocks = saturatingIncrement.value(acceptedFlocks);
+                                                    (type: \wind, energy: energy, pan: (centroid * 1.6) - 0.8)
+                                                } {
+                                                    windExpiresAt = nil;
+                                                    (type: \windMute)
+                                                }
                                             }
                                         }
                                     }

@@ -13,7 +13,15 @@ import { fileURLToPath } from "node:url";
 import { encodeMessage } from "./osc.mjs";
 import { createRealAdmission, createRealInput } from "./real-input.mjs";
 import { createFlockAdmission, createFlockInput } from "./flock-input.mjs";
-import { createFlockFramer, parseFlockAttach, parseFlockFrame } from "./flock-protocol.mjs";
+import {
+  createFlockFramer,
+  parseFlatJson,
+  parseFlockAttach,
+  parseFlockAttachV2,
+  parseFlockControl,
+  parseFlockFrame,
+} from "./flock-protocol.mjs";
+import { openSiteMixStore, SITE_MIX_PATH } from "./site-mix.mjs";
 
 const RUN_FILE = fileURLToPath(import.meta.url);
 export const REHEARSAL_PARENT = "D:/VirtualData/JanVim-Exhibition-Rehearsals";
@@ -163,8 +171,13 @@ function tokensEqual(left, right) {
   return leftBytes.length === rightBytes.length && timingSafeEqual(leftBytes, rightBytes);
 }
 
-export async function startControlServer(runRoot, onStop, { realInput = null, flockInput = null } = {}) {
+export async function startControlServer(
+  runRoot,
+  onStop,
+  { realInput = null, flockInput = null, siteMix = null } = {},
+) {
   if (flockInput && !realInput) throw new Error("flock input requires real input");
+  if (siteMix && !realInput) throw new Error("site mix requires real input");
   const token = randomBytes(32).toString("hex");
   const sockets = new Set();
   let accepted = false;
@@ -173,12 +186,19 @@ export async function startControlServer(runRoot, onStop, { realInput = null, fl
   let persistence = Promise.resolve();
   let persistenceError = null;
   let ownerSocket = null;
+  let ownerIdentity = null;
+  let lastRealMixRequestId = 0;
+  const realMixPending = new Set();
   let producerTimer;
   let flockReceipt;
   let birdSocket = null;
+  let birdSourceId = null;
+  let birdMixPending = false;
+  let lastBirdMixRequestId = 0;
   let birdDisabled = false;
   let flockPersistence = Promise.resolve();
   const flockPath = path.join(runRoot, "flock-input.json");
+  const flockVersion = siteMix ? 2 : 1;
   const flockDiagnostic = () => process.stderr.write("sound flock ingress: descriptor unavailable; optional input disabled\n");
   const disableFlock = (reason = "source-disconnect", rejecting = false) => {
     if (!flockInput) return;
@@ -251,7 +271,9 @@ export async function startControlServer(runRoot, onStop, { realInput = null, fl
       if (rejected || accepted) return;
       rejected = true;
       input = Buffer.alloc(0);
-      socket.end(flockInput && role !== "control" ? '{"version":1,"ok":false,"reason":"rejected"}\n' : '{"ok":false}\n');
+      socket.end(flockInput && role !== "control"
+        ? `{"version":${flockVersion},"ok":false,"reason":"rejected"}\n`
+        : '{"ok":false}\n');
       if (role === "bird") disableFlock("invalid-frame", true);
       // A rejected owner must not keep the TCP half-open after its lease expires.
       socket.destroySoon();
@@ -269,9 +291,27 @@ export async function startControlServer(runRoot, onStop, { realInput = null, fl
       socket.end('{"ok":true}\n');
       void closeListener();
     };
+    const writeMixReply = (requestId, outcome) => {
+      if (socket.destroyed || accepted || rejected) return;
+      const snapshot = siteMix.snapshot();
+      socket.write(`${JSON.stringify({
+        command: "site-mix",
+        requestId,
+        ok: outcome.ok,
+        ...(!outcome.ok ? { reason: "save-failed" } : {}),
+        windGainDb: snapshot.windGainDb,
+        instrumentGainDb: snapshot.instrumentGainDb,
+        persistence: snapshot.persistence,
+      })}\n`);
+    };
+    const exactRealMixRequest = (frame, keys) => frame && Object.keys(frame).length === keys.length &&
+      keys.every(key => Object.hasOwn(frame, key)) &&
+      frame.runId === ownerIdentity?.runId && frame.controllerRunId === ownerIdentity?.controllerRunId &&
+      Number.isInteger(frame.requestId) && frame.requestId > lastRealMixRequestId &&
+      frame.requestId <= 0x7fffffff;
     const realFrame = bytes => {
-      let message;
-      try { message = JSON.parse(bytes.toString("utf8")); } catch { reject(); return; }
+      const message = parseFlatJson(bytes);
+      if (!message) { reject(); return; }
       if (!message || !tokensEqual(message.token, token)) {
         if (socket !== ownerSocket) reject();
         return;
@@ -287,11 +327,33 @@ export async function startControlServer(runRoot, onStop, { realInput = null, fl
           keys.includes("runId") && keys.includes("controllerRunId") && !ownerSocket &&
           realInput.attach({ runId: frame.runId, controllerRunId: frame.controllerRunId })) {
         ownerSocket = socket;
+        ownerIdentity = { runId: frame.runId, controllerRunId: frame.controllerRunId };
         clearTimeout(attachTimer);
         renewProducer();
         socket.write('{"ok":true,"input":"real-cursor"}\n');
       } else if (socket === ownerSocket) {
-        if (realInput.accept(frame) && frame.command === "heartbeat") renewProducer();
+        if (siteMix && frame.command === "get-site-mix") {
+          const requestKeys = ["command", "runId", "controllerRunId", "requestId"];
+          if (!exactRealMixRequest(frame, requestKeys)) { reject(); return; }
+          lastRealMixRequestId = frame.requestId;
+          writeMixReply(frame.requestId, { ok: true });
+        } else if (siteMix && frame.command === "adjust-site-mix") {
+          const requestKeys = [
+            "command", "runId", "controllerRunId", "requestId", "target", "deltaDb",
+          ];
+          if (!exactRealMixRequest(frame, requestKeys) ||
+              !["wind", "instrument"].includes(frame.target) ||
+              ![-1, 1].includes(frame.deltaDb) || realMixPending.has(frame.target)) {
+            reject();
+            return;
+          }
+          lastRealMixRequestId = frame.requestId;
+          realMixPending.add(frame.target);
+          void siteMix.adjust(frame.target, frame.deltaDb)
+            .then(outcome => writeMixReply(frame.requestId, outcome))
+            .catch(() => writeMixReply(frame.requestId, { ok: false }))
+            .finally(() => realMixPending.delete(frame.target));
+        } else if (realInput.accept(frame) && frame.command === "heartbeat") renewProducer();
       } else reject();
     };
     const framer = realInput ? createFlockFramer({
@@ -301,20 +363,54 @@ export async function startControlServer(runRoot, onStop, { realInput = null, fl
         if (socket !== ownerSocket && socket !== birdSocket && performance.now() >= attachDeadline) return false;
         if (role === "bird") {
           const frame = parseFlockFrame(bytes);
-          if (!frame || birdDisabled) return false;
-          flockInput.accept(frame); // A legitimate freshness/order drop keeps the owner.
-          if (flockInput.snapshot().closed) disableFlock();
-          return !birdDisabled;
+          if (frame) {
+            if (birdDisabled) return false;
+            flockInput.accept(frame); // A legitimate freshness/order drop keeps the owner.
+            if (flockInput.snapshot().closed) disableFlock();
+            return !birdDisabled;
+          }
+          const adjustment = flockVersion === 2 ? parseFlockControl(bytes) : null;
+          if (!adjustment || adjustment.sourceId !== birdSourceId || birdDisabled ||
+              birdMixPending || adjustment.requestId <= lastBirdMixRequestId) return false;
+          lastBirdMixRequestId = adjustment.requestId;
+          birdMixPending = true;
+          void siteMix.adjust("wind", adjustment.deltaDb)
+            .then((outcome) => {
+              if (socket.destroyed || accepted || birdDisabled) return;
+              socket.write(outcome.ok
+                ? `${JSON.stringify({ version: 2, command: "wind-gain",
+                  requestId: adjustment.requestId, ok: true, gainDb: outcome.windGainDb })}\n`
+                : `${JSON.stringify({ version: 2, command: "wind-gain",
+                  requestId: adjustment.requestId, ok: false, reason: "save-failed" })}\n`);
+            })
+            .catch(() => {
+              if (!socket.destroyed && !accepted && !birdDisabled) {
+                socket.write(`${JSON.stringify({ version: 2, command: "wind-gain",
+                  requestId: adjustment.requestId, ok: false, reason: "save-failed" })}\n`);
+              }
+            })
+            .finally(() => { birdMixPending = false; });
+          return true;
         }
         if (role === null && flockReceipt) {
-          const attach = parseFlockAttach(bytes, flockReceipt.token);
+          const attach = flockVersion === 2
+            ? parseFlockAttachV2(bytes, flockReceipt.token)
+            : parseFlockAttach(bytes, flockReceipt.token);
           if (attach) {
             if (birdDisabled || birdSocket || !flockInput.attach(attach.sourceId)) return false;
             // attach captures R immediately before queuing the success ACK.
             role = "bird";
             birdSocket = socket;
+            birdSourceId = attach.sourceId;
             clearTimeout(attachTimer);
-            socket.write('{"version":1,"ok":true,"input":"jianshan-flock-ndjson-v1"}\n');
+            if (flockVersion === 2) {
+              const mix = siteMix.snapshot();
+              socket.write(`${JSON.stringify({ version: 2, ok: true,
+                input: "jianshan-flock-ndjson-v2", gainDb: mix.windGainDb,
+                persistence: mix.persistence })}\n`);
+            } else {
+              socket.write('{"version":1,"ok":true,"input":"jianshan-flock-ndjson-v1"}\n');
+            }
             return true;
           }
         }
@@ -395,8 +491,8 @@ export async function startControlServer(runRoot, onStop, { realInput = null, fl
   if (flockInput) {
     // Publish a complete private file atomically, without replacing an existing path.
     const pendingPath = path.join(runRoot, `.flock-input-${randomBytes(8).toString("hex")}.tmp`);
-    const descriptor = { version: 1, active: true, host: "127.0.0.1", port: address.port,
-      protocol: "jianshan-flock-ndjson-v1", token: randomBytes(32).toString("hex") };
+    const descriptor = { version: flockVersion, active: true, host: "127.0.0.1", port: address.port,
+      protocol: `jianshan-flock-ndjson-v${flockVersion}`, token: randomBytes(32).toString("hex") };
     try {
       await writeFile(pendingPath, `${JSON.stringify(descriptor)}\n`, {
         encoding: "utf8", flag: "wx", mode: 0o600, signal: globalThis.AbortSignal.timeout(1000),
@@ -432,11 +528,12 @@ export async function startControlServer(runRoot, onStop, { realInput = null, fl
   };
 }
 
-export function takeInputReply(realInput, flockInput) {
+export function takeInputReply(realInput, flockInput, siteMix = null) {
   const events = realInput.take(); // Enforce the real Show lease before bird authorization.
-  if (!flockInput) return { events };
+  const mixEvent = siteMix?.take() ?? null;
+  if (!flockInput) return { events, ...(siteMix ? { mixEvent } : {}) };
   const flockEvent = flockInput.take({ showAuthorized: realInput.isShowAuthorized() });
-  return { events, flockEvent, flockSnapshot: flockInput.snapshot() };
+  return { events, flockEvent, flockSnapshot: flockInput.snapshot(), ...(siteMix ? { mixEvent } : {}) };
 }
 
 export function sendControlRequest(receipt) {
@@ -990,6 +1087,14 @@ async function runInternalSender() {
     }
   });
   const config = await withTimeout(initialized, 5000, new Error("sender init timed out"));
+  const validSiteMix = event => event !== null && typeof event === "object" &&
+    Object.keys(event).length === 3 && event.kind === "site-mix" &&
+    Number.isInteger(event.windGainDb) && event.windGainDb >= -24 && event.windGainDb <= 6 &&
+    Number.isInteger(event.instrumentGainDb) && event.instrumentGainDb >= -24 &&
+    event.instrumentGainDb <= 6;
+  if (Object.hasOwn(config, "siteMix") && !validSiteMix(config.siteMix)) {
+    throw new Error("invalid initial site mix");
+  }
   const realMode = config.input === "real-cursor";
   const admitReal = realMode ? createRealAdmission({
     nowMs: () => performance.timeOrigin + performance.now(),
@@ -1077,7 +1182,15 @@ async function runInternalSender() {
         ] : []),
       ]);
     }
+    if (event.kind === "site-mix" && validSiteMix(event)) {
+      packet = encodeMessage("/janvim/sound/v1/site-mix", [
+        ...common,
+        { type: "f", value: event.windGainDb },
+        { type: "f", value: event.instrumentGainDb },
+      ]);
+    }
     if (event.kind === "stop") packet = encodeMessage("/janvim/sound/v1/stop", common);
+    if (!packet) throw new Error("invalid sender event");
     return { packet, sentAt, seq: sequence };
   };
 
@@ -1089,7 +1202,8 @@ async function runInternalSender() {
     if (clock) {
       if (stopRequested) return null;
       const flock = event.kind === "flock-live" || event.kind === "flock-mute";
-      if (flock ? !admitFlock?.accept(event) : !admitReal(event)) return null;
+      if (flock ? !admitFlock?.accept(event)
+        : event.kind !== "site-mix" && !admitReal(event)) return null;
     }
     const sent = await sendUdp(socket, encoded.packet, deadline);
     return sent ? encoded : null;
@@ -1139,6 +1253,10 @@ async function runInternalSender() {
     await finishInternalSender({ reason: "startAckTimeout", type: "failed" });
     return 2;
   }
+  if (config.siteMix) {
+    const mixed = await sendEvent(config.siteMix);
+    report({ kind: "site-mix", sentAt: mixed.sentAt, seq: mixed.seq, type: "packet" });
+  }
 
   const timeline = realMode ? null : createTimeline(config.duration);
   const timelineStart = performance.now();
@@ -1152,7 +1270,8 @@ async function runInternalSender() {
     const clock = realMode ? await requestTimestamp(undefined, true) : null;
     if (stopRequested) return finishStop("requested");
     const events = realMode ? [...clock.events,
-      ...(admitFlock && clock.flockEvent ? [clock.flockEvent] : [])] : timeline.due(elapsed);
+      ...(admitFlock && clock.flockEvent ? [clock.flockEvent] : []),
+      ...(clock.mixEvent ? [clock.mixEvent] : [])] : timeline.due(elapsed);
     const kinds = [];
     for (const event of events) {
       const sent = await sendEvent(event, undefined, clock);
@@ -1193,6 +1312,7 @@ async function runSupervisor(options) {
   let stopRequested = false;
   let realInput = null;
   let flockInput = null;
+  let siteMix = null;
   let resourceTimer;
   let resourceSamplePromise = null;
   let senderFallbackTimer;
@@ -1225,6 +1345,7 @@ async function runSupervisor(options) {
   process.on("SIGTERM", signalHandler);
 
   try {
+    siteMix = await openSiteMixStore({ profilePath: SITE_MIX_PATH });
     if (options.input === "real-cursor") {
       realInput = createRealInput({
         nowMs: () => performance.timeOrigin + performance.now(),
@@ -1237,7 +1358,11 @@ async function runSupervisor(options) {
         });
       }
     }
-    control = await startControlServer(runRoot, () => requestRunStop("control"), { realInput, flockInput });
+    control = await startControlServer(runRoot, () => requestRunStop("control"), {
+      realInput,
+      flockInput,
+      ...(realInput ? { siteMix } : {}),
+    });
     await assertLanguagePortAvailable();
 
     let resolveReady;
@@ -1363,7 +1488,7 @@ async function runSupervisor(options) {
         // Start/Stop callers use only time: inspect expiry/watermark without
         // consuming the pending input that belongs to the next explicit pull.
         const inputReply = realInput && message.takeRealInput
-          ? { ...takeInputReply(realInput, flockInput), sampledAtMs }
+          ? { ...takeInputReply(realInput, flockInput, siteMix), sampledAtMs }
           : flockInput ? { flockSnapshot: flockInput.snapshot(), sampledAtMs } : {};
         sendIpc(sender.child, { requestId: message.requestId, type: "clock", value, ...inputReply });
         return;
@@ -1375,6 +1500,7 @@ async function runSupervisor(options) {
       duration: options.duration === 3600 ? 3599.75 : options.duration,
       session,
       type: "initialize",
+      siteMix: siteMix.take(),
       ...(realInput ? { input: "real-cursor" } : {}),
       ...(flockInput ? { flockInput: "enabled" } : {}),
     });

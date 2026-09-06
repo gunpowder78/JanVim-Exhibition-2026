@@ -1,4 +1,33 @@
-import type { MotionMode, SceneElements } from "./model";
+import type { MotionMode, SceneElements, SoundMixRowElements } from "./model";
+
+function createSoundMixRow(
+  target: "wind" | "instrument",
+  label: string,
+): SoundMixRowElements {
+  const row = document.createElement("div");
+  row.className = "sound-mix-row";
+  row.dataset.mixTarget = target;
+  const name = document.createElement("span");
+  name.className = "sound-mix-row__name";
+  name.textContent = label;
+  const minusButton = document.createElement("button");
+  minusButton.type = "button";
+  minusButton.dataset.deltaDb = "-1";
+  minusButton.setAttribute("aria-label", `${label} down 1 dB`);
+  minusButton.textContent = "−";
+  minusButton.disabled = true;
+  const value = document.createElement("output");
+  value.dataset.mixValue = "";
+  value.textContent = "-- dB";
+  const plusButton = document.createElement("button");
+  plusButton.type = "button";
+  plusButton.dataset.deltaDb = "1";
+  plusButton.setAttribute("aria-label", `${label} up 1 dB`);
+  plusButton.textContent = "+";
+  plusButton.disabled = true;
+  row.append(name, minusButton, value, plusButton);
+  return { row, minusButton, value, plusButton };
+}
 
 export function createReadyPage(
   root: HTMLElement,
@@ -77,6 +106,24 @@ export function createReadyPage(
   const operatorControls = document.createElement("nav");
   operatorControls.className = "operator-controls";
   operatorControls.setAttribute("aria-label", "Local show controls");
+  const soundMixControls = document.createElement("section");
+  soundMixControls.className = "sound-mix-controls";
+  soundMixControls.dataset.soundMix = "";
+  soundMixControls.setAttribute("aria-label", "Site sound mix");
+  soundMixControls.hidden = true;
+  const soundMixHeader = document.createElement("div");
+  soundMixHeader.className = "sound-mix-header";
+  const soundMixTitle = document.createElement("span");
+  soundMixTitle.textContent = "SITE SOUND MIX";
+  const soundMixPersistence = document.createElement("span");
+  soundMixPersistence.dataset.mixPersistence = "";
+  soundMixPersistence.textContent = "LOADING";
+  soundMixHeader.append(soundMixTitle, soundMixPersistence);
+  const windMix = createSoundMixRow("wind", "WIND");
+  const instrumentMix = createSoundMixRow("instrument", "INSTRUMENT");
+  soundMixControls.append(soundMixHeader, windMix.row, instrumentMix.row);
+  const showActions = document.createElement("div");
+  showActions.className = "operator-show-actions";
   const startButton = document.createElement("button");
   startButton.type = "button";
   startButton.dataset.action = "start-show";
@@ -94,7 +141,8 @@ export function createReadyPage(
   stopButton.textContent = "STOP SHOW";
   stopButton.disabled = true;
   stopButton.hidden = true;
-  operatorControls.append(startButton, restartButton, stopButton);
+  showActions.append(startButton, restartButton, stopButton);
+  operatorControls.append(soundMixControls, showActions);
   ready.append(readyTitle, readyStatus);
 
   surface.append(header, workspace, keyRegion, p1Layer, ready, operatorControls);
@@ -107,6 +155,10 @@ export function createReadyPage(
     startButton,
     restartButton,
     stopButton,
+    soundMixControls,
+    soundMixPersistence,
+    windMix,
+    instrumentMix,
     promptContent,
     responseContent,
     acceptance,

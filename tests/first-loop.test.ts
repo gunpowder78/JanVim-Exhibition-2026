@@ -23,7 +23,19 @@ import { SecondarySceneController } from "../apps/secondary-screen/src/scene-con
 const fixtureRoot = join(process.cwd(), "content", "fixture");
 const poem = readFileSync(join(fixtureRoot, "poem.txt"), "utf8");
 const fixtureManifest = parseShowManifest(
-  JSON.parse(readFileSync(join(fixtureRoot, "show.manifest.json"), "utf8")),
+  JSON.parse(
+    readFileSync(
+      join(
+        process.cwd(),
+        "content",
+        "p0.1",
+        "profiles",
+        "p0-baseline",
+        "show.manifest.json",
+      ),
+      "utf8",
+    ),
+  ),
 );
 const token = "fixture-first-loop-token-2026";
 

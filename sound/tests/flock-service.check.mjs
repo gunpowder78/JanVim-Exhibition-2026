@@ -259,6 +259,42 @@ test("silent flock-v1 service gates wind independently, bounds flaps, and preser
   } finally { await service.cleanup(); }
 });
 
+test("site sound mix updates current and future stems independently", { timeout: 60000 }, async t => {
+  const service = await launch(["flock-v1"]);
+  try {
+    await service.ready();
+    await service.send("site-mix", [float(-6), float(3)]);
+    await service.live();
+    await service.send("cursor", [float(0.5), float(0.5), float(1)]);
+    let nodes = await until(service.tree, list =>
+      list.some(({ name }) => name === "jvWind") && list.some(({ name }) => name === "jvPluck"),
+    "mixed stems created");
+    let wind = nodes.find(({ name }) => name === "jvWind");
+    let pluck = nodes.find(({ name }) => name === "jvPluck");
+    assert.ok(Math.abs(wind.controls.gain - (10 ** (-6 / 20))) < 0.00001);
+    assert.ok(Math.abs(pluck.controls.gain - (10 ** (3 / 20))) < 0.00001);
+
+    await service.send("site-mix", [float(-12), float(-4)]);
+    nodes = await until(service.tree, list => {
+      wind = list.find(({ name }) => name === "jvWind");
+      pluck = list.find(({ name }) => name === "jvPluck");
+      return wind && pluck && Math.abs(wind.controls.gain - (10 ** (-12 / 20))) < 0.00001 &&
+        Math.abs(pluck.controls.gain - (10 ** (-4 / 20))) < 0.00001;
+    }, "existing stem controls updated");
+    await delay(130);
+    await service.send("cursor", [float(0.5), float(0.5), float(1)]);
+    nodes = await until(service.tree,
+      list => list.filter(({ name, controls }) => name === "jvPluck" &&
+        Math.abs(controls.gain - (10 ** (-4 / 20))) < 0.00001).length >= 2,
+      "future pluck inherits saved instrument gain");
+    assert.ok(nodes.filter(({ name }) => name === "jvWind").every(({ controls }) =>
+      Math.abs(controls.gain - (10 ** (-12 / 20))) < 0.00001));
+    await service.stop();
+    await service.complete();
+    t.diagnostic(`silent independent-gain evidence: ${service.evidence}`);
+  } finally { await service.cleanup(); }
+});
+
 test("four-argument silent service ignores ingress paths and preserves legacy flock", { timeout: 60000 }, async (t) => {
   const service = await launch();
   try {

@@ -332,7 +332,7 @@ const requireSignalBounds = (analysis, activeSegmentNames, silentSegmentNames) =
   });
 };
 
-test("renders production pluck, wind, stop, and heartbeat-watchdog behavior in NRT", async () => {
+test("renders production pluck, wind, site sound mix, stop, and heartbeat-watchdog behavior in NRT", async () => {
   const { testsDirectory, soundDirectory, repositoryDirectory } = soundPaths();
   const rehearsalDirectory = await freshRehearsalDirectory("sound-nrt-");
   const launcher = join(soundDirectory, "sclang-launch.psm1");
@@ -366,6 +366,7 @@ test("renders production pluck, wind, stop, and heartbeat-watchdog behavior in N
   const mainPath = join(rehearsalDirectory, "main-capture.wav");
   const watchdogPath = join(rehearsalDirectory, "watchdog-capture.wav");
   const captureCapPath = join(rehearsalDirectory, "capture-cap.wav");
+  const gainPath = join(rehearsalDirectory, "gain-capture.wav");
   const main = analyzeWav(await readFile(mainPath), [
     { name: "initial", start: 0, end: 0.4 },
     { name: "pluck", start: 0.6, end: 2.2 },
@@ -381,6 +382,11 @@ test("renders production pluck, wind, stop, and heartbeat-watchdog behavior in N
   const captureCap = analyzeWav(await readFile(captureCapPath), [
     { name: "recorded", start: 0.02, end: 0.08 },
   ]);
+  const gain = analyzeWav(await readFile(gainPath), [
+    { name: "unity", start: 0.3, end: 0.8 },
+    { name: "minus12", start: 1.3, end: 1.8 },
+    { name: "restored", start: 2.2, end: 2.7 },
+  ]);
 
   assert.deepEqual(main.format, {
     container: "RIFF",
@@ -393,12 +399,29 @@ test("renders production pluck, wind, stop, and heartbeat-watchdog behavior in N
   requireSignalBounds(watchdog, ["active", "leaseFade"], ["postLease"]);
   assert.equal(captureCap.duration, 0.1);
   assert.ok(captureCap.segments[0].peak > 1 / 32768, "bounded RecordBuf capture is empty");
+  const unityRms = gain.segments.find(({ name }) => name === "unity").rms;
+  const reducedRms = gain.segments.find(({ name }) => name === "minus12").rms;
+  const restoredRms = gain.segments.find(({ name }) => name === "restored").rms;
+  assert.ok(reducedRms > unityRms * 0.15 && reducedRms < unityRms * 0.4,
+    `-12 dB wind ratio ${reducedRms / unityRms} is outside the expected bounded range`);
+  assert.ok(restoredRms > unityRms * 0.65 && restoredRms < unityRms * 1.4,
+    `restored wind ratio ${restoredRms / unityRms} is outside the expected bounded range`);
+  gain.segments.forEach(({ name, peak }) => {
+    assert.ok(peak > 1 / 32768, `${name} gain segment is silent`);
+    assert.ok(peak <= 0.2001, `${name} gain segment exceeds ceiling`);
+  });
+  gain.channels.forEach((channel, index) => {
+    assert.ok(channel.peak > 0, `gain channel ${index} must contain signal`);
+    assert.ok(channel.peak <= 0.2001, `gain channel ${index} exceeds ceiling`);
+    assert.equal(channel.clippedSamples, 0, `gain channel ${index} contains clipped samples`);
+  });
 
   const evidence = {
     rehearsalDirectory,
     mainPath,
     watchdogPath,
     captureCapPath,
+    gainPath,
     main: {
       duration: main.duration,
       channels: main.channels,
@@ -413,6 +436,11 @@ test("renders production pluck, wind, stop, and heartbeat-watchdog behavior in N
       duration: captureCap.duration,
       channels: captureCap.channels,
       segments: captureCap.segments.map(({ name, peak, rms }) => ({ name, peak, rms })),
+    },
+    gain: {
+      duration: gain.duration,
+      channels: gain.channels,
+      segments: gain.segments.map(({ name, peak, rms }) => ({ name, peak, rms })),
     },
   };
   console.log(`NRT_EVIDENCE ${JSON.stringify(evidence)}`);

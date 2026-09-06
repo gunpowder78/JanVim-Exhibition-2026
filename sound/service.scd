@@ -1,6 +1,7 @@
 (
 var argv, session, mode, durationText, duration, capturePath, hardwareOutput, argumentError;
 var flockIngress = false;
+var windGain = 1.0, instrumentGain = 1.0;
 var finiteFloat, validSession, validDurationText, jsonString, emit;
 var emitReady, emitEvent, emitOwnershipCheckFailure, emitStats, emitComplete;
 var completeEmitted = false, readyEmitted = false;
@@ -446,7 +447,8 @@ processAction = { |action|
                         \outBus, voiceBus.index,
                         \midi, action.at(\midi),
                         \motion, action.at(\motion),
-                        \pan, action.at(\pan)
+                        \pan, action.at(\pan),
+                        \gain, instrumentGain
                     ]);
                     livePlucks = livePlucks + 1;
                     maxPlucks = maxPlucks.max(livePlucks);
@@ -467,7 +469,8 @@ processAction = { |action|
                         var node = Synth.before(mixer, \jvWind, [
                             \outBus, voiceBus.index,
                             \energy, action.at(\energy),
-                            \pan, action.at(\pan)
+                            \pan, action.at(\pan),
+                            \gain, windGain
                         ]);
                         windSynth = node;
                         windNodes = windNodes.add(node);
@@ -479,13 +482,19 @@ processAction = { |action|
                         };
                     };
                 } {
-                    windSynth.set(\energy, action.at(\energy), \pan, action.at(\pan));
+                    windSynth.set(\energy, action.at(\energy), \pan, action.at(\pan), \gain, windGain);
                 };
             },
             \windMute, {
                 // The existing SynthDef gate has a 0.3s release. Keep the node
                 // owned until onFree, but allow a fresh live to use a new seat.
                 windSynth !? { windSynth.set(\gate, 0); windSynth = nil };
+            },
+            \siteMix, {
+                windGain = action.at(\windGainDb).dbamp;
+                instrumentGain = action.at(\instrumentGainDb).dbamp;
+                windNodes.do { |node| node.set(\gain, windGain) };
+                pluckNodes.do { |node| node.set(\gain, instrumentGain) };
             },
             \stop, { beginStop.value(action.at(\reason).asString, true) }
         );
@@ -498,7 +507,8 @@ installOsc = {
         "/janvim/sound/v1/heartbeat",
         "/janvim/sound/v1/cursor",
         "/janvim/sound/v1/flock",
-        "/janvim/sound/v1/stop"
+        "/janvim/sound/v1/stop",
+        "/janvim/sound/v1/site-mix"
     ];
     if(flockIngress) {
         paths = paths ++ ["/janvim/sound/v1/flock-live", "/janvim/sound/v1/flock-mute"];

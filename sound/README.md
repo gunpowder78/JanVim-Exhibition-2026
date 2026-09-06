@@ -4,6 +4,8 @@
 `-Input RealCursor -FlockIngress`（Node `--input real-cursor --flock-input enabled`）启用。
 当次 READY、私有 `flock-input.json`、Stop 规则及验证限制见
 [鸟群入口 v1 交接](../docs/operations/2026-09-05-flock-ingress-v1-handoff.md)。
+Site Mix v2 的双仓源码状态、新候选身份、验证边界与下一轮人工事项见
+[接手 agent 同步报告](../docs/operations/2026-09-06-site-sound-mix-v2-agent-sync.md)。
 默认仍关闭；synthetic producer 的内部 PCM 证据不等于见山真实 GPU 或人工联合听音验收。
 
 `feat/sound-real-cursor` 已接入可选真实逻辑光标输入；人工联动听音仍待确认。
@@ -32,6 +34,38 @@ N1 修正：语言进程在 READY 后消失、但没有发送 `SOUND_COMPLETE` �
 绑定一个控制器，经实际 Lua 观察器、生产 Bridge/client/listener/sender 接入，
 不运行模拟时间线。鸟群候选已接入冻结 v1 TCP 入口，见山实际生产端联合验收仍待完成。
 鲸鸣、经典电子音色、宇宙洪荒声场和热噪等方向只做备忘，不在此次实现中。
+
+## 本机 Site Mix v2
+
+有人值守的联合候选把两条声路作为独立 stem：
+
+- `WIND`：由真实《见山》鸟群特征驱动的外部风声。
+- `INSTRUMENT`：JanVim 光标动作触发的乐器声。
+
+两项增益都是 `-24..+6 dB` 的整数。JanVim 操作条每次点击 `-` / `+` 调整 `1 dB`；
+《见山》在兼容的 v2 连接 Ready 且 Debug 开启时，以 `ArrowDown` / `ArrowUp` 调整同一个
+`WIND`。调整先自动保存，成功后才立即应用；没有 Save 按钮。旧 v1 鸟群生产端仍能发送
+原有遥测，但不能请求调音。
+
+唯一权威文件是：
+
+```text
+D:\VirtualData\JanVim-Exhibition-Rehearsals\site-config\sound-mix-v1.json
+```
+
+规范 schema 为一行 UTF-8 JSON（末尾 LF）：
+
+```json
+{"schema":1,"windGainDb":0,"instrumentGainDb":0}
+```
+
+文件缺失时，两项从 `0 dB` 启动，第一次调节会创建文件。无效文件、无效目录或写入失败不会
+覆盖现有对象，运行时保持最后确认值并报告 `SAVE ERR`。这份配置不含 token 或内容身份，
+由 JanVim 串行、原子写入，对本机所有节目和以后新建的声音会话统一生效。
+
+回退时先 Stop Show 并确认声音进程完全结束，再把该文件改名或移走留档；下一轮全新会话会
+恢复两项 `0 dB`。不要修改 HP 保底、安全模板、内容 manifest、Windows 系统音量或《见山》
+配置来实现回退。
 
 无需打开 SuperCollider IDE，也不需要新增依赖、ASIO 驱动、全局插件或 GUI。
 不要使用旧测试脚本代替本候选。本候选不启动 JanVim 或副屏界面。
@@ -100,10 +134,20 @@ pwsh -NoProfile -File 'D:\github\JanVim-Exhibition-2026\.worktrees\sound-minimal
 | `/janvim/sound/v1/heartbeat` | 无 | 维持运行租约，不发声 |
 | `/janvim/sound/v1/cursor` | x、y、motion，float32 | 拨弦，至多 8 Hz |
 | `/janvim/sound/v1/flock` | energy、centroidX，float32 | 风声变化，至多 20 Hz |
+| `/janvim/sound/v1/site-mix` | windGainDb、instrumentGainDb，float32 | 应用已保存的完整两路增益；不续租 |
 | `/janvim/sound/v1/stop` | 无 | 终止会话并共同淡出 |
 
 特征必须有限，随后限制在 `[0,1]`；拒绝错误字段、过时/超前消息、旧序号或错误会话。
 限频直接丢弃，不积压补播。只有合法 start / heartbeat 续租。
+
+`site-mix` 只在 Start 之后、Stop 之前接收，要求两项有限且在 `-24..+6` 内。它与 cursor/flock
+共用唯一 OSC sender 的 session 与严格递增序号，但不能续租、绕过 Stop 或开启硬件输出。
+
+鸟群 TCP descriptor 为 `jianshan-flock-ndjson-v2` 时，attach ACK 带初始 `gainDb` 与
+`saved|save-error`，并允许严格的 `adjust-wind-gain` / `wind-gain` 请求回复。attach 后的鸟群
+数据仍是冻结的 version 1 `flock` 帧；每轮必须使用全新的 SessionFile、runRoot 和 descriptor，
+不得读取或输出 token。完整现场操作见
+[联合试听操作卡](../docs/operations/2026-09-06-joint-rehearsal-quickstart.md)。
 
 SC 会把收到的 OSC `s` 解码为 Symbol；接收边界将会话 Symbol 归一为 String 后再交给策略，
 不会把其他错误参数类型强制转成合法会话。参见 [SC OSC 类型说明](https://doc.sccode.org/Guides/OSC_communication.html)。

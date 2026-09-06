@@ -69,6 +69,34 @@ try {
     assertEqual.value(snapshot.at(\lastSeq), 1, "invalid packets must not advance sequence");
     assertEqual.value(snapshot.at(\rejected), 16, "each invalid packet must be counted");
 
+    // Site mix is a full persisted pair, admitted only while running, and never renews the lease.
+    p = factory.value(session);
+    assertNil.value(p.at(\handle).value([
+        "/janvim/sound/v1/site-mix", session, 1, 110.0, -6.0, 3.0
+    ], 110.0), "site mix before Start must be rejected");
+    p.at(\handle).value(["/janvim/sound/v1/start", session, 1, 110.0], 110.0);
+    action = p.at(\handle).value([
+        "/janvim/sound/v1/site-mix", session, 2, 110.0, -6.0, 3.0
+    ], 110.0);
+    assertEqual.value(action.at(\type), \siteMix, "site mix admitted");
+    assertNear.value(action.at(\windGainDb), -6.0, 0.000001, "wind gain preserved");
+    assertNear.value(action.at(\instrumentGainDb), 3.0, 0.000001, "instrument gain preserved");
+    [
+        ["/janvim/sound/v1/site-mix", session, 3, 110.0, -6.0],
+        ["/janvim/sound/v1/site-mix", session, 3, 110.0, -6, 3.0],
+        ["/janvim/sound/v1/site-mix", session, 3, 110.0, nan, 3.0],
+        ["/janvim/sound/v1/site-mix", session, 3, 110.0, -24.001, 3.0],
+        ["/janvim/sound/v1/site-mix", session, 3, 110.0, -6.0, 6.001]
+    ].do { |message|
+        assertNil.value(p.at(\handle).value(message, 110.0), "malformed site mix rejected")
+    };
+    assertEqual.value(p.at(\snapshot).value.at(\lastSeq), 2, "rejected site mix leaves sequence unchanged");
+    action = p.at(\tick).value(112.0);
+    assertEqual.value(action.at(\type), \stop, "site mix cannot renew heartbeat lease");
+    assertNil.value(p.at(\handle).value([
+        "/janvim/sound/v1/site-mix", session, 3, 112.0, 0.0, 0.0
+    ], 112.0), "site mix after Stop must be rejected");
+
     // Stale/future boundaries are inclusive; duplicates and out-of-order packets are rejected.
     p = factory.value(session);
     p.at(\handle).value(["/janvim/sound/v1/start", session, 1, 20.0], 20.0);
