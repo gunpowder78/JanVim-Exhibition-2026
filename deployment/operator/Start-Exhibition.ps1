@@ -110,6 +110,46 @@ function Stop-DeploymentStartedChild {
     }
 }
 
+function Get-DeploymentControllerIdentity {
+    param(
+        [Parameter(Mandatory = $true)] $LeaseController,
+        [Parameter(Mandatory = $true)][string] $ExpectedExecutable
+    )
+    $names = @($LeaseController.PSObject.Properties.Name)
+    if ($names.Count -ne 2 -or 'pid' -cnotin $names -or 'startedAtUtc' -cnotin $names) {
+        throw 'show-controller-identity-invalid'
+    }
+    if (
+        ($LeaseController.pid -isnot [int] -and $LeaseController.pid -isnot [long]) -or
+        $LeaseController.pid -lt 1 -or $LeaseController.pid -gt [int]::MaxValue -or
+        $LeaseController.startedAtUtc -isnot [string] -or
+        $LeaseController.startedAtUtc -cnotmatch '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$'
+    ) { throw 'show-controller-identity-invalid' }
+
+    $candidate = $null
+    try {
+        $leaseStart = [DateTimeOffset]::ParseExact(
+            $LeaseController.startedAtUtc, "yyyy-MM-dd'T'HH:mm:ss.fff'Z'",
+            [Globalization.CultureInfo]::InvariantCulture,
+            ([Globalization.DateTimeStyles]::AssumeUniversal -bor [Globalization.DateTimeStyles]::AdjustToUniversal)
+        )
+        $candidate = [Diagnostics.Process]::GetProcessById([int]$LeaseController.pid)
+        $actual = Get-DeploymentProcessIdentity -Process $candidate -ExpectedExecutable $ExpectedExecutable
+        $actualStart = [DateTimeOffset]::ParseExact(
+            $actual.startedAtUtc, 'o', [Globalization.CultureInfo]::InvariantCulture,
+            [Globalization.DateTimeStyles]::RoundtripKind
+        )
+        # Electron's controllerStartedAtUtc floors creation time to milliseconds.
+        # Verify that contract, then retain the OS identity at its full precision.
+        if ($actualStart.ToUnixTimeMilliseconds() -ne $leaseStart.ToUnixTimeMilliseconds()) {
+            throw 'show-controller-identity-invalid'
+        }
+        return $actual
+    }
+    catch { throw 'show-controller-identity-invalid' }
+    finally { if ($null -ne $candidate) { $candidate.Dispose() } }
+}
+
 function Wait-DeploymentFile {
     param(
         [Parameter(Mandatory = $true)][string] $Path,
@@ -308,18 +348,9 @@ try {
     [void](Wait-DeploymentFile -Path $leasePath -TimeoutMs 45000 -MaximumBytes 4096 -Reason 'show-run-lease')
     $lease = Read-DeploymentJson -Path $leasePath -MaximumBytes 4096 -Reason 'show-run-lease'
     if ($lease.schema -ne 1 -or $null -eq $lease.controller) { throw 'show-run-lease-invalid' }
-    $controllerProcess = [Diagnostics.Process]::GetProcessById([int]$lease.controller.pid)
-    try {
-        $actualController = Get-DeploymentProcessIdentity -Process $controllerProcess
-    }
-    finally {
-        $controllerProcess.Dispose()
-    }
-    $controllerIdentity = [pscustomobject][ordered]@{
-        pid = [int]$lease.controller.pid
-        startedAtUtc = [string]$lease.controller.startedAtUtc
-        executable = $actualController.executable
-    }
+    $controllerIdentity = Get-DeploymentControllerIdentity `
+        -LeaseController $lease.controller `
+        -ExpectedExecutable (Join-Path $packageRoot 'app\node_modules\electron\dist\electron.exe')
     if (-not (Test-DeploymentProcessIdentity -Identity $controllerIdentity)) {
         throw 'show-controller-identity-invalid'
     }
