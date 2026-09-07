@@ -25,6 +25,8 @@ not represent the secondary screen as a JanVim Float.
 
 ## Authoritative documents
 
+- [Mini PC development migration handoff](docs/operations/2026-09-07-mini-pc-development-handoff.md)
+- [Mini PC Codex takeover task](docs/operations/2026-09-07-mini-pc-takeover-prompt.md)
 - [Repository and replay decision](docs/adr/0001-separate-show-repository-and-deterministic-replay.md)
 - [Dual-projector design](docs/specs/2026-08-28-dual-projector-generative-performance-design.md)
 - [Four-day delivery plan](docs/plans/2026-08-28-four-day-dual-projector-delivery.md)
