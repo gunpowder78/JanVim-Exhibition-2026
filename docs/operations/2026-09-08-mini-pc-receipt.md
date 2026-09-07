@@ -2,7 +2,7 @@
 
 接管于 2026-09-07 开始，2026-09-08（Asia/Shanghai）汇总。目标机为 PELADN WO4，Windows 11 Pro x64 / 10.0.26100。证据目录沿用接管日期：`D:\github\exhibition-mini-pc-receipt-20260907`。
 
-当前状态：`MINI_PC_SOURCE_AND_ASSET_HANDOFF_READY`。两个源码工作树、所需运行资产和开发工具已接收，按交接第 13 节完成开发接管。READY 发布后已完成 Realtek WASAPI 适配及实际静音服务运行，修正启动器测试的计时观察方式，并为新包加入完整 Electron 门禁。最新全量执行 1,232 项，1,231 通过、1 项因 Windows 临时文件重命名 EPERM 失败；随后整份租约测试 28/28 通过，不能将全量命令改记为成功。独立候选包已生成并核验，尚未安装。本标记不表示测试全绿、部署包可开演或硬件验收通过；现场状态继续为 `awaiting-mini-pc-attended-acceptance`。最新结果及包身份见末节；下文保留各阶段原始失败和限制。
+当前状态：`MINI_PC_SOURCE_AND_ASSET_HANDOFF_READY`。两个源码工作树、所需运行资产和开发工具已接收，按交接第 13 节完成开发接管。READY 发布后已完成 Realtek WASAPI 适配、实际静音服务运行、四轮有人值守启动诊断、长路径系统修复、声音连接预算修复及运行后缓存门禁。候选 5 已安装到固定路径并通过只读部署验证；最新完整测试为 **1,289/1,289 passed**。本标记不表示可听声音、GUI、相机或物理投影验收通过；现场状态继续为 `awaiting-mini-pc-attended-acceptance`。最新结果及包身份见末节；下文保留此前全量测试 EPERM、四次启动失败和其他阶段性限制，不用后来的成功覆盖原始失败证据。
 
 ## 两仓身份与保全
 
@@ -156,4 +156,63 @@ Electron 门禁先运行失败测试，再加入锁定官方 ZIP 的全部 73 �
 
 builder exit 0；包目录的 **9,134** payload 文件通过 manifest 核验；另外独立打开 ZIP，**9,135** 个文件（含 manifest）集合、大小及逐项 SHA 全部匹配，Electron 为 44.0.0 / 73 文件。证据为 `build-new-package.log`、`build-new-package-result.json`、`new-package-zip-verification.json`。没有用缺失文件也能通过的旧清单作为新包完整性的唯一依据。
 
-该包是可供检查的开发候选，**尚未安装、未人工验收，全量自动门禁保留一次 EPERM 失败**；不称为可开演包，不替换最后可回退包。历史 GMK 构建/验收证据未接收及真实 symlink 覆盖不足等限制仍保留。完整接收、早期音频与最终状态分别保存在证据目录 `mini-pc-receipt.json`、`mini-pc-audio-candidate.json`、`mini-pc-final-status.json`，历史快照未覆盖。
+该包是当时可供检查的开发候选，**当时尚未安装、未人工验收，全量自动门禁保留一次 EPERM 失败**；后续候选与安装状态见下一节。历史 GMK 构建/验收证据未接收及真实 symlink 覆盖不足等限制仍保留。完整接收、早期音频与当时最终状态分别保存在证据目录 `mini-pc-receipt.json`、`mini-pc-audio-candidate.json`、`mini-pc-final-status.json`，这些历史快照未覆盖。
+
+## 03:09 夜航部署就绪，现场验收待继续
+
+用户已现场确认显示和相机正常，并授权管理员确认后启用 Windows 长路径。随后切换为夜航模式：继续代码、测试、打包、保全和安装，但不再启动会亮屏、占用相机或产生可听声音的流程。下述自动化结果没有冒充人工现场验收。
+
+### 有人值守诊断与修复
+
+固定部署的四次联合启动均保留原始失败结果，没有改记为成功：
+
+1. 首次启动发现原生《见山》子进程需要接受空参数列表；修复提交为 `a74d86e`。
+2. 第二次启动发现 Windows 原生进程身份元数据在创建后短暂不可读；加入有界身份确认及原始 `Process` 对象清理，修复提交为 `e505547`。
+3. 第三次启动发现 Electron 租约时间戳含毫秒，而 PowerShell 使用 `ParseExact('o')` 后按 ticks 比较；改为保留毫秒精度，修复提交为 `c6f7f8d2ff481a1e123e182aba7c91dc4523194e`。
+4. 第四次启动中 JanVim 已产生 `surface-ready`，但 plugin-lab 在长路径下读取 Lua 缓存报 `ENOENT`，同时声音客户端在异步读取回执期间提前耗尽 1 秒 socket 连接预算。展演在首循环前执行有界清理并退出；没有把该次启动算作循环成功。
+
+管理员脚本把 `HKLM\SYSTEM\CurrentControlSet\Control\FileSystem\LongPathsEnabled` 从 0 改为 1，退出码为 0。随后在原失败长度下重新运行 plugin-lab，0.126 秒正常退出并加载 `lazy.nvim` 与 `local:janvim-exhibition`；当前进程无需重启。提案、执行与复核见 `attended-20260908/windows-long-paths-proposal.json`、`windows-long-paths-20260907T182715974Z.json`、`windows-long-paths-verified.json`，没有请求系统重启。
+
+声音客户端现在分别给予回执读取 5 秒和 socket attach 1 秒的有限预算，避免三屏启动期间把文件读取耗时误算为网络连接耗时；回执仍失败关闭、连接仍不重试，Stop 终态不变。运行后部署验证只额外接受以下四个精确目录，并限制为最多 1,024 个文件、单文件 16 MiB、合计 64 MiB：
+
+- `app/runtime/user-root/safe-mode/cache`
+- `app/runtime/user-root/safe-mode/state`
+- `app/runtime/user-root/plugin-lab/cache`
+- `app/runtime/user-root/plugin-lab/state`
+
+额外状态仍拒绝重解析点、硬链接、私有运行文件和清单外其他路径；清单所列文件即使位于这些目录下也必须逐项匹配。builder 只允许源树中存在空状态目录，发现状态文件即停止，不会自动删除。
+
+上述修改及新的 Electron 身份锁提交为 `a90f456fe9b567e11b7c44d496846aad20e91c7e`，已推送到 `origin/feat/exhibition-mini-pc-integration`。《见山》仍为 `6d1a4577a9484092fde94308352c80ee710ed18f`，没有并行功能修改。
+
+### 夜航自动化结果
+
+| 检查 | 最新结果 |
+| --- | --- |
+| 声音客户端、运行缓存、部署包与操作脚本合并回归 | 136/136 passed |
+| Electron 身份锁及部署相关复核 | 114/114 passed |
+| `npm run typecheck` / `npm run lint` | 均 exit 0 |
+| `npm run build` | exit 0；main 为 **549,304 bytes / `77408bde85dc374ba21d011cecb088278197ae6c7785f205a58bc7130bdc8826`** |
+| 完整 `npm test -- --maxWorkers=1 --testTimeout=10000` | **66/66 文件、1,289/1,289 项通过，exit 0，1,169.90 秒** |
+
+本次完整测试没有复现上一节记录的临时文件 EPERM；上一轮失败日志仍原样保留。运行缓存门禁的独立 RED、补充 RED、102/102 回归及静态检查记录在 `runtime-state-verification.json`。声音读取预算的 RED 与 34/34 最终回归记录在 `attended-20260908/sound-connect-budget-*.log`。
+
+### 候选 5、旧包保全与固定安装
+
+候选 5 的独立构建根为 `D:\VirtualData\JanVim-Exhibition-Rehearsals\deployment-package-20260907T190046199Z-288d6993a666`，sourceCommit 为 `a90f456fe9b567e11b7c44d496846aad20e91c7e`。
+
+| 候选 5 文件 | bytes | SHA-256 |
+| --- | ---: | --- |
+| `JanVim-Exhibition-Deploy.zip` | 331610425 | `7b558f085d3811493f71e9b3b191ded745daff5c8bd573637954888c56109aa8` |
+| `JanVim-Exhibition-Deploy/package-manifest.json` | 1473637 | `2ac5eb0c80dd34185a2a747a2dbddf70e26741cf264c28cfde8d8eb6dfa974ef` |
+
+builder exit 0；包目录 9,182 个 payload 文件通过严格 manifest 核验。独立打开 ZIP 后，9,183 个文件（含 manifest）的集合、大小和逐项 SHA 全部匹配；Electron 为 44.0.0 / 73 文件。证据见 `attended-20260908/candidate-5/new-package-zip-verification.json`。
+
+安装前再次确认没有 active pointer、固定包进程或 57140/57141 listener。候选 4 当时的 9,134 个固定文件全部匹配，额外运行状态为 16 文件 / 89,184 bytes，且全部位于允许目录。候选 4 随后在同一卷整体改名保留为 `D:\github\JanVim-Exhibition-Deploy-preserved-20260907T190654029Z`；移动前后核验身份一致，没有删除旧目录内容。
+
+候选 5 复制到 `D:\github\JanVim-Exhibition-Deploy` 后，严格模式通过 9,182 个固定文件，installed 模式通过相同固定文件且额外运行状态为 0。安装记录见 `attended-20260908/candidate-5/installation-result.json`。此前原包及候选 1–3 的保留目录、原始 ZIP 和各阶段部署包均保持；没有 reset、clean、强推、自动合并或直接修补旧部署包。
+
+固定路径执行 `operator\Verify-Deployment.ps1` exit 0 并输出 `DEPLOYMENT_VERIFY_PASS`：包清单、运行状态、Electron、JanVim 固定产物、《见山》运行时、PowerShell、SuperCollider、精确 Realtek WASAPI 端点、相机存在性及 schema 2 / confirmed / production-3 三屏映射全部通过。相机检查只确认设备存在，没有打开相机；日志为 `attended-20260908/candidate-5/verify-deployment.log`。
+
+真实音频目标已确定为 `Windows WASAPI : Speakers (Realtek High Definition Audio)`，设备为 ACTIVE、默认多媒体输出、双声道 48 kHz 共享模式；没有安装 ASIO、改变默认端点或修改系统音量。Windows 播放设置中的该端点测试按钮已通过 UI Automation 调用并正常返回，设置未改变。代码层声音连接根因和长路径根因已经修复，但用户尚未对联合展演作出“实际听见”确认，因此声卡现场验收仍为待完成。
+
+明早需要用户配合的工作统一保留为：启动候选 5，确认三屏内容、相机手势和可听拨弦/风声；观察至少一个完整循环并正常 Stop，确认淡出后无复响；随后按项目规则完成三次连续物理投影循环、一次离线运行和一次强制重启恢复。当前机器记录的是三台显示器，不能据此声称两台物理投影仪验收通过。在这些结果写入物理排练记录前，状态继续为 `awaiting-mini-pc-attended-acceptance`，候选 5 不能称为可开演包。
