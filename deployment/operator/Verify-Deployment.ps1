@@ -99,6 +99,10 @@ $manifestReceipt = $manifestResult.Stdout | ConvertFrom-Json -NoEnumerate -DateK
 Add-Check -Name '部署包清单' -Passed ($manifestReceipt.status -ceq 'package-manifest-verified') `
     -Detail "$($manifestReceipt.files) 个文件，SHA-256 $($manifestReceipt.manifestSha256)"
 
+$electronRuntime = Assert-DeploymentElectronRuntime -AppRoot (Join-Path $packageRoot 'app')
+Add-Check -Name 'Electron 运行时' -Passed $true `
+    -Detail "$($electronRuntime.version)，$($electronRuntime.files) 个官方运行时文件、版本与入口完整"
+
 if (-not [string]::IsNullOrWhiteSpace($HandoffReceiptPath)) {
     if (-not [IO.Path]::IsPathFullyQualified($HandoffReceiptPath)) { throw 'handoff-receipt-invalid' }
     $receiptItem = Get-Item -LiteralPath $HandoffReceiptPath -Force

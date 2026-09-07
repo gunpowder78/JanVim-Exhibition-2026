@@ -160,6 +160,9 @@ Assert-Identity `
     -Sha256 '8cc9bb466b19fc7e7cc99d03e9df1132021fda8b01eea2624c58bb372dbef576' `
     -Reason 'node-license'
 
+Import-Module (Join-Path $source 'deployment\operator\lib\Exhibition.Deployment.psm1') -Force
+$electronRuntime = Assert-DeploymentElectronRuntime -AppRoot $source
+
 $candidateIdentities = @(
     @('jianshan-rust\jianshan.exe', 9799168, 'ac160b7eb4e34c52906b151aed441ea683ad093d89e59459b5ecb12c3055770f'),
     @('jianshan-rust\jianshan-flock-v1.toml', 6238, '510398aeff0f567bf351aa2ce025cbb6989a6865328115f726032549821a3fae'),
@@ -209,6 +212,7 @@ Copy-Item -LiteralPath $nodeLicense -Destination (Join-Path $packageRoot 'tools\
 Copy-PlainTree -Source (Join-Path $source 'deployment\operator') -Destination (Join-Path $packageRoot 'operator')
 Copy-PlainTree -Source (Join-Path $source 'deployment\config') -Destination (Join-Path $packageRoot 'config')
 Copy-PlainTree -Source (Join-Path $source 'deployment\docs') -Destination (Join-Path $packageRoot 'docs')
+[void](Assert-DeploymentElectronRuntime -AppRoot $appRoot)
 [void](New-Item -ItemType Directory -Path (Join-Path $packageRoot 'evidence'))
 
 $electronPath = Join-Path $source 'apps\controller\dist\main\electron-main.js'
@@ -221,6 +225,7 @@ $sourceEvidence = [ordered]@{
     sourceCommit = $sourceCommit
     fixedInstallRoot = $fixedInstallRoot
     electronMain = [ordered]@{ bytes = $electronItem.Length; sha256 = $electronHash }
+    electronRuntime = $electronRuntime
     jianshan = [ordered]@{ bytes = 9799168; sha256 = $candidateIdentities[0][2] }
     node = [ordered]@{ version = 'v22.23.0'; bytes = 86988616; sha256 = $expectedNodeHash }
 }
@@ -251,6 +256,7 @@ $receipt = [ordered]@{
     manifest = [ordered]@{ bytes = $manifest.manifestBytes; sha256 = $manifest.manifestSha256 }
     archive = [ordered]@{ bytes = $archiveItem.Length; sha256 = $archiveHash }
     electronMain = [ordered]@{ bytes = $electronItem.Length; sha256 = $electronHash }
+    electronRuntime = $electronRuntime
     janvimArtifact = [ordered]@{
         tag = $artifactLock.tag
         commit = $artifactLock.commit

@@ -299,6 +299,76 @@ function Read-ExhibitionSiteDefaults {
     return $value
 }
 
+function Assert-DeploymentElectronRuntime {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string] $AppRoot)
+
+    $app = Resolve-DeploymentAbsolutePath -Path $AppRoot -Reason 'electron-app-root'
+    $inventory = (Read-DeploymentBoundedJson `
+        -Path (Join-Path $PSScriptRoot '..\..\config\electron-runtime.lock.json') `
+        -MaximumBytes 32768 -Reason 'electron-runtime-lock').Value
+    Assert-DeploymentExactProperties -Value $inventory `
+        -Expected @('schema', 'version', 'platform', 'archive', 'files') -Reason 'electron-runtime-lock'
+    if (
+        -not (Test-DeploymentInteger $inventory.schema) -or $inventory.schema -ne 1 -or
+        $inventory.version -isnot [string] -or $inventory.version -cne '44.0.0' -or
+        $inventory.platform -isnot [string] -or $inventory.platform -cne 'win32-x64' -or
+        $inventory.files -isnot [array] -or $inventory.files.Count -ne 73
+    ) { throw 'electron-runtime-lock-invalid' }
+    $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($entry in $inventory.files) {
+        Assert-DeploymentExactProperties -Value $entry -Expected @('path', 'bytes', 'sha256') -Reason 'electron-runtime-lock'
+        if (
+            $entry.path -isnot [string] -or $entry.path.Length -gt 256 -or
+            $entry.path -cnotmatch '^[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*$' -or
+            @($entry.path.Split('/') | Where-Object { $_ -in @('.', '..') }).Count -ne 0 -or
+            -not $seen.Add($entry.path) -or
+            -not (Test-DeploymentInteger $entry.bytes) -or $entry.bytes -lt 0 -or $entry.bytes -gt 268435456 -or
+            $entry.sha256 -isnot [string] -or $entry.sha256 -cnotmatch $script:HashPattern
+        ) { throw 'electron-runtime-lock-invalid' }
+    }
+    foreach ($directory in @($app, (Join-Path $app 'node_modules'), (Join-Path $app 'node_modules\electron'))) {
+        if (-not (Test-Path -LiteralPath $directory -PathType Container)) { throw 'electron-runtime-directory-missing' }
+        if (((Get-Item -LiteralPath $directory -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'electron-runtime-reparse-rejected'
+        }
+    }
+    $runtime = Join-Path $app 'node_modules\electron'
+    $relativeFiles = @('path.txt', 'package.json') + @($inventory.files | ForEach-Object { 'dist/' + $_.path })
+    foreach ($relative in $relativeFiles) {
+        $file = Join-Path $runtime $relative
+        if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "electron-runtime-file-missing:$relative" }
+        $segments = $relative.Split('/')
+        $candidate = $runtime
+        foreach ($segment in $segments) {
+            $candidate = Join-Path $candidate $segment
+            if (((Get-Item -LiteralPath $candidate -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw 'electron-runtime-reparse-rejected'
+            }
+        }
+    }
+    $launcher = Join-Path $runtime 'path.txt'
+    if ((Get-Item -LiteralPath $launcher).Length -ne 12 -or [IO.File]::ReadAllText($launcher) -cne 'electron.exe') {
+        throw 'electron-runtime-launcher-invalid'
+    }
+    $package = (Read-DeploymentBoundedJson -Path (Join-Path $runtime 'package.json') `
+        -MaximumBytes 65536 -Reason 'electron-runtime-package').Value
+    $versionPath = Join-Path $runtime 'dist\version'
+    if (
+        $package.version -isnot [string] -or $package.version -cne $inventory.version -or
+        (Get-Item -LiteralPath $versionPath).Length -ne 6 -or
+        [IO.File]::ReadAllText($versionPath) -cne $inventory.version
+    ) { throw 'electron-runtime-version-invalid' }
+    foreach ($entry in $inventory.files) {
+        $file = Join-Path $runtime ('dist/' + $entry.path)
+        if (
+            (Get-Item -LiteralPath $file).Length -ne $entry.bytes -or
+            (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant() -cne $entry.sha256
+        ) { throw ('electron-runtime-identity-mismatch:dist/' + $entry.path) }
+    }
+    return [pscustomobject]@{ version = $inventory.version; files = $inventory.files.Count }
+}
+
 function Assert-DeploymentProcessIdentityRecord {
     param($Value)
 
@@ -555,6 +625,7 @@ function Stop-DeploymentProcessExact {
 }
 
 Export-ModuleMember -Function @(
+    'Assert-DeploymentElectronRuntime',
     'Read-ExhibitionSiteDefaults',
     'Read-ProductionDisplayMap',
     'New-ExhibitionLaunchPlan',
