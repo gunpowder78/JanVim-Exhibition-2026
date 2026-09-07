@@ -92,12 +92,14 @@ Add-Check -Name '包内 Node.js' -Passed (
 
 $manifestResult = Invoke-Captured `
     -FilePath $node `
-    -Arguments @($manifestTool, 'verify', '--root', $packageRoot) `
+    -Arguments @($manifestTool, 'verify-installed', '--root', $packageRoot) `
     -TimeoutMs 60000
 if ($manifestResult.ExitCode -ne 0) { throw 'deployment-package-manifest-invalid' }
 $manifestReceipt = $manifestResult.Stdout | ConvertFrom-Json -NoEnumerate -DateKind String
-Add-Check -Name '部署包清单' -Passed ($manifestReceipt.status -ceq 'package-manifest-verified') `
-    -Detail "$($manifestReceipt.files) 个文件，SHA-256 $($manifestReceipt.manifestSha256)"
+Add-Check -Name '部署包清单' -Passed ($manifestReceipt.status -ceq 'package-installed-payload-verified') `
+    -Detail "$($manifestReceipt.immutableFiles) 个固定文件，清单 SHA-256 $($manifestReceipt.manifestSha256)"
+Add-Check -Name '运行缓存与状态' -Passed $true `
+    -Detail "$($manifestReceipt.runtimeStateFiles) 个额外运行文件，$($manifestReceipt.runtimeStateBytes) 字节；路径、类型与限额通过"
 
 $electronRuntime = Assert-DeploymentElectronRuntime -AppRoot (Join-Path $packageRoot 'app')
 Add-Check -Name 'Electron 运行时' -Passed $true `
@@ -128,8 +130,8 @@ Add-Check -Name 'JanVim 固定产物' -Passed ($runtimeVerification.ExitCode -eq
 
 $electron = Join-Path $packageRoot 'app\apps\controller\dist\main\electron-main.js'
 Assert-FileIdentity `
-    -Path $electron -Bytes 549054 `
-    -Sha256 'db7901a4a34eb1ecc07d151b2366c4d1ece6f17e239a8c3d9dccb9dd47b7add8' `
+    -Path $electron -Bytes 549304 `
+    -Sha256 '77408bde85dc374ba21d011cecb088278197ae6c7785f205a58bc7130bdc8826' `
     -Label 'electron-main'
 Add-Check -Name '控制器 Electron bundle' -Passed $true -Detail '字节数与 SHA-256 匹配'
 

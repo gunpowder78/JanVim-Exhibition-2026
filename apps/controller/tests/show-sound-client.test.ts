@@ -269,6 +269,26 @@ describe("optional Show sound client", () => {
     clock.advance(1); await until(() => p.sockets[0]!.destroyed);
     expect(clock.jobs.size).toBe(0); client.start(); expect(diagnostics).toHaveLength(1);
   });
+  it("does not spend the socket attach budget while the receipt read is pending", async () => {
+    const p = await peer();
+    const { client, clock, diagnostics } = setup(p.root);
+    client.start();
+    clock.advance(1000);
+    await until(() => p.frames.some(frame => frame.command === "heartbeat"));
+    expect(p.frames[0]?.command).toBe("attach");
+    expect(diagnostics).toEqual([]);
+    expect(clock.jobs.size).toBe(1);
+  });
+  it("bounds a pending receipt read separately from the socket attach", async () => {
+    const p = await peer();
+    const { client, clock, diagnostics } = setup(p.root);
+    client.start();
+    clock.advance(5000);
+    await until(() => diagnostics.length === 1);
+    expect(diagnostics).toEqual(["sound-receipt-timeout"]);
+    expect(p.frames).toEqual([]);
+    expect(clock.jobs.size).toBe(0);
+  });
   it("maps actual movement, silences viewport changes, limits notes to 8 Hz and resets its baseline", async () => {
     const p = await peer(); const { client, clock } = setup(p.root); client.start();
     await until(() => p.frames.length === 2);

@@ -19,6 +19,23 @@ const MAX_PAYLOAD_FILES = 100_000;
 const MAX_TREE_ENTRIES = 200_000;
 const MAX_PATH_BYTES = 4_096;
 const HASH_PATTERN = /^[0-9a-f]{64}$/u;
+const RUNTIME_STATE_ROOTS = [
+  "app/runtime/user-root/safe-mode/cache",
+  "app/runtime/user-root/safe-mode/state",
+  "app/runtime/user-root/plugin-lab/cache",
+  "app/runtime/user-root/plugin-lab/state",
+];
+const MAX_RUNTIME_STATE_FILES = 1_024;
+const MAX_RUNTIME_STATE_FILE_BYTES = 16 * 1024 * 1024;
+const MAX_RUNTIME_STATE_BYTES = 64 * 1024 * 1024;
+const PRIVATE_DIRECTORY_NAMES = new Set([".git", ".worktrees", ".operator", ".superpowers"]);
+const PRIVATE_RUNTIME_NAMES = new Set([
+  "active-deployment.json", "flock-input.json", "run-lease.json",
+  "control.json", "ready.json", "session.json", "summary.json",
+]);
+const PRIVATE_RUN_ROOT_PATTERN = /^(?:deployment|deployment-package|display-config|joint-session|joint-show|joint-sound|joint-validate|sound)-\d{8}T\d{9}Z-[0-9a-f]{12}$/iu;
+const PRIVATE_JSON_STEM_PATTERN = /(?:^|[._-])(?:token|descriptor)(?:v[0-9]+)?(?=$|[._-])|(?<!property)(?:token|descriptor)(?:v[0-9]+)?$/iu;
+const PRIVATE_CAMEL_JSON_STEM_PATTERN = /(?<!Property)(?:Token|Descriptor)(?:V[0-9]+)?(?=$|[._-]|[A-Z])/u;
 
 function fail(reason) {
   throw new Error(reason);
@@ -79,7 +96,29 @@ function validateManifestPath(path) {
   return path;
 }
 
-function payloadFiles(root) {
+function isRuntimeStatePath(path) {
+  const folded = path.toLowerCase();
+  return RUNTIME_STATE_ROOTS.some((stateRoot) => folded.startsWith(`${stateRoot}/`));
+}
+
+function assertRuntimeStatePathAllowed(path) {
+  const segments = path.split("/");
+  if (segments.some((segment) =>
+    PRIVATE_DIRECTORY_NAMES.has(segment.toLowerCase()) || PRIVATE_RUN_ROOT_PATTERN.test(segment))) {
+    fail("package-runtime-state-private-path");
+  }
+  const name = segments.at(-1);
+  const jsonStem = name.toLowerCase().endsWith(".json") ? name.slice(0, -5) : null;
+  if (
+    PRIVATE_RUNTIME_NAMES.has(name.toLowerCase()) ||
+    /^jianshan-live(?:-.*)?\.toml$/iu.test(name) ||
+    (jsonStem !== null && (
+      PRIVATE_JSON_STEM_PATTERN.test(jsonStem) || PRIVATE_CAMEL_JSON_STEM_PATTERN.test(jsonStem)
+    ))
+  ) fail("package-runtime-state-private-path");
+}
+
+function payloadFiles(root, installed = false) {
   const files = [];
   const pending = [root];
   let treeEntries = 0;
@@ -95,14 +134,20 @@ function payloadFiles(root) {
       const status = lstatSync(absolute);
       if (status.isSymbolicLink()) fail("package-reparse-rejected");
       if (status.isDirectory()) {
+        const path = packagePath(root, absolute);
+        if (installed && isRuntimeStatePath(path)) {
+          assertRuntimeStatePathAllowed(validateManifestPath(path));
+        }
         pending.push(absolute);
         continue;
       }
       if (!status.isFile()) fail("package-file-type-invalid");
       const path = packagePath(root, absolute);
       if (path === MANIFEST_NAME) continue;
-      files.push({ absolute, path: validateManifestPath(path), bytes: status.size });
-      if (files.length > MAX_PAYLOAD_FILES) fail("package-file-count-exceeded");
+      files.push({ absolute, path: validateManifestPath(path), bytes: status.size, links: status.nlink });
+      if (files.length > MAX_PAYLOAD_FILES + (installed ? MAX_RUNTIME_STATE_FILES : 0)) {
+        fail("package-file-count-exceeded");
+      }
     }
   }
   files.sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
@@ -126,7 +171,10 @@ function hashBytes(bytes) {
 }
 
 async function describePayload(root) {
-  const files = payloadFiles(root);
+  return describeFiles(payloadFiles(root));
+}
+
+async function describeFiles(files) {
   const entries = [];
   for (const file of files) {
     const sha256 = await hashFile(file.absolute);
@@ -186,7 +234,12 @@ export async function createPackageManifest(rootPath) {
     if (error?.message === "package-manifest-already-exists") throw error;
     if (error?.code !== "ENOENT") throw error;
   }
-  const files = await describePayload(root);
+  const payload = payloadFiles(root);
+  if (payload.some((file) =>
+    isRuntimeStatePath(file.path) || RUNTIME_STATE_ROOTS.includes(file.path.toLowerCase()))) {
+    fail("package-runtime-state-not-clean");
+  }
+  const files = await describeFiles(payload);
   const bytes = Buffer.from(`${JSON.stringify({ schema: 1, files })}\n`, "utf8");
   if (bytes.byteLength > MAX_MANIFEST_BYTES) fail("package-manifest-too-large");
   const temporary = join(root, `.${MANIFEST_NAME}-${randomBytes(8).toString("hex")}.tmp`);
@@ -204,16 +257,7 @@ export async function verifyPackageManifest(rootPath) {
   const root = normalizeRoot(rootPath);
   const manifest = readManifest(root);
   const actual = await describePayload(root);
-  if (actual.length !== manifest.value.files.length) fail("package-payload-set-mismatch");
-  for (let index = 0; index < actual.length; index += 1) {
-    const expected = manifest.value.files[index];
-    const observed = actual[index];
-    if (
-      observed.path !== expected.path ||
-      observed.bytes !== expected.bytes ||
-      observed.sha256 !== expected.sha256
-    ) fail("package-payload-identity-mismatch");
-  }
+  assertPayloadMatches(actual, manifest.value.files);
   return {
     status: "package-manifest-verified",
     files: actual.length,
@@ -222,10 +266,61 @@ export async function verifyPackageManifest(rootPath) {
   };
 }
 
+function assertPayloadMatches(actual, expectedFiles) {
+  if (actual.length !== expectedFiles.length) fail("package-payload-set-mismatch");
+  for (let index = 0; index < actual.length; index += 1) {
+    const expected = expectedFiles[index];
+    const observed = actual[index];
+    if (
+      observed.path !== expected.path ||
+      observed.bytes !== expected.bytes ||
+      observed.sha256 !== expected.sha256
+    ) fail("package-payload-identity-mismatch");
+  }
+}
+
+export async function verifyInstalledPackageManifest(rootPath) {
+  const root = normalizeRoot(rootPath);
+  const manifest = readManifest(root);
+  const expectedPaths = new Set(manifest.value.files.map((entry) => entry.path));
+  const immutable = [];
+  let runtimeStateFiles = 0;
+  let runtimeStateBytes = 0;
+  // Inspect the entire tree, including state directories, before exempting any extra file.
+  for (const file of payloadFiles(root, true)) {
+    if (expectedPaths.has(file.path)) {
+      immutable.push(file);
+      continue;
+    }
+    if (!isRuntimeStatePath(file.path)) fail("package-payload-set-mismatch");
+    assertRuntimeStatePathAllowed(file.path);
+    if (file.links !== 1) fail("package-runtime-state-hardlink-rejected");
+    if (!Number.isSafeInteger(file.bytes) || file.bytes < 0 || file.bytes > MAX_RUNTIME_STATE_FILE_BYTES) {
+      fail("package-runtime-state-file-size-exceeded");
+    }
+    runtimeStateFiles += 1;
+    runtimeStateBytes += file.bytes;
+    if (runtimeStateFiles > MAX_RUNTIME_STATE_FILES) fail("package-runtime-state-count-exceeded");
+    if (runtimeStateBytes > MAX_RUNTIME_STATE_BYTES) fail("package-runtime-state-bytes-exceeded");
+  }
+  // A manifest entry remains immutable even if its path is beneath a state root.
+  if (immutable.length !== manifest.value.files.length) fail("package-payload-set-mismatch");
+  const actual = await describeFiles(immutable);
+  assertPayloadMatches(actual, manifest.value.files);
+  return {
+    status: "package-installed-payload-verified",
+    immutableFiles: actual.length,
+    runtimeStateFiles,
+    runtimeStateBytes,
+    manifestBytes: manifest.bytes.byteLength,
+    manifestSha256: hashBytes(manifest.bytes),
+  };
+}
+
 function parseCli(argv) {
   if (
     argv.length !== 3 ||
-    !["create", "verify"].includes(argv[0]) ||
+    !["create", "verify", "verify-installed"].includes(argv[0]) ||
     argv[1] !== "--root" ||
     typeof argv[2] !== "string" || argv[2].length === 0
   ) fail("package-manifest-arguments-invalid");
@@ -236,7 +331,9 @@ async function main() {
   const options = parseCli(process.argv.slice(2));
   const result = options.command === "create"
     ? await createPackageManifest(options.root)
-    : await verifyPackageManifest(options.root);
+    : options.command === "verify-installed"
+      ? await verifyInstalledPackageManifest(options.root)
+      : await verifyPackageManifest(options.root);
   process.stdout.write(`${JSON.stringify(result)}\n`);
 }
 

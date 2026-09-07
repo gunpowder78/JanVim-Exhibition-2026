@@ -123,6 +123,35 @@ function Assert-Identity {
     }
 }
 
+function Assert-RuntimeStateClean {
+    param([Parameter(Mandatory = $true)][string] $SourceRoot)
+
+    foreach ($profile in @('safe-mode', 'plugin-lab')) {
+        foreach ($kind in @('cache', 'state')) {
+            $directory = $SourceRoot
+            $present = $true
+            foreach ($segment in @('runtime', 'user-root', $profile, $kind)) {
+                $directory = Join-Path $directory $segment
+                if (-not (Test-Path -LiteralPath $directory)) { $present = $false; break }
+                [void](Assert-PlainItem -Path $directory -Kind Container -Reason 'runtime-state')
+            }
+            if (-not $present) { continue }
+            $pending = [Collections.Generic.Stack[string]]::new()
+            $pending.Push($directory)
+            $entries = 0
+            while ($pending.Count -gt 0) {
+                foreach ($item in Get-ChildItem -LiteralPath $pending.Pop() -Force) {
+                    $entries++
+                    if ($entries -gt 2048) { throw 'runtime-state-tree-count-exceeded' }
+                    if (-not $item.PSIsContainer) { throw 'package-runtime-state-not-clean' }
+                    [void](Assert-PlainItem -Path $item.FullName -Kind Container -Reason 'runtime-state')
+                    $pending.Push($item.FullName)
+                }
+            }
+        }
+    }
+}
+
 $source = Resolve-BuilderPath -Path $SourceRoot -Reason 'source-root'
 $candidate = Resolve-BuilderPath -Path $JianShanCandidateRoot -Reason 'jianshan-candidate'
 $node = Resolve-BuilderPath -Path $NodeExecutable -Reason 'node'
@@ -130,6 +159,7 @@ $output = Resolve-BuilderPath -Path $OutputParent -Reason 'output-parent'
 [void](Assert-PlainItem -Path $source -Kind Container -Reason 'source-root')
 [void](Assert-PlainItem -Path $candidate -Kind Container -Reason 'jianshan-candidate')
 [void](Assert-PlainItem -Path $output -Kind Container -Reason 'output-parent')
+Assert-RuntimeStateClean -SourceRoot $source
 $script:AllowedWorkspaceLinks.Add(
     (Join-Path $source 'node_modules\@janvim-exhibition\controller'),
     (Join-Path $source 'apps\controller')
