@@ -2,7 +2,7 @@
 
 接管于 2026-09-07 开始，2026-09-08（Asia/Shanghai）汇总。目标机为 PELADN WO4，Windows 11 Pro x64 / 10.0.26100。证据目录沿用接管日期：`D:\github\exhibition-mini-pc-receipt-20260907`。
 
-当前状态：`MINI_PC_SOURCE_AND_ASSET_HANDOFF_READY`。两个源码工作树、所需运行资产和开发工具已接收，按交接第 13 节完成开发接管。JanVim 接收基准尚未全通过：完整执行 1,206 项，1,203 通过、3 项时间断言失败，原样定点复核仍复现，详见下文。READY 发布后，已在新候选完成 Realtek 端点的静音源码适配，相关 41 项回归通过。本标记不表示测试全绿、部署包可开演或硬件验收通过；现场状态继续为 `awaiting-mini-pc-attended-acceptance`。
+当前状态：`MINI_PC_SOURCE_AND_ASSET_HANDOFF_READY`。两个源码工作树、所需运行资产和开发工具已接收，按交接第 13 节完成开发接管。READY 发布后已完成 Realtek WASAPI 适配及实际静音服务运行，修正启动器测试的计时观察方式，并为新包加入完整 Electron 门禁。最新全量执行 1,232 项，1,231 通过、1 项因 Windows 临时文件重命名 EPERM 失败；随后整份租约测试 28/28 通过，不能将全量命令改记为成功。独立候选包已生成并核验，尚未安装。本标记不表示测试全绿、部署包可开演或硬件验收通过；现场状态继续为 `awaiting-mini-pc-attended-acceptance`。最新结果及包身份见末节；下文保留各阶段原始失败和限制。
 
 ## 两仓身份与保全
 
@@ -53,7 +53,7 @@
 - 同一 GMK candidate 根的 `evidence\jianshan-inventory-v2.json`：2,989 bytes / `4996f71f2a723519fadd5bc6569f63d533ad0e44174ea674cafffd14bc1294d3`。
 - GMK `D:\VirtualData\JanVim-Exhibition-Rehearsals\joint-session-20260906T151629220Z-6176c30955c0\attended-hardware-acceptance.json`：5,741 bytes / `58d916dbfa907f29a5d0580c2290abe1578774e468c593647158a2a0eae6559e`；属于旧 547,650-byte main，不能验证当前自动部署。
 
-下一次生成部署包前，须为 builder/verifier 增加 Electron 必需文件及版本的失败测试和门禁，再从新工作树打新包。当前 builder 会复制已有依赖，manifest 验证器只核对所列文件，两者尚不能阻止再次漏装 Electron。此问题没有通过修改旧包或降低现有身份校验来掩盖。
+接收时 builder 只复制已有依赖，manifest 验证器只核对所列文件，不能阻止再次漏装 Electron。此项已在新分支补齐失败测试和 builder/verifier 门禁，并实际生成新候选，详见末节。旧部署包和原身份校验均未改写。
 
 ## 开发工具与自动验证
 
@@ -89,7 +89,7 @@
 
 保留了首次标准 `npm test` 的失败记录：60/62 文件、1057/1206 通过；145 项启动器用例受缺失 .NET 9 的首个 fixture 编译失败影响，另外 4 项文件操作用例超出默认 5 秒预算。隔离诊断确认一个三场景用例执行六次 PowerShell 子命令，共约 5.7 秒，每项退出码符合预期。恢复工具后完整复核使用 `npm test -- --maxWorkers=1 --testTimeout=10000`；此参数只设置测试框架的默认单例墙钟总预算，不能覆盖测试中显式的 15 秒等预算，没有改动测试断言、子进程界限、生产代码或假时钟边界。原始失败未删除或改写。
 
-剩余三项均在 `tests/start-show.test.ts`，用原文件及同样环境单独执行也失败，不能作为偶发噪声忽略：
+接收基准当时剩余三项均在 `tests/start-show.test.ts`，用原文件及同样环境单独执行也失败，不能作为偶发噪声忽略：
 
 | 用例 / 原断言 | 完整 suite | 原样定点复核 |
 | --- | --- | --- |
@@ -97,13 +97,13 @@
 | `terminates a hung network snapshot before any show process starts`；启动器总体耗时 `< 7,000 ms` | 7,024 ms | 7,269 ms |
 | `times out a 3000 ms close helper at 2000 ms without settling or forcing the child`；子进程 `started` 记录到父调用返回的间隔 `>= 1,800 ms` | 1,711 ms | 1,752 ms |
 
-静态复核发现关闭助手生产 Stopwatch 在 `Process.Start()` 后起计，而测试 `started` 在子 PowerShell 完成启动后才写入，两个计时起点不同；本机子进程启动开销会缩短测试测得的区间。网络检查生产 5,000 ms 与关闭助手生产 2,000 ms 上限均未改动。现有证据没有证明上述失败需要放宽生产安全边界，也尚不能宣称所有后续断言都执行通过。下一部署候选的自动门禁前须补齐这些时间测量测试的确定性或隔离证据，完成相关复核；后续设备适配的定点测试成功不替代这份完整基准失败记录。
+静态复核发现关闭助手生产 Stopwatch 在 `Process.Start()` 后起计，而测试 `started` 在子 PowerShell 完成启动后才写入，两个计时起点不同；本机子进程启动开销会缩短测试测得的区间。网络检查生产 5,000 ms 与关闭助手生产 2,000 ms 上限均未改动。当时的证据没有证明上述失败需要放宽生产安全边界，也不能宣称所有后续断言都执行通过。随后已只修正测试计时观察并复核，详见末节；这不删除或改写原始完整基准失败记录。
 
 真实 Windows symlink fixture 由于权限不足早退，虽然 Rust 工具显示 1 passed，实际文件系统覆盖仍未执行；Linux no-follow 也未在本机验证。
 
 ## 实际音频及现场未验项
 
-Windows Core Audio 的 `IMMDevice.GetState`、`IPropertyStore`、`IAudioClient.GetMixFormat` 和隔离 SC `ServerOptions.outDevices` 都已实测；未 Initialize/Start 音频流，也未 boot SC server。首轮证据为 `core-audio-endpoints.json`、`sc-audio-enumeration.json/.log`；以下表格保留 READY 发布前观察，00:26 的状态变化与适配记录紧接其后。最初注册表原始格式偏移解析无效，数值已废弃，最终采样率只引用 Core Audio API 输出。
+Windows Core Audio 的 `IMMDevice.GetState`、`IPropertyStore`、`IAudioClient.GetMixFormat` 和隔离 SC `ServerOptions.outDevices` 都已实测。首轮及 00:36 源码适配核验期间未 Initialize/Start 音频流，也未 boot SC server；01:18 实际静音服务运行的新增结果见末节。首轮证据为 `core-audio-endpoints.json`、`sc-audio-enumeration.json/.log`；以下表格保留 READY 发布前观察，00:26 的状态变化与适配记录紧接其后。最初注册表原始格式偏移解析无效，数值已废弃，最终采样率只引用 Core Audio API 输出。
 
 | 端点 | 首轮状态 | 可确认格式 |
 | --- | --- | --- |
@@ -116,14 +116,44 @@ READY 发布后，2026-09-08 00:26:32 +08:00 的只读复核观察到 Realtek �
 
 以当前系统默认 Realtek 作为本机候选目标，统一了 `deployment/config/site-defaults.json`、`deployment/operator/lib/Exhibition.Deployment.psm1` 的验证与 `sound/service.scd` 最终设备名。精确匹配仍生效；schema 测试另外暴露 PowerShell 的数组比较可能误收 `["设备名"]`，已增加字符串类型检查。Senary、HDMI 电视、WDM-KS、空字符串、错误大小写和非字符串均拒绝。SC 保持双声道 48 kHz、零输入及既有 Listen 边界。
 
-适配验证：测试先行日志 `audio-adapter-schema-red.log` 确认旧实现拒绝 Realtek、接受 Senary；最小替换后 `audio-adapter-schema-initial-green.log` 记录数组类型失败，再修复类型检查。`npm test -- tests/deployment-operator.test.ts tests/deployment-package.test.ts --maxWorkers=1 --testTimeout=10000` **41/41 passed，exit 0，27.27 秒**；typecheck、lint 与 build 均 exit 0，main bundle 的 549,054 bytes / SHA 保持匹配。隔离 sclang 通过 `compileFile` 仅编译 SC 服务，未调用返回的服务函数，同时确认所选端点在真实输出列表中；`audio-adapter-sc-check.json` 记录两项通过且 server 未 boot。独立审阅未发现阻止本次提交的缺陷，并复核旧部署三处对应文件仍匹配原 manifest。没有执行实时无声合成或可听测试，也没有生成新部署包。
+适配验证：测试先行日志 `audio-adapter-schema-red.log` 确认旧实现拒绝 Realtek、接受 Senary；最小替换后 `audio-adapter-schema-initial-green.log` 记录数组类型失败，再修复类型检查。`npm test -- tests/deployment-operator.test.ts tests/deployment-package.test.ts --maxWorkers=1 --testTimeout=10000` **41/41 passed，exit 0，27.27 秒**；typecheck、lint 与 build 均 exit 0，main bundle 的 549,054 bytes / SHA 保持匹配。隔离 sclang 通过 `compileFile` 仅编译 SC 服务，未调用返回的服务函数，同时确认所选端点在真实输出列表中；`audio-adapter-sc-check.json` 记录两项通过且 server 未 boot。独立审阅未发现阻止本次提交的缺陷，并复核旧部署三处对应文件仍匹配原 manifest。00:36 的这一阶段尚未执行实时无声合成或生成新包，后续新增结果见末节。
 
-接下来由现场确认实际耳机/音箱接线及就绪状态；在下一新包前处理完整基准的三项计时失败与 Electron 必需文件门禁，再在有人值守条件下验证真实输出与联合声音。源码适配通过不能代替驱动流初始化、音量、听感及 Stop 淡出验收。当前音频定位已从“找不到 Realtek WASAPI 端点”推进到“端点存在且新候选已选中，等待现场验证”。
+接下来由现场确认实际耳机/音箱接线及就绪状态，再在有人值守条件下验证可听输出与联合声音。当前已从最初的“找不到 Realtek WASAPI 端点”推进到精确端点选中、实际静音服务启动及清理通过；音量、听感及 Stop 淡出仍未验收。
 
 接收时未发现 present Camera/Image 设备，GPU 为 AMD Radeon 760M，驱动 32.0.13028.3，仅静态确认了 1920×1080 桌面；DX12 Compute、三屏和两台物理投影仪尚未实跑。`D:\VirtualData\JanVim-Exhibition-Rehearsals\site-config\display-map.json` 与 `sound-mix-v1.json` 当时均缺失；显示映射须等现场用配置器确认，混音缺失按现有规则从 0/0 dB 起步，不迁入 GMK +5/-1 作为耳机安全响度。
 
-Windows 测试音、SC 官方示例听音、真实光标拨弦与相机鸟群风声、自动 Start、C 屏黑底白鸟/最大化/置顶/鼠标、独立增益保存继承、正常 Stop 淡出无复响、正常重启后新开演均待有人值守确认。GUI、相机与可听声音未启动；没有生成或替换部署包。
+Windows 测试音、SC 官方示例听音、真实光标拨弦与相机鸟群风声、自动 Start、C 屏黑底白鸟/最大化/置顶/鼠标、独立增益保存继承、正常 Stop 淡出无复响、正常重启后新开演均待有人值守确认。GUI、相机与可听声音未启动；新候选只单独生成和核验，旧部署包未替换。
 
 作品要求保持：`songfeng-source` / `20260902-songfeng-source-r8` 长文，唯一 show clock；A 屏剑客光标和四行原诗 reset（64 bytes / `b699de273f5bbaedb08241495f52ce863d3e8e1851275ce3b6251484d75190a8`）；SCREEN-2 为 Web 展示表面；鸟群默认 10 Hz、原采样 500 ms 截止期，统一 Stop 优先且终态不可复响；WIND/INSTRUMENT 独调并由 JanVim 唯一持久化。声音单会话 3,600 秒上限保留，全天续航未解决。
 
 本次接管不等于硬件验收。三次连续物理投影循环、离线、强制恢复等均未获得本机证据；本阶段依照交接不额外启动这些现场步骤，也不作长期无人值守声明。GMK 按用户约定只留备用，后续功能开发集中在本机新分支。
+
+## 01:22 新候选与最终自动检查
+
+新候选源码为 `986c8e5249a98ad552e158605951b835f05ccf46`，包含 Realtek 适配、测试计时修正与 Electron 运行时门禁。后续本回执提交只改文档；包的 sourceCommit 保持实际构建点，不改写为最终文档 HEAD。《见山》仍为 `6d1a4577a9484092fde94308352c80ee710ed18f`，没有追加功能修改。
+
+启动器测试修正只在 fixture 副本中观察实际 `Invoke-BoundedProcess` 的 Stopwatch、超时预算、终止原因与进程退出；生产 `scripts/start-show.ps1` SHA 仍为 `336a9545b12d72ddbed741ecac9673b9ae0c88ef9c4aa29a51f165a22216f59c`。原八场景合并用例拆成八个独立用例，每个仍有 15 秒界限；网络 5 秒及关闭助手 2 秒边界未放宽，相关租约、子进程存活和不重试断言保留。定点 10/10 通过，随后全量中的全部 154 个启动器用例通过。
+
+Electron 门禁先运行失败测试，再加入锁定官方 ZIP 的全部 73 个 dist 文件大小与 SHA、入口 path.txt 和 npm/dist 版本检查。builder 在创建输出前检查源运行时，复制后再次检查，部署 verifier 在普通 manifest 后独立检查。即使重新生成普通 manifest，缺失必需运行文件仍被拒绝。`deployment/config/electron-runtime.lock.json` 的全部条目已和官方 ZIP 及本机文件逐项比对，未启动 Electron GUI。相关 53/53 测试通过，独立代码审阅未发现阻止该改动的问题。
+
+| 最终检查 | 结果与证据 |
+| --- | --- |
+| typecheck / lint / build | 全部 exit 0；`package-gate-static-results.json`；main bundle 字节数和 SHA 不变 |
+| 完整 `npm test -- --maxWorkers=1 --testTimeout=10000 --reporter=verbose` | **exit 1，62/63 文件、1231/1232 项通过，1129.45 秒**；`npm-test-candidate-final.log` / `test-candidate-final-result.json` |
+| 唯一失败 | `run lease settlement removal > keeps a settled lease when the file has changed or is malformed`；fixture 更新 generation 时临时文件 rename 返回 EPERM，5 次有界重试耗尽，尚未进入目标断言；未修改生产租约逻辑，未确认 OS 占用原因 |
+| 整份租约测试复查 | 无代码改动，**28/28 passed，exit 0，1.77 秒**；`run-lease-recheck.log` / `run-lease-recheck-result.json`；不据此将前一全量 exit 1 改记为成功 |
+| 真实 SC 静音服务 | 原有单例 `boots and cleans up one captured silent service without an audible output` **1/1 passed，exit 0**，约 10 秒；`audio-silent-realtek.log` / `audio-silent-realtek-result.json` |
+| 旧安装包最终复核 | **9095/9095** 文件仍匹配原 manifest；`old-package-final-integrity.log` |
+
+静音用例于 01:17:58 至 01:18:08 运行：使用当前 Realtek WASAPI 配置 boot 实际 SC server，零输入、48 kHz 双声道，1 秒服务请求按既有淡出/清理逻辑生成 2.5 秒 PCM16LE 捕获；两声道 peak/RMS/clippedSamples 均为 0，`hardwareOutput=false`，完成原因 `duration`、`clean=true`。01:20 复核没有遗留 sclang/scsynth 进程及 57140/57141 UDP 端口。没有创建硬件声音输出节点，不能将静音启动替代可听输出验收。捕获保留于 `D:\VirtualData\JanVim-Exhibition-Rehearsals\sound-service-mraANP\silent-capture.wav`。
+
+独立候选根：`D:\VirtualData\JanVim-Exhibition-Rehearsals\deployment-package-20260907T171913233Z-d7eb6a614269`。
+
+| 新候选文件 | bytes | SHA-256 |
+| --- | ---: | --- |
+| `JanVim-Exhibition-Deploy.zip` | 331516660 | `c6a6cfe540728676bb9a0e1bc971f47727901025873ee455101b57c42e24c9b3` |
+| `JanVim-Exhibition-Deploy/package-manifest.json` | 1465744 | `79e8d5bb6778ff30bf7c747628dd381657bb628cc01a6e220b90dfbc0ca4953d` |
+
+builder exit 0；包目录的 **9,134** payload 文件通过 manifest 核验；另外独立打开 ZIP，**9,135** 个文件（含 manifest）集合、大小及逐项 SHA 全部匹配，Electron 为 44.0.0 / 73 文件。证据为 `build-new-package.log`、`build-new-package-result.json`、`new-package-zip-verification.json`。没有用缺失文件也能通过的旧清单作为新包完整性的唯一依据。
+
+该包是可供检查的开发候选，**尚未安装、未人工验收，全量自动门禁保留一次 EPERM 失败**；不称为可开演包，不替换最后可回退包。历史 GMK 构建/验收证据未接收及真实 symlink 覆盖不足等限制仍保留。完整接收、早期音频与最终状态分别保存在证据目录 `mini-pc-receipt.json`、`mini-pc-audio-candidate.json`、`mini-pc-final-status.json`，历史快照未覆盖。
