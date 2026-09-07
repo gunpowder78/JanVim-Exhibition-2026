@@ -289,7 +289,8 @@ function Read-ExhibitionSiteDefaults {
         $value.packageRoot -cne 'D:\github\JanVim-Exhibition-Deploy' -or
         $value.rehearsalParent -cne $script:RehearsalParent -or
         $value.siteConfigRoot -cne (Join-Path $script:RehearsalParent 'site-config') -or
-        $value.audioOutputDevice -cne 'Windows WASAPI : Headphones (Senary Audio)' -or
+        $value.audioOutputDevice -isnot [string] -or
+        $value.audioOutputDevice -cne 'Windows WASAPI : Speakers (Realtek High Definition Audio)' -or
         -not (Test-DeploymentInteger -Value $value.durationSeconds) -or
         [int64]$value.durationSeconds -ne 3600
     ) {

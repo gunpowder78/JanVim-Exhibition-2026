@@ -271,6 +271,40 @@ describe("attended deployment operator module", () => {
     expect(stopFunction).not.toContain("[Diagnostics.Process]::GetProcessById");
   });
 
+  it("accepts the measured mini PC WASAPI endpoint in site defaults", () => {
+    const path = writeJson("mini-pc-site-defaults.json", {
+      ...JSON.parse(readFileSync(defaultsPath, "utf8")),
+      audioOutputDevice: "Windows WASAPI : Speakers (Realtek High Definition Audio)",
+    });
+    const result = invoke(
+      `Read-ExhibitionSiteDefaults -Path ${psQuote(path)} | ConvertTo-Json -Compress`,
+    );
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      audioOutputDevice: "Windows WASAPI : Speakers (Realtek High Definition Audio)",
+      durationSeconds: 3600,
+    });
+  });
+
+  it.each([
+    ["old Senary endpoint", "Windows WASAPI : Headphones (Senary Audio)"],
+    ["HDMI television", "Windows WASAPI : 2 - Mi TV (AMD High Definition Audio Device)"],
+    ["different API", "Windows WDM-KS : Speakers (Realtek HD Audio output)"],
+    ["implicit default", ""],
+    ["wrong case", "windows wasapi : Speakers (Realtek High Definition Audio)"],
+    ["non-string endpoint", ["Windows WASAPI : Speakers (Realtek High Definition Audio)"]],
+  ])("rejects %s as the reviewed mini PC audio endpoint", (label, audioOutputDevice) => {
+    const path = writeJson(`audio-${label.replaceAll(" ", "-")}.json`, {
+      ...JSON.parse(readFileSync(defaultsPath, "utf8")),
+      audioOutputDevice,
+    });
+    const result = invoke(`Read-ExhibitionSiteDefaults -Path ${psQuote(path)}`);
+
+    expect(result.status, `${result.stdout}${result.stderr}`).not.toBe(0);
+    expect(result.stderr).toContain("site-defaults-invalid");
+  });
+
   it("checks in exact non-secret site defaults and all three operator entry points", () => {
     expect(JSON.parse(readFileSync(defaultsPath, "utf8"))).toEqual({
       schema: 1,
@@ -278,7 +312,7 @@ describe("attended deployment operator module", () => {
       rehearsalParent: "D:\\VirtualData\\JanVim-Exhibition-Rehearsals",
       siteConfigRoot:
         "D:\\VirtualData\\JanVim-Exhibition-Rehearsals\\site-config",
-      audioOutputDevice: "Windows WASAPI : Headphones (Senary Audio)",
+      audioOutputDevice: "Windows WASAPI : Speakers (Realtek High Definition Audio)",
       durationSeconds: 3600,
     });
     for (const name of [

@@ -12,7 +12,7 @@
 - SuperCollider 3.14.1，安装于 `C:\Program Files\SuperCollider-3.14.1`。
 - 当前 GPU 的 Windows 11 驱动，并能运行 DX12 Compute。
 - UVC 相机驱动；Windows“隐私和安全性 → 相机”允许桌面应用访问。
-- 有线耳机端点 `Windows WASAPI : Headphones (Senary Audio)`，48 kHz、立体声。
+- 小主机输出端点 `Windows WASAPI : Speakers (Realtek High Definition Audio)`，48 kHz、立体声；现场确认接入的有线耳机。
 - 三台显示设备采用 Windows“扩展这些显示器”，不要求沿用旧接口或旧显示器 ID。
 
 Node.js 22.23.0、Electron、JavaScript 依赖、《见山》VC144/MediaPipe/OpenCV 文件和手势模型

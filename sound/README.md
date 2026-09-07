@@ -109,7 +109,8 @@ pwsh -NoProfile -File 'D:\github\JanVim-Exhibition-2026\.worktrees\sound-minimal
 
 - 默认无声；只有明确的 Listen 选项才允许可听输出。
 - 无声模式不创建硬件输出节点，测试记录的是内部合成声道，不是麦克风。
-- 试听仅使用 `Windows WASAPI : Headphones (Senary Audio)`；48 kHz、双声道、零输入。
+- 本机候选使用 `Windows WASAPI : Speakers (Realtek High Definition Audio)`；48 kHz、双声道、零输入。
+  此名称于 2026-09-08 在小主机枚举确认；现场仍须确认实际接线与听音，参见[本机回执](../docs/operations/2026-09-08-mini-pc-receipt.md)。
   不会自动切换扬声器，不改系统音量。试听前由人把耳机音量调低。
 - 总输出限幅为 0.2 线性样本幅度。这不是耳机声压安全认证，不能替代人的音量控制。
 - 最多 8 个拨弦声部；传统模式 1 个风声声部，鸟群候选最多 2 个活跃/释放中风声节点。

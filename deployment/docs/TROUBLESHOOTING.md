@@ -11,7 +11,7 @@
 | `camera` / 相机失败 | 检查 USB、设备管理器及 Windows 相机隐私权限，关闭占用相机的其他软件后重启。 |
 | `GPU` 或《见山》启动失败 | 更新本机显卡驱动，确认 DX12 Compute 可用；保留日志并重启后重试。 |
 | `supercollider-*` | 确认 SuperCollider 3.14.1 位于固定目录，且没有遗留的试听程序占用端口。 |
-| `耳机输出端点`失败或无声 | 插入 Senary 有线耳机，在 Windows 设为 48 kHz 立体声，并确认端点名完全一致。 |
+| `耳机输出端点`失败或无声 | 确认有线耳机接入小主机 Realtek 输出，Windows 端点为 ACTIVE、48 kHz 立体声，且 SC 枚举名称为 `Windows WASAPI : Speakers (Realtek High Definition Audio)`。保留错误证据，待有人值守时试听。 |
 | `show-stop-shortcut-unavailable` | 关闭占用 `Ctrl+Shift+S` 的软件后重启展演；本次启动已安全中止。 |
 | `active-deployment-already-exists` | 先运行 `Stop-Exhibition.ps1`。若仍失败，正常重启 Windows，再运行同一停止脚本和验证脚本。 |
 | `deployment-cleanup-incomplete` | 记录诊断并重启 Windows；重启后执行 `Stop-Exhibition.ps1`，再验证和启动。 |

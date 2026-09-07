@@ -2,7 +2,7 @@
 
 接管于 2026-09-07 开始，2026-09-08（Asia/Shanghai）汇总。目标机为 PELADN WO4，Windows 11 Pro x64 / 10.0.26100。证据目录沿用接管日期：`D:\github\exhibition-mini-pc-receipt-20260907`。
 
-当前状态：`MINI_PC_SOURCE_AND_ASSET_HANDOFF_READY`。两个源码工作树、所需运行资产和开发工具已接收，按交接第 13 节完成开发接管。JanVim 自动基线尚未全通过：完整执行 1,206 项，1,203 通过、3 项时间断言失败，原样定点复核仍复现，详见下文。本标记不表示测试全绿、部署包可开演或硬件验收通过；现场状态继续为 `awaiting-mini-pc-attended-acceptance`。
+当前状态：`MINI_PC_SOURCE_AND_ASSET_HANDOFF_READY`。两个源码工作树、所需运行资产和开发工具已接收，按交接第 13 节完成开发接管。JanVim 接收基准尚未全通过：完整执行 1,206 项，1,203 通过、3 项时间断言失败，原样定点复核仍复现，详见下文。READY 发布后，已在新候选完成 Realtek 端点的静音源码适配，相关 41 项回归通过。本标记不表示测试全绿、部署包可开演或硬件验收通过；现场状态继续为 `awaiting-mini-pc-attended-acceptance`。
 
 ## 两仓身份与保全
 
@@ -14,9 +14,9 @@
 | 已记录应用源码基准 | `959495d806060f9017f3e8f04bc60c01701909f1` | `d2ee805b36effa1c6a01f2f54488803704c09f95` |
 | 本机新工作树 | `D:\github\JanVim-Exhibition-mini-pc` | `D:\github\JianShan02-mini-pc-v2` |
 | 新开发分支 | `feat/exhibition-mini-pc-integration` | `feat/exhibition-mini-pc-integration` |
-| 接收文档提交 | 本文件所属提交，以 `git log -1 --format=%H -- docs/operations/2026-09-08-mini-pc-receipt.md` 查询 | `6d1a4577a9484092fde94308352c80ee710ed18f` |
+| 接收文档提交 | `7e37c7018f5c33d55bf644c982fbb145e9023898`；后续端点适配另提交 | `6d1a4577a9484092fde94308352c80ee710ed18f` |
 
-两个新工作树均直接从各自完整交付 SHA 创建；没有整仓合并。祖先检查均 exit 0。JanVim 应用基准到交付 HEAD 仅变更 README 和两份迁移文档；《见山》v2 基准到交付 HEAD 仅新增交接文档。《见山》历史四文件差异复算为 47,310 bytes / SHA-256 `1583e94bab0729ae984496dc8db4a33e7cb2ff12fcaf6235752b21e377a8773e`，与交付一致。本轮不修改两仓应用行为、冻结内容或协议。
+两个新工作树均直接从各自完整交付 SHA 创建；没有整仓合并。祖先检查均 exit 0。JanVim 应用基准到交付 HEAD 仅变更 README 和两份迁移文档；《见山》v2 基准到交付 HEAD 仅新增交接文档。《见山》历史四文件差异复算为 47,310 bytes / SHA-256 `1583e94bab0729ae984496dc8db4a33e7cb2ff12fcaf6235752b21e377a8773e`，与交付一致。两仓接收提交只增加回执；READY 后的 JanVim 设备适配见末节，《见山》没有功能修改，冻结内容与跨仓协议均未改变。
 
 旧 JanVim 检出 `D:\github\JanVim-Exhibition-2026` 保持 `main` / `a750a99947ff0be21feb0c91bd2eaec725e41b1a`，跟踪 `origin/main`，接管前后均干净，无本地独有提交。旧《见山》检出 `C:\GitHub\JianShan02` 保持 `main` / `a739f4de986631319d6dbd973279eb6a7d0b30a1`，跟踪 `origin/main`，相对该本地远端引用有一个独有提交；它是旧 Electron release，涉及 7,703 文件，完整文件列表另存 `jianshan-old-local-commit-files.txt`。
 
@@ -83,7 +83,7 @@
 | `npm run build` | exit 0；新构建 main 为 **549,054 bytes / `db7901a4a34eb1ecc07d151b2366c4d1ece6f17e239a8c3d9dccb9dd47b7add8`**，与交付包一致 |
 | Lua suite | 使用 artifact 内 NVIM v0.10.1，`-u NONE -i NONE --noplugin --headless`，两个 suite exit 0 |
 | `scripts/verify-runtime.ps1` | exit 0，锁定产物及新生成运行配置通过 |
-| JanVim 完整 suite | **exit 1**；61/62 文件、1203/1206 项通过，3 项失败；1079.79 秒，详见 `test-restored-result.json` / `npm-test-restored.log` |
+| JanVim 接收基准完整 suite | **exit 1**；61/62 文件、1203/1206 项通过，3 项失败；1079.79 秒，详见 `test-restored-result.json` / `npm-test-restored.log` |
 | JanVim 原失败项定点复核 | **exit 1**；相同 3 项失败、其余 144 项未在该定点命令执行；40.40 秒，详见 `test-focused-launcher-timing-result.json` / `test-focused-launcher-timing.log` |
 | 《见山》静音检查 | `flock_input` 67 passed、`external_wind_gain` 8 passed、`cargo check --locked`、Python 28/28 均 exit 0；Rust 两组有重叠，不相加为 75 项 |
 
@@ -97,24 +97,30 @@
 | `terminates a hung network snapshot before any show process starts`；启动器总体耗时 `< 7,000 ms` | 7,024 ms | 7,269 ms |
 | `times out a 3000 ms close helper at 2000 ms without settling or forcing the child`；子进程 `started` 记录到父调用返回的间隔 `>= 1,800 ms` | 1,711 ms | 1,752 ms |
 
-静态复核发现关闭助手生产 Stopwatch 在 `Process.Start()` 后起计，而测试 `started` 在子 PowerShell 完成启动后才写入，两个计时起点不同；本机子进程启动开销会缩短测试测得的区间。网络检查生产 5,000 ms 与关闭助手生产 2,000 ms 上限均未改动。现有证据没有证明上述失败需要放宽生产安全边界，也尚不能宣称所有后续断言都执行通过。下次新候选的自动门禁前须补齐这些时间测量测试的确定性或隔离证据，完成相关复核；本次仅提交接收文档，不把全套失败转写成成功。
+静态复核发现关闭助手生产 Stopwatch 在 `Process.Start()` 后起计，而测试 `started` 在子 PowerShell 完成启动后才写入，两个计时起点不同；本机子进程启动开销会缩短测试测得的区间。网络检查生产 5,000 ms 与关闭助手生产 2,000 ms 上限均未改动。现有证据没有证明上述失败需要放宽生产安全边界，也尚不能宣称所有后续断言都执行通过。下一部署候选的自动门禁前须补齐这些时间测量测试的确定性或隔离证据，完成相关复核；后续设备适配的定点测试成功不替代这份完整基准失败记录。
 
 真实 Windows symlink fixture 由于权限不足早退，虽然 Rust 工具显示 1 passed，实际文件系统覆盖仍未执行；Linux no-follow 也未在本机验证。
 
 ## 实际音频及现场未验项
 
-Windows Core Audio 的 `IMMDevice.GetState`、`IPropertyStore`、`IAudioClient.GetMixFormat` 和隔离 SC `ServerOptions.outDevices` 都已实测；未 Initialize/Start 音频流，也未 boot SC server。证据为 `core-audio-endpoints.json`、`sc-audio-enumeration.json/.log`。最初注册表原始格式偏移解析无效，数值已废弃，最终采样率只引用 Core Audio API 输出。
+Windows Core Audio 的 `IMMDevice.GetState`、`IPropertyStore`、`IAudioClient.GetMixFormat` 和隔离 SC `ServerOptions.outDevices` 都已实测；未 Initialize/Start 音频流，也未 boot SC server。首轮证据为 `core-audio-endpoints.json`、`sc-audio-enumeration.json/.log`；以下表格保留 READY 发布前观察，00:26 的状态变化与适配记录紧接其后。最初注册表原始格式偏移解析无效，数值已废弃，最终采样率只引用 Core Audio API 输出。
 
-| 端点 | 当前状态 | 可确认格式 |
+| 端点 | 首轮状态 | 可确认格式 |
 | --- | --- | --- |
 | `Speakers (Realtek High Definition Audio)` | **UNPLUGGED (8)**；SC 仅见 WDM-KS 层，没有该设备的 WASAPI 输出 | 未查询：端点非 ACTIVE |
 | `Windows WASAPI : 2 - Mi TV (AMD High Definition Audio Device)` | ACTIVE，Windows 默认多媒体输出 | 2 channels / 48,000 Hz；共享混合格式 32-bit |
 
 Realtek 驱动 6.0.1.7899 / oem22.inf、AMD 音频 10.0.1.40 / oem21.inf 均存在。`UNPLUGGED` 的解释依据 [Microsoft Core Audio 状态定义](https://learn.microsoft.com/en-us/windows/win32/coreaudio/device-state-xxx-constants)。当前证据不支持预先安装 ASIO；没有切换默认设备、提高系统音量或把电视作为已确认耳机输出。
 
-下一个任务是确认实际接线并让目标输出端点处于 ACTIVE；若使用机身 3.5mm 耳机，应在接入后重新枚举。获得精确 WASAPI 名称和双声道 48 kHz 证据后，在新候选中统一 `deployment/config/site-defaults.json`、`deployment/operator/lib/Exhibition.Deployment.psm1` 的验证与 `sound/service.scd` 最终选择。不能只替换 JSON，也不能根据 WDM-KS 名称猜写 WASAPI 名称。当前仍未实施这项行为修改。
+READY 发布后，2026-09-08 00:26:32 +08:00 的只读复核观察到 Realtek 已变为 **ACTIVE / 默认多媒体输出 / 2 channels / 48,000 Hz / 32-bit 共享混合格式**；SC 同时实测列出 **`Windows WASAPI : Speakers (Realtek High Definition Audio)`**。没有通过脚本切换默认设备、插拔设备或改音量，不能仅凭该变化断言用户已准备好试听。独立保留本次证据于 `audio-after-ready-20260908T0026/`，未覆盖首轮证据。
 
-当前无 present Camera/Image 设备，GPU 为 AMD Radeon 760M，驱动 32.0.13028.3，仅能静态确认当前 1920×1080 桌面；DX12 Compute、三屏和两台物理投影仪尚未实跑。`D:\VirtualData\JanVim-Exhibition-Rehearsals\site-config\display-map.json` 与 `sound-mix-v1.json` 均缺失；显示映射须等现场用配置器确认，混音缺失按现有规则从 0/0 dB 起步，不迁入 GMK +5/-1 作为耳机安全响度。
+以当前系统默认 Realtek 作为本机候选目标，统一了 `deployment/config/site-defaults.json`、`deployment/operator/lib/Exhibition.Deployment.psm1` 的验证与 `sound/service.scd` 最终设备名。精确匹配仍生效；schema 测试另外暴露 PowerShell 的数组比较可能误收 `["设备名"]`，已增加字符串类型检查。Senary、HDMI 电视、WDM-KS、空字符串、错误大小写和非字符串均拒绝。SC 保持双声道 48 kHz、零输入及既有 Listen 边界。
+
+适配验证：测试先行日志 `audio-adapter-schema-red.log` 确认旧实现拒绝 Realtek、接受 Senary；最小替换后 `audio-adapter-schema-initial-green.log` 记录数组类型失败，再修复类型检查。`npm test -- tests/deployment-operator.test.ts tests/deployment-package.test.ts --maxWorkers=1 --testTimeout=10000` **41/41 passed，exit 0，27.27 秒**；typecheck、lint 与 build 均 exit 0，main bundle 的 549,054 bytes / SHA 保持匹配。隔离 sclang 通过 `compileFile` 仅编译 SC 服务，未调用返回的服务函数，同时确认所选端点在真实输出列表中；`audio-adapter-sc-check.json` 记录两项通过且 server 未 boot。独立审阅未发现阻止本次提交的缺陷，并复核旧部署三处对应文件仍匹配原 manifest。没有执行实时无声合成或可听测试，也没有生成新部署包。
+
+接下来由现场确认实际耳机/音箱接线及就绪状态；在下一新包前处理完整基准的三项计时失败与 Electron 必需文件门禁，再在有人值守条件下验证真实输出与联合声音。源码适配通过不能代替驱动流初始化、音量、听感及 Stop 淡出验收。当前音频定位已从“找不到 Realtek WASAPI 端点”推进到“端点存在且新候选已选中，等待现场验证”。
+
+接收时未发现 present Camera/Image 设备，GPU 为 AMD Radeon 760M，驱动 32.0.13028.3，仅静态确认了 1920×1080 桌面；DX12 Compute、三屏和两台物理投影仪尚未实跑。`D:\VirtualData\JanVim-Exhibition-Rehearsals\site-config\display-map.json` 与 `sound-mix-v1.json` 当时均缺失；显示映射须等现场用配置器确认，混音缺失按现有规则从 0/0 dB 起步，不迁入 GMK +5/-1 作为耳机安全响度。
 
 Windows 测试音、SC 官方示例听音、真实光标拨弦与相机鸟群风声、自动 Start、C 屏黑底白鸟/最大化/置顶/鼠标、独立增益保存继承、正常 Stop 淡出无复响、正常重启后新开演均待有人值守确认。GUI、相机与可听声音未启动；没有生成或替换部署包。
 
