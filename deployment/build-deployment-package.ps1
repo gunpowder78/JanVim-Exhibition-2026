@@ -13,7 +13,8 @@ $fixedInstallRoot = 'D:\github\JanVim-Exhibition-Deploy'
 $expectedNodeHash = '17347995af08dadcc73a1a154f0942559fbc3f37b9ba57d4576b4d2bcb2834a2'
 $forbiddenDirectoryNames = @('.git', '.worktrees', '.operator', '.superpowers')
 $forbiddenRunRootPattern = '^(?:deployment|deployment-package|display-config|joint-session|joint-show|joint-sound|joint-validate|sound)-\d{8}T\d{9}Z-[0-9a-f]{12}$'
-$privateJsonStemPattern = '(?:^|[._-])(?:token|descriptor)(?:v[0-9]+)?(?=$|[._-])|(?:token|descriptor)(?:v[0-9]+)?$'
+$privateDelimitedJsonStemPattern = '(?:^|[._-])(?:token|descriptor)(?:v[0-9]+)?(?=$|[._-])|(?<!property)(?:token|descriptor)(?:v[0-9]+)?$'
+$privateCamelJsonStemPattern = '(?<!Property)(?:Token|Descriptor)(?:V[0-9]+)?(?=$|[._-]|[A-Z])'
 $forbiddenRuntimeNames = @(
     'active-deployment.json', 'flock-input.json', 'run-lease.json',
     'control.json', 'ready.json', 'session.json', 'summary.json'
@@ -28,6 +29,16 @@ function Resolve-BuilderPath {
         throw "$Reason-invalid"
     }
     return [IO.Path]::GetFullPath($Path).TrimEnd([char[]]@('\', '/'))
+}
+
+function Test-PrivateJsonName {
+    param([string] $Name)
+    if ([IO.Path]::GetExtension($Name) -ine '.json') { return $false }
+    $stem = [IO.Path]::GetFileNameWithoutExtension($Name)
+    return (
+        $stem -imatch $privateDelimitedJsonStemPattern -or
+        $stem -cmatch $privateCamelJsonStemPattern
+    )
 }
 
 function Assert-PlainItem {
@@ -88,10 +99,7 @@ function Assert-PlainTree {
                 $item.Name -iin $forbiddenRuntimeNames -or
                 $item.Name -ieq 'jianshan-live.toml' -or
                 $item.Name -ilike 'jianshan-live-*.toml' -or
-                (
-                    [IO.Path]::GetExtension($item.Name) -ieq '.json' -and
-                    [IO.Path]::GetFileNameWithoutExtension($item.Name) -imatch $privateJsonStemPattern
-                )
+                (Test-PrivateJsonName -Name $item.Name)
             ) {
                 throw 'runtime-private-file-rejected'
             }

@@ -267,7 +267,11 @@ describe("deployment package manifest", () => {
       "privateDescriptor.Json",
       "PRIVATEDESCRIPTOR.JSON",
       "bridgeTokenV2.json",
+      "bridgeTokenV2.backup.json",
+      "bridgeToken-v2.json",
+      "bridgeToken_v2.json",
       "flockDescriptorV2.Json",
+      "flockDescriptorV2Copy.json",
     ]) {
       addFileCase(`private file ${name}`, name, false);
     }
@@ -278,6 +282,7 @@ describe("deployment package manifest", () => {
       "css-property-descriptors.js",
       "tokenizer.json",
       "property-descriptors.json",
+      "cssPropertyDescriptorV2.json",
     ]) {
       addFileCase(`dependency source ${name}`, name, true);
     }
