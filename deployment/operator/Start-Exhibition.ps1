@@ -69,7 +69,7 @@ function Invoke-DeploymentProcessCaptured {
 function Start-DeploymentChild {
     param(
         [Parameter(Mandatory = $true)][string] $FilePath,
-        [Parameter(Mandatory = $true)][string[]] $Arguments,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]] $Arguments,
         [Parameter(Mandatory = $true)][string] $WorkingDirectory,
         [hashtable] $Environment = @{}
     )

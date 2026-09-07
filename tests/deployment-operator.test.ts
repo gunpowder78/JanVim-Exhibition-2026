@@ -361,6 +361,46 @@ describe("attended deployment operator module", () => {
     }
   });
 
+  it.each([
+    ["zero arguments for the native application", []],
+    ["literal arguments for wrapper processes", ["argument with spaces", "semicolon;literal", 'quote"value']],
+  ])("starts a deployment child with %s", (label, arguments_) => {
+    const proofPath = join(tempRoot, `${label.replaceAll(" ", "-")}.json`);
+    const preloadPath = join(tempRoot, "record-child-arguments.cjs");
+    writeFileSync(preloadPath, [
+      'const fs = require("node:fs");',
+      "fs.writeFileSync(process.env.JANVIM_DEPLOY_TEST_RESULT, JSON.stringify({",
+      "  arguments: process.argv.slice(1), directory: process.cwd(),",
+      "}));",
+      "process.exit(0);",
+    ].join("\n"), "utf8");
+    const launcher = join(root, "deployment", "operator", "Start-Exhibition.ps1");
+    const childArguments = arguments_.length === 0 ? [] : [preloadPath, ...arguments_];
+    const argumentsExpression = `@(${childArguments.map(psQuote).join(",")})`;
+    const preloadOption = `--require="${preloadPath.replaceAll("\\", "/")}"`;
+    const result = invoke(
+      `$parseTokens=$null; $parseErrors=$null; ` +
+        `$ast=[Management.Automation.Language.Parser]::ParseFile(${psQuote(launcher)},[ref]$parseTokens,[ref]$parseErrors); ` +
+        `if ($parseErrors.Count -ne 0) { throw 'launcher-parse-failed' }; ` +
+        `$functions=@($ast.FindAll({param($entry) $entry -is [Management.Automation.Language.FunctionDefinitionAst] -and $entry.Name -ceq 'Start-DeploymentChild'},$true)); ` +
+        `if ($functions.Count -ne 1) { throw 'child-function-not-unique' }; ` +
+        `Invoke-Expression $functions[0].Extent.Text; ` +
+        `$child=Start-DeploymentChild -FilePath ${psQuote(process.execPath)} ` +
+        `-Arguments ${argumentsExpression} -WorkingDirectory ${psQuote(tempRoot)} ` +
+        `-Environment @{NODE_OPTIONS=${psQuote(preloadOption)};JANVIM_DEPLOY_TEST_RESULT=${psQuote(proofPath)}}; ` +
+        `try { if (-not $child.WaitForExit(5000)) { throw 'child-timeout' }; ` +
+        `[pscustomobject]@{exitCode=$child.ExitCode}|ConvertTo-Json -Compress ` +
+        `} finally { if (-not $child.HasExited) { $child.Kill($true); [void]$child.WaitForExit(2000) }; $child.Dispose() }`,
+    );
+
+    expect(result.status, `${result.stdout}${result.stderr}`).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual({ exitCode: 0 });
+    expect(JSON.parse(readFileSync(proofPath, "utf8"))).toEqual({
+      arguments: childArguments,
+      directory: tempRoot,
+    });
+  });
+
   it("rejects a package-root reparse point before importing package code", () => {
     for (const name of [
       "Start-Exhibition.ps1",
