@@ -251,10 +251,20 @@ describe("attended deployment operator module", () => {
 
   it("acts on the same process object whose exact identity was validated", () => {
     const moduleSource = readFileSync(modulePath, "utf8");
+    const exactStart = moduleSource.indexOf("function Get-DeploymentExactProcess");
+    const exactEnd = moduleSource.indexOf(
+      "function Test-DeploymentProcessIdentity",
+      exactStart,
+    );
+    const exactFunction = moduleSource.slice(exactStart, exactEnd);
     const start = moduleSource.indexOf("function Stop-DeploymentProcessExact");
     const end = moduleSource.indexOf("Export-ModuleMember", start);
     const stopFunction = moduleSource.slice(start, end);
 
+    expect(exactFunction).toContain("$candidate.SafeHandle");
+    expect(exactFunction.indexOf("$candidate.SafeHandle")).toBeLessThan(
+      exactFunction.indexOf("$candidate.StartTime"),
+    );
     expect(stopFunction).toContain(
       "$candidate = Get-DeploymentExactProcess -Identity $Identity",
     );

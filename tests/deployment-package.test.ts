@@ -213,6 +213,7 @@ describe("deployment package manifest", () => {
 
     for (const name of [".GiT", ".WORKTREES", ".operator", ".SuperPowers"]) {
       addDirectoryCase(`private directory ${name}`, name, false);
+      addFileCase(`private metadata file ${name}`, name, false);
     }
 
     const sessionSuffix = "20260907T010203004Z-a1b2c3d4e5f6";
@@ -265,6 +266,8 @@ describe("deployment package manifest", () => {
       "flock-descriptor.json",
       "privateDescriptor.Json",
       "PRIVATEDESCRIPTOR.JSON",
+      "bridgeTokenV2.json",
+      "flockDescriptorV2.Json",
     ]) {
       addFileCase(`private file ${name}`, name, false);
     }

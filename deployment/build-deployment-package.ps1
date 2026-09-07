@@ -13,7 +13,7 @@ $fixedInstallRoot = 'D:\github\JanVim-Exhibition-Deploy'
 $expectedNodeHash = '17347995af08dadcc73a1a154f0942559fbc3f37b9ba57d4576b4d2bcb2834a2'
 $forbiddenDirectoryNames = @('.git', '.worktrees', '.operator', '.superpowers')
 $forbiddenRunRootPattern = '^(?:deployment|deployment-package|display-config|joint-session|joint-show|joint-sound|joint-validate|sound)-\d{8}T\d{9}Z-[0-9a-f]{12}$'
-$privateJsonStemPattern = '(?:^|[._-])(?:token|descriptor)(?=$|[._-])|(?:token|descriptor)$'
+$privateJsonStemPattern = '(?:^|[._-])(?:token|descriptor)(?:v[0-9]+)?(?=$|[._-])|(?:token|descriptor)(?:v[0-9]+)?$'
 $forbiddenRuntimeNames = @(
     'active-deployment.json', 'flock-input.json', 'run-lease.json',
     'control.json', 'ready.json', 'session.json', 'summary.json'
@@ -73,11 +73,12 @@ function Assert-PlainTree {
                 }
                 continue
             }
+            if ($item.Name -iin $forbiddenDirectoryNames) {
+                if ($item.PSIsContainer) { throw 'runtime-private-directory-rejected' }
+                throw 'runtime-private-file-rejected'
+            }
             if ($item.PSIsContainer) {
-                if (
-                    $item.Name -iin $forbiddenDirectoryNames -or
-                    $item.Name -imatch $forbiddenRunRootPattern
-                ) {
+                if ($item.Name -imatch $forbiddenRunRootPattern) {
                     throw 'runtime-private-directory-rejected'
                 }
                 $pending.Push($item.FullName)

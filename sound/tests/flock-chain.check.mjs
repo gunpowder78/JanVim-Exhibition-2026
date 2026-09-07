@@ -31,7 +31,6 @@ async function bounded(promise, ms = 1500) {
 async function udpPortAvailable(port) {
   const socket = dgram.createSocket({ type: "udp4", reuseAddr: false });
   socket.unref();
-  let bound = false;
   try {
     return await bounded(new Promise((resolve, reject) => {
       socket.once("error", error => {
@@ -39,12 +38,11 @@ async function udpPortAvailable(port) {
         else reject(error);
       });
       socket.bind({ address: "127.0.0.1", port, exclusive: true }, () => {
-        bound = true;
         resolve(true);
       });
     }), 1000);
   } finally {
-    if (bound) await new Promise(resolve => socket.close(resolve));
+    await new Promise(resolve => socket.close(resolve));
   }
 }
 

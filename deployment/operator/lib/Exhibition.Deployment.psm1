@@ -469,6 +469,10 @@ function Get-DeploymentExactProcess {
             [Globalization.DateTimeStyles]::RoundtripKind
         ).UtcDateTime
         $candidate = [Diagnostics.Process]::GetProcessById([int]$Identity.pid)
+        $pinnedHandle = $candidate.SafeHandle
+        if ($pinnedHandle.IsInvalid -or $pinnedHandle.IsClosed) {
+            throw 'deployment-process-identity-unavailable'
+        }
         $actualStart = $candidate.StartTime.ToUniversalTime()
         $actualPath = Resolve-DeploymentAbsolutePath `
             -Path $candidate.Path `
