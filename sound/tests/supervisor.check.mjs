@@ -19,6 +19,7 @@ test("PowerShell launcher forwards explicit flock ingress and rejects simulated 
   const root = await prepareRunRoot(null);
   t.after(() => rm(root, { recursive: true, force: true }));
   await copyFile(path.resolve("sound/start-sound.ps1"), path.join(root, "start-sound.ps1"));
+  await copyFile(path.resolve("sound/node-runtime.ps1"), path.join(root, "node-runtime.ps1"));
   await writeFile(path.join(root, "run.mjs"), 'process.stdout.write(JSON.stringify(process.argv.slice(2)));');
   const launch = args => runProcess("pwsh.exe",
     ["-NoProfile", "-NonInteractive", "-File", path.join(root, "start-sound.ps1"), ...args], { timeoutMs: 5000 });

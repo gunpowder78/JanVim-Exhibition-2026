@@ -454,12 +454,12 @@ function Get-DeploymentProcessIdentity {
     }
 }
 
-function Test-DeploymentProcessIdentity {
+function Get-DeploymentExactProcess {
     [CmdletBinding()]
     param([Parameter(Mandatory = $true)] $Identity)
 
     Assert-DeploymentProcessIdentityRecord -Value $Identity
-    if ($null -eq $Identity) { return $false }
+    if ($null -eq $Identity) { return $null }
     $candidate = $null
     try {
         $expectedStart = [DateTimeOffset]::ParseExact(
@@ -473,14 +473,32 @@ function Test-DeploymentProcessIdentity {
         $actualPath = Resolve-DeploymentAbsolutePath `
             -Path $candidate.Path `
             -Reason 'deployment-process-executable'
-        return $actualStart.Ticks -eq $expectedStart.Ticks -and [string]::Equals(
-            $actualPath,
-            $Identity.executable,
-            [StringComparison]::OrdinalIgnoreCase
-        )
+        if (
+            $actualStart.Ticks -ne $expectedStart.Ticks -or
+            -not [string]::Equals(
+                $actualPath,
+                $Identity.executable,
+                [StringComparison]::OrdinalIgnoreCase
+            )
+        ) {
+            $candidate.Dispose()
+            $candidate = $null
+        }
+        return $candidate
     }
     catch {
-        return $false
+        if ($null -ne $candidate) { $candidate.Dispose() }
+        return $null
+    }
+}
+
+function Test-DeploymentProcessIdentity {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)] $Identity)
+
+    $candidate = Get-DeploymentExactProcess -Identity $Identity
+    try {
+        return $null -ne $candidate
     }
     finally {
         if ($null -ne $candidate) { $candidate.Dispose() }
@@ -511,8 +529,8 @@ function Stop-DeploymentProcessExact {
     )
 
     Assert-DeploymentProcessIdentityRecord -Value $Identity
-    if (-not (Test-DeploymentProcessIdentity -Identity $Identity)) { return $true }
-    $candidate = [Diagnostics.Process]::GetProcessById([int]$Identity.pid)
+    $candidate = Get-DeploymentExactProcess -Identity $Identity
+    if ($null -eq $candidate) { return $true }
     try {
         if ($CloseFirst) { [void]$candidate.CloseMainWindow() }
     }
@@ -520,8 +538,8 @@ function Stop-DeploymentProcessExact {
         $candidate.Dispose()
     }
     if (Wait-DeploymentProcessExit -Identity $Identity -TimeoutMs $TimeoutMs) { return $true }
-    if (-not (Test-DeploymentProcessIdentity -Identity $Identity)) { return $true }
-    $candidate = [Diagnostics.Process]::GetProcessById([int]$Identity.pid)
+    $candidate = Get-DeploymentExactProcess -Identity $Identity
+    if ($null -eq $candidate) { return $true }
     try {
         $candidate.Kill($true)
     }

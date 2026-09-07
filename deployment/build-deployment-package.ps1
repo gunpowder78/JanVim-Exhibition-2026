@@ -11,9 +11,12 @@ Set-StrictMode -Version Latest
 
 $fixedInstallRoot = 'D:\github\JanVim-Exhibition-Deploy'
 $expectedNodeHash = '17347995af08dadcc73a1a154f0942559fbc3f37b9ba57d4576b4d2bcb2834a2'
+$forbiddenDirectoryNames = @('.git', '.worktrees', '.operator', '.superpowers')
+$forbiddenRunRootPattern = '^(?:deployment|deployment-package|display-config|joint-session|joint-show|joint-sound|joint-validate|sound)-\d{8}T\d{9}Z-[0-9a-f]{12}$'
+$privateJsonStemPattern = '(?:^|[._-])(?:token|descriptor)(?=$|[._-])|(?:token|descriptor)$'
 $forbiddenRuntimeNames = @(
     'active-deployment.json', 'flock-input.json', 'run-lease.json',
-    'control.json', 'ready.json', 'summary.json'
+    'control.json', 'ready.json', 'session.json', 'summary.json'
 )
 $script:AllowedWorkspaceLinks = [Collections.Generic.Dictionary[string, string]]::new(
     [StringComparer]::OrdinalIgnoreCase
@@ -71,10 +74,24 @@ function Assert-PlainTree {
                 continue
             }
             if ($item.PSIsContainer) {
+                if (
+                    $item.Name -iin $forbiddenDirectoryNames -or
+                    $item.Name -imatch $forbiddenRunRootPattern
+                ) {
+                    throw 'runtime-private-directory-rejected'
+                }
                 $pending.Push($item.FullName)
                 continue
             }
-            if ($item.Name -cin $forbiddenRuntimeNames -or $item.Name -like 'jianshan-live-*.toml') {
+            if (
+                $item.Name -iin $forbiddenRuntimeNames -or
+                $item.Name -ieq 'jianshan-live.toml' -or
+                $item.Name -ilike 'jianshan-live-*.toml' -or
+                (
+                    [IO.Path]::GetExtension($item.Name) -ieq '.json' -and
+                    [IO.Path]::GetFileNameWithoutExtension($item.Name) -imatch $privateJsonStemPattern
+                )
+            ) {
                 throw 'runtime-private-file-rejected'
             }
         }

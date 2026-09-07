@@ -5,6 +5,10 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 $packageRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+$rootItem = Get-Item -LiteralPath $packageRoot -Force
+if (-not $rootItem.PSIsContainer -or ($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+    throw 'deployment-package-root-invalid'
+}
 $modulePath = Join-Path $PSScriptRoot 'lib\Exhibition.Deployment.psm1'
 Import-Module $modulePath -Force
 $defaults = Read-ExhibitionSiteDefaults -Path (Join-Path $packageRoot 'config\site-defaults.json')
@@ -258,7 +262,7 @@ try {
             '-ExpectedStartedAtUtc', $jianshanIdentity.startedAtUtc,
             '-X', ([string]$display.screen3.x), '-Y', ([string]$display.screen3.y),
             '-Width', ([string]$display.screen3.width), '-Height', ([string]$display.screen3.height),
-            '-TimeoutMs', '15000'
+            '-TimeoutMs', '10000'
         ) `
         -TimeoutMs 20000
     if ($placement.ExitCode -ne 0) { throw 'jianshan-window-placement-failed' }

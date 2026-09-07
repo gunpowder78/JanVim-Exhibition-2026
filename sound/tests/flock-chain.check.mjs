@@ -28,6 +28,26 @@ async function bounded(promise, ms = 1500) {
   } finally { abort.abort(); }
 }
 
+async function udpPortAvailable(port) {
+  const socket = dgram.createSocket({ type: "udp4", reuseAddr: false });
+  socket.unref();
+  let bound = false;
+  try {
+    return await bounded(new Promise((resolve, reject) => {
+      socket.once("error", error => {
+        if (error.code === "EADDRINUSE") resolve(false);
+        else reject(error);
+      });
+      socket.bind({ address: "127.0.0.1", port, exclusive: true }, () => {
+        bound = true;
+        resolve(true);
+      });
+    }), 1000);
+  } finally {
+    if (bound) await new Promise(resolve => socket.close(resolve));
+  }
+}
+
 async function until(read, accept, label, ms = 1500, deadline = performance.now() + ms) {
   while (performance.now() < deadline) {
     const value = await read();
@@ -158,7 +178,9 @@ async function attach(t, receipt, frame, expected) {
       socket.on("data", receive);
     }), 1000);
     socket.write(encode(frame));
-    assert.equal(await ack, expected, "exact attach ACK");
+    const reply = await ack;
+    if (typeof expected === "function") expected(JSON.parse(reply));
+    else assert.equal(reply, expected, "exact attach ACK");
   } finally { socket.off("data", receive); }
   return socket;
 }
@@ -190,6 +212,8 @@ for (const disconnect of [false, true]) {
         query.close();
         await handle.terminate();
         await bounded(handle.completion, 8000);
+        await until(() => Promise.all([57140, 57141].map(udpPortAvailable)),
+          ports => ports.every(Boolean), "owned sound ports released", 5000);
       });
       const json = async (name, publishing = false) => {
         try { return JSON.parse(await readFile(path.join(runRoot, name), "utf8")); }
@@ -206,7 +230,8 @@ for (const disconnect of [false, true]) {
       const receipt = await json("control.json");
       const descriptor = await json("flock-input.json");
       assert.equal(descriptor.active, true);
-      assert.equal(descriptor.protocol, "jianshan-flock-ndjson-v1");
+      assert.equal(descriptor.version, 2);
+      assert.equal(descriptor.protocol, "jianshan-flock-ndjson-v2");
       assert.equal(descriptor.port, receipt.port);
       assert.ok(/^[0-9a-f]{64}$/.test(descriptor.token) && descriptor.token !== receipt.token,
         "independent private flock credential");
@@ -215,8 +240,15 @@ for (const disconnect of [false, true]) {
         '{"ok":true,"input":"real-cursor"}\n');
       const showOrigin = performance.now();
       const sourceId = randomBytes(16).toString("hex");
-      const bird = await attach(t, descriptor, { version: 1, command: "attach-flock", token: descriptor.token, sourceId },
-        '{"version":1,"ok":true,"input":"jianshan-flock-ndjson-v1"}\n');
+      const bird = await attach(t, descriptor, { version: 2, command: "attach-flock", token: descriptor.token, sourceId },
+        ack => {
+          assert.deepEqual(Object.keys(ack).sort(), ["gainDb", "input", "ok", "persistence", "version"]);
+          assert.equal(ack.version, 2);
+          assert.equal(ack.ok, true);
+          assert.equal(ack.input, "jianshan-flock-ndjson-v2");
+          assert.ok(Number.isInteger(ack.gainDb) && ack.gainDb >= -24 && ack.gainDb <= 6);
+          assert.ok(["saved", "save-error"].includes(ack.persistence));
+        });
       const birdOrigin = performance.now();
       let showSeq = 0;
       let birdSeq = 0;

@@ -249,6 +249,18 @@ describe("attended deployment operator module", () => {
     });
   });
 
+  it("acts on the same process object whose exact identity was validated", () => {
+    const moduleSource = readFileSync(modulePath, "utf8");
+    const start = moduleSource.indexOf("function Stop-DeploymentProcessExact");
+    const end = moduleSource.indexOf("Export-ModuleMember", start);
+    const stopFunction = moduleSource.slice(start, end);
+
+    expect(stopFunction).toContain(
+      "$candidate = Get-DeploymentExactProcess -Identity $Identity",
+    );
+    expect(stopFunction).not.toContain("[Diagnostics.Process]::GetProcessById");
+  });
+
   it("checks in exact non-secret site defaults and all three operator entry points", () => {
     expect(JSON.parse(readFileSync(defaultsPath, "utf8"))).toEqual({
       schema: 1,
@@ -293,6 +305,8 @@ describe("attended deployment operator module", () => {
     }
     expect(start).toContain("'-StartPolicy', 'Automatic'");
     expect(start).toContain("'-Listen'");
+    expect(start).toContain("'-TimeoutMs', '10000'");
+    expect(start).not.toContain("'-TimeoutMs', '15000'");
     expect(start).toContain("show-stop-shortcut-unavailable");
     expect(stop).toContain("Read-ActiveDeploymentPointer");
     expect(stop).toContain("Stop-DeploymentProcessExact");
@@ -300,6 +314,26 @@ describe("attended deployment operator module", () => {
       expect(source).not.toMatch(/Get-Process\s+-Name/iu);
       expect(source).not.toMatch(/Stop-Process\s+-Name/iu);
       expect(source).not.toMatch(/taskkill/iu);
+    }
+  });
+
+  it("rejects a package-root reparse point before importing package code", () => {
+    for (const name of [
+      "Start-Exhibition.ps1",
+      "Stop-Exhibition.ps1",
+      "Configure-Displays.ps1",
+    ]) {
+      const source = readFileSync(
+        join(root, "deployment", "operator", name),
+        "utf8",
+      );
+      const rootCheck = source.indexOf("$rootItem = Get-Item -LiteralPath $packageRoot -Force");
+      const moduleImport = source.indexOf("Import-Module");
+      expect(rootCheck, name).toBeGreaterThan(0);
+      expect(rootCheck, name).toBeLessThan(moduleImport);
+      expect(source.slice(rootCheck, moduleImport), name).toContain(
+        "[IO.FileAttributes]::ReparsePoint",
+      );
     }
   });
 });

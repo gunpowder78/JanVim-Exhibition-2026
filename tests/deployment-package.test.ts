@@ -21,6 +21,11 @@ const manifestTool = join(
   "lib",
   "package-manifest.mjs",
 );
+const builderScript = join(
+  repositoryRoot,
+  "deployment",
+  "build-deployment-package.ps1",
+);
 const roots: string[] = [];
 
 afterEach(() => {
@@ -38,6 +43,47 @@ function fixture(): string {
   writeFileSync(join(root, "alpha.txt"), "alpha\n", "utf8");
   writeFileSync(join(root, "nested", "beta.bin"), Buffer.from([0, 1, 2, 255]));
   return root;
+}
+
+function sourceTreeFixture(): string {
+  const root = mkdtempSync(join(tmpdir(), "janvim-package-source-"));
+  roots.push(root);
+  return root;
+}
+
+function psQuote(value: string): string {
+  return `'${value.replaceAll("'", "''")}'`;
+}
+
+function validatePackageSourceTrees(cases: Array<{ label: string; root: string }>) {
+  const powerShellCases = cases
+    .map(({ label, root }) =>
+      `[pscustomobject]@{label=${psQuote(label)};path=${psQuote(root)}}`)
+    .join(",");
+  const command = [
+    "$ErrorActionPreference='Stop'",
+    `$builderPath=${psQuote(builderScript)}`,
+    "$builderText=Get-Content -LiteralPath $builderPath -Raw",
+    "$mainStart=$builderText.IndexOf('$source = Resolve-BuilderPath',[StringComparison]::Ordinal)",
+    "if($mainStart -lt 0){throw 'builder-main-marker-missing'}",
+    "$loader=[scriptblock]::Create($builderText.Substring(0,$mainStart))",
+    ". $loader -SourceRoot 'test' -JianShanCandidateRoot 'test' -NodeExecutable 'test' -OutputParent 'test'",
+    `$cases=@(${powerShellCases})`,
+    "$results=foreach($case in $cases){try{Assert-PlainTree -Path $case.path;[pscustomobject]@{label=$case.label;accepted=$true;reason=$null}}catch{[pscustomobject]@{label=$case.label;accepted=$false;reason=$_.Exception.Message}}}",
+    "ConvertTo-Json -InputObject @($results) -Compress",
+  ].join("\n");
+  const result = spawnSync(
+    "pwsh",
+    ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command],
+    { encoding: "utf8", timeout: 20_000, windowsHide: true },
+  );
+
+  expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+  return JSON.parse(result.stdout) as Array<{
+    label: string;
+    accepted: boolean;
+    reason: string | null;
+  }>;
 }
 
 function run(command: "create" | "verify", root: string) {
@@ -151,6 +197,98 @@ describe("deployment package manifest", () => {
     expect(run("verify", verifyRoot).status).not.toBe(0);
   });
 
+  it("enforces the package-source privacy gate without dependency-name false positives", () => {
+    const cases: Array<{ label: string; root: string; accepted: boolean }> = [];
+    const addDirectoryCase = (label: string, name: string, accepted: boolean) => {
+      const root = sourceTreeFixture();
+      mkdirSync(join(root, "nested", name), { recursive: true });
+      cases.push({ label, root, accepted });
+    };
+    const addFileCase = (label: string, name: string, accepted: boolean) => {
+      const root = sourceTreeFixture();
+      mkdirSync(join(root, "nested"), { recursive: true });
+      writeFileSync(join(root, "nested", name), "fixture\n", "utf8");
+      cases.push({ label, root, accepted });
+    };
+
+    for (const name of [".GiT", ".WORKTREES", ".operator", ".SuperPowers"]) {
+      addDirectoryCase(`private directory ${name}`, name, false);
+    }
+
+    const sessionSuffix = "20260907T010203004Z-a1b2c3d4e5f6";
+    for (const family of [
+      "deployment",
+      "deployment-package",
+      "display-config",
+      "JOINT-SESSION",
+      "joint-show",
+      "joint-sound",
+      "joint-validate",
+      "SOUND",
+    ]) {
+      addDirectoryCase(
+        `production run root ${family}`,
+        `${family}-${sessionSuffix}`,
+        false,
+      );
+    }
+
+    for (const name of [
+      ".git-cache",
+      ".operator-tools",
+      "deployment-package-source",
+      "joint-session-a",
+      "joint-show-assets",
+      "joint-sound-test",
+      "joint-validate-notes",
+      "sound-effects",
+      "surround-sound-library",
+      "deployment-20260907T010203004Z-a1b2c3d4e5f",
+      "display-config-20260907T010203004Z-a1b2c3d4e5f67",
+      "sound-20260907T01020304Z-a1b2c3d4e5f6",
+    ]) {
+      addDirectoryCase(`ordinary source directory ${name}`, name, true);
+    }
+
+    for (const name of [
+      "active-deployment.json",
+      "flock-input.json",
+      "run-lease.json",
+      "control.json",
+      "ready.json",
+      "summary.json",
+      "session.json",
+      "JianShan-Live.toml",
+      "jianshan-live-private.toml",
+      "bridge-token.json",
+      "token-private.JSON",
+      "flock-descriptor.json",
+      "privateDescriptor.Json",
+      "PRIVATEDESCRIPTOR.JSON",
+    ]) {
+      addFileCase(`private file ${name}`, name, false);
+    }
+
+    for (const name of [
+      "token-before.cjs",
+      "TokenStream.js",
+      "css-property-descriptors.js",
+      "tokenizer.json",
+      "property-descriptors.json",
+    ]) {
+      addFileCase(`dependency source ${name}`, name, true);
+    }
+
+    const results = validatePackageSourceTrees(cases);
+    expect(results.map(({ label, accepted }) => ({ label, accepted }))).toEqual(
+      cases.map(({ label, accepted }) => ({ label, accepted })),
+    );
+    for (const result of results) {
+      if (result.accepted) expect(result.reason, result.label).toBeNull();
+      else expect(result.reason, result.label).toMatch(/^runtime-private-(?:directory|file)-rejected$/u);
+    }
+  });
+
   it("rejects more than 100,000 manifest entries before payload traversal", () => {
     const root = fixture();
     const files = Array.from({ length: 100_001 }, (_unused, index) => ({
@@ -171,7 +309,7 @@ describe("deployment package manifest", () => {
 
   it("checks in the package builder and read-only deployment verifier", () => {
     for (const path of [
-      join(repositoryRoot, "deployment", "build-deployment-package.ps1"),
+      builderScript,
       join(repositoryRoot, "deployment", "operator", "Verify-Deployment.ps1"),
     ]) {
       expect(existsSync(path), path).toBe(true);

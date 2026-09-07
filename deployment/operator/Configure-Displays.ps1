@@ -5,6 +5,10 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 $packageRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+$rootItem = Get-Item -LiteralPath $packageRoot -Force
+if (-not $rootItem.PSIsContainer -or ($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+    throw 'deployment-package-root-invalid'
+}
 Import-Module (Join-Path $PSScriptRoot 'lib\Exhibition.Deployment.psm1') -Force
 $defaults = Read-ExhibitionSiteDefaults -Path (Join-Path $packageRoot 'config\site-defaults.json')
 if (-not [string]::Equals($packageRoot, $defaults.packageRoot, [StringComparison]::OrdinalIgnoreCase)) {
