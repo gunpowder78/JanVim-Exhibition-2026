@@ -89,6 +89,27 @@ function Start-DeploymentChild {
     return $process
 }
 
+function Stop-DeploymentStartedChild {
+    param(
+        [Parameter(Mandatory = $true)][Diagnostics.Process] $Process,
+        [ValidateRange(1, 5000)][int] $TimeoutMs = 3000
+    )
+    # Only the original object returned by Start-DeploymentChild is accepted here.
+    # Never reconstruct an unidentified process from a PID.
+    try {
+        $pinnedHandle = $Process.SafeHandle
+        if ($pinnedHandle.IsInvalid -or $pinnedHandle.IsClosed) { return $false }
+        if ($Process.HasExited) { return $true }
+        try { [void]$Process.CloseMainWindow() } catch {}
+        if ($Process.WaitForExit($TimeoutMs)) { return $true }
+        $Process.Kill()
+        return $Process.WaitForExit(2000)
+    }
+    catch {
+        try { return $Process.HasExited } catch { return $false }
+    }
+}
+
 function Wait-DeploymentFile {
     param(
         [Parameter(Mandatory = $true)][string] $Path,
@@ -344,6 +365,16 @@ try {
 catch {
     $failure = $_.Exception.Message
     $cleanupFailed = $false
+    foreach ($entry in @(
+        @{ Process = $showProcess; Identity = $showIdentity },
+        @{ Process = $jianshanProcess; Identity = $jianshanIdentity }
+    )) {
+        if ($null -ne $entry.Process -and $null -eq $entry.Identity) {
+            if (-not (Stop-DeploymentStartedChild -Process $entry.Process)) {
+                $cleanupFailed = $true
+            }
+        }
+    }
     foreach ($identity in @($controllerIdentity, $showIdentity, $jianshanIdentity)) {
         if ($null -ne $identity) {
             try {
@@ -362,6 +393,11 @@ catch {
             }
         }
         catch { $cleanupFailed = $true }
+    }
+    elseif ($null -ne $soundProcess) {
+        if (-not (Stop-DeploymentStartedChild -Process $soundProcess)) {
+            $cleanupFailed = $true
+        }
     }
     if ($pointerWritten -and -not $cleanupFailed) {
         try { Remove-ActiveDeploymentPointer -Path $pointerPath } catch { $cleanupFailed = $true }

@@ -499,24 +499,47 @@ function Get-DeploymentProcessIdentity {
     )
 
     try {
-        $Process.Refresh()
-        $path = $Process.Path
-        $started = $Process.StartTime.ToUniversalTime()
+        $pinnedHandle = $Process.SafeHandle
+        if ($pinnedHandle.IsInvalid -or $pinnedHandle.IsClosed) {
+            throw 'deployment-process-identity-unavailable'
+        }
     }
     catch {
         throw 'deployment-process-identity-unavailable'
     }
-    if ([string]::IsNullOrWhiteSpace($path)) {
-        throw 'deployment-process-identity-unavailable'
+    $path = $null
+    $started = $null
+    $available = $false
+    $expected = if ([string]::IsNullOrWhiteSpace($ExpectedExecutable)) { $null } else {
+        Resolve-DeploymentAbsolutePath -Path $ExpectedExecutable -Reason 'deployment-process-executable'
     }
-    $resolvedPath = Resolve-DeploymentAbsolutePath -Path $path -Reason 'deployment-process-executable'
-    if (-not [string]::IsNullOrWhiteSpace($ExpectedExecutable)) {
-        $expected = Resolve-DeploymentAbsolutePath `
-            -Path $ExpectedExecutable `
-            -Reason 'deployment-process-executable'
-        if (-not [string]::Equals($resolvedPath, $expected, [StringComparison]::OrdinalIgnoreCase)) {
-            throw 'deployment-process-executable-mismatch'
+    # A just-created native image can precede readable module metadata.
+    # Keep the original handle and bound the total retry delay to 1,950 ms.
+    for ($attempt = 0; $attempt -lt 40; $attempt++) {
+        try {
+            $Process.Refresh()
+            if ($Process.HasExited) { break }
+            $path = $Process.Path
         }
+        catch {
+            $path = $null
+        }
+        if (-not [string]::IsNullOrWhiteSpace($path)) {
+            $resolvedPath = Resolve-DeploymentAbsolutePath -Path $path -Reason 'deployment-process-executable'
+            if ($null -ne $expected -and -not [string]::Equals($resolvedPath, $expected, [StringComparison]::OrdinalIgnoreCase)) {
+                throw 'deployment-process-executable-mismatch'
+            }
+            try {
+                $started = $Process.StartTime.ToUniversalTime()
+                $available = $true
+            }
+            catch { $available = $false }
+        }
+        if ($available) { break }
+        if ($attempt -lt 39) { Start-Sleep -Milliseconds 50 }
+    }
+    if (-not $available) {
+        throw 'deployment-process-identity-unavailable'
     }
     return [pscustomobject][ordered]@{
         pid = [int]$Process.Id
