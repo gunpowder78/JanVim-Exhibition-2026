@@ -441,3 +441,42 @@ SHA-256 仍为 `2ba4526770f4f1498116d81be846950e26701183700d5b252dbcffc5000fe675
 `D:\github\exhibition-mini-pc-receipt-20260907\studio-stop-feedback-20260908-2345`，包括按钮和
 快捷键两次黄色提示截图。用户已完成人工快捷键与提示验收；20 秒鼠标静止隐藏已通过确定性测试，
 仍待用户肉眼确认。新功能包安装后的再次真实重启、离线和强制恢复验收仍分别待完成。
+
+## Narrative 光标现场复测与接受
+
+用户首次现场复测发现：鼠标进入 Narrative 后会立即显示，再移动后也会重新显示，但在窗口上方
+静止超过 20 秒时不会自动隐藏；点击一次左键后等待可隐藏。诊断确认页面原实现对每一个
+`pointermove` 都重新计时，Chromium 即使报告相同坐标也可能不断延长空闲期限。提交
+`3ae81a3eaa3a6bdbc70880d8ecf651d0907e0906` 因此记录上一次指针坐标，只让坐标实际变化重新开始
+20 秒计时；同坐标重复事件被忽略，离开和销毁时清理位置状态，仍只保留一个有限计时器。
+
+回归测试先在旧实现上复现第 20 秒仍为 `visible`，修复后 Narrative 场景 26/26 通过；typecheck、
+lint、build 和 Electron 模块图验证通过。完整测试运行 68 个文件 / 1,322 项，其中 1,316 项通过，
+其余 6 项均为 Windows 并行负载下超过用例固定的 5 秒上限。G2 文件随后单独运行 6/6 通过；离线
+包文件单独运行 16/17 通过，最后一个用例实耗约 6.1 秒，在仅对本次命令放宽为 10 秒后断言通过。
+仓库测试配置没有修改。独立审查未发现 Critical 或 Important 问题。
+
+本次独立部署包位于
+`D:\VirtualData\JanVim-Exhibition-Rehearsals\deployment-package-20260908T165259438Z-c4826e2aa612`。
+ZIP 331,569,254 bytes，SHA-256
+`709c493e68a6686268f31b181d0636d56c5a6114bdb1dba9c85bdcb5cca3d37e`；manifest
+1,466,941 bytes，SHA-256
+`1bbd8f18ea425b258d9beeea14f7062b5c7fedf9d86e010925e412ba6e561b7c`。此前已安装的退出反馈包
+完整保留于 `D:\github\JanVim-Exhibition-Deploy-preserved-20260908T165931815Z`，其 manifest 仍为
+`dab991f5bc20c96ad0ad328a9621e1d88d79b2625a092952e2292a4c093d5253`。
+
+新包通过原计划任务在工作室三台显示器上实跑。用户再次观察到鼠标移动后立即显示；静止超过
+20 秒仍未隐藏，点击一次左键后立即隐藏；再次移动后重新显示。用户明确表示接受当前效果、算作
+测试通过并不再继续修复。此结论作为“带已知现场行为的人工接受”记录，不将静止 20 秒自动隐藏
+写成已实现。用户随后点击 `STOP SHOW`，退出通过。
+
+该场完成 3 个循环，0 重试、0 恢复；控制器终态为
+`intentional-success / operator-stop`，按钮日志为 `source=renderer / disposition=queued`。声音运行
+315.688141 秒，最多同时 8 个拨弦节点，以 `clean=true` 正常结束。任务回到 Ready，
+`LastTaskResult=0`，活动指针、展示进程及 57140/57141 端口均无残留。运行后 9,142 个不可变文件
+再次通过，允许的运行状态为 39 文件 / 171,772 bytes。本轮证据位于
+`D:\github\exhibition-mini-pc-receipt-20260907\studio-pointer-idle-20260909-0100`，最终结果为
+`verified-pointer-idle-smoke.json`。
+
+本次使用工作室显示器默认映射，`acceptanceScope` 仍为 `monitor-simulation`，不冒充实体投影验收。
+此更新包安装后的再次真实 Windows 重启、离线和强制恢复验收仍待完成。
