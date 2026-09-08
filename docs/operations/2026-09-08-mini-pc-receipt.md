@@ -353,3 +353,15 @@ JanVim core、《见山》EXE 与声音混音沿用已固定身份。
 通过，唯一失败为启动器发布身份仍指向旧 bundle。同步启动器、部署校验器及身份测试的
 字节数/SHA 后，相关 `electron-build-smoke` 24 项全部通过，并再次通过 typecheck、lint、
 build 与真实 bundle 身份核对。完整测试的原始失败日志保留，没有伪写为全量首次通过。
+
+21:55 首个修复候选完成独立安装，旧黄金目录完整保留为
+`D:\github\JanVim-Exhibition-Deploy-preserved-20260908T135313666Z`，移动后仍匹配原清单。
+同一计划任务的完整预检于 6.461 秒通过，默认映射也成功；声音服务却在就绪前退出，原因是
+旧 `server-port-owner.ps1` 把暂未绑定的 UDP 端口查询当作一般异常，返回 4。只读实测明确
+捕获 `CmdletizationQuery_NotFound_LocalPort,Get-NetUDPEndpoint` / `ObjectNotFound`；
+该 helper 在旧包与候选包中原本字节完全相同，因此这是进一步暴露的启动竞态。
+
+修复仅将这个精确错误归为既有的“端口尚未就绪”返回 2，保留 30 秒整体启动和 3 秒单次
+检查上限。真实 UDP 回归先复现旧代码返回 4，再验证新代码的空闲端口 2、自身端口 0、
+外来所有者 3；权限异常和无关 ObjectNotFound 仍为 4。连同启动预检 17 项通过，并通过
+typecheck、lint、build；控制器 bundle 身份不变。随后构建第二个独立候选继续任务复验。
