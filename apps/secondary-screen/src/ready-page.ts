@@ -149,12 +149,34 @@ export function createReadyPage(
   operatorControls.append(soundMixControls, showActions);
   ready.append(readyTitle, readyStatus);
 
-  surface.append(header, workspace, keyRegion, p1Layer, ready, operatorControls);
+  const shutdownNotice = document.createElement("aside");
+  shutdownNotice.className = "shutdown-notice";
+  shutdownNotice.dataset.shutdownNotice = "";
+  shutdownNotice.setAttribute("role", "status");
+  shutdownNotice.setAttribute("aria-live", "assertive");
+  shutdownNotice.hidden = true;
+  for (const text of ["三屏演示正在退出，", "请等待..."]) {
+    const line = document.createElement("span");
+    line.dataset.shutdownLine = "";
+    line.textContent = text;
+    shutdownNotice.append(line);
+  }
+
+  surface.append(
+    header,
+    workspace,
+    keyRegion,
+    p1Layer,
+    ready,
+    operatorControls,
+    shutdownNotice,
+  );
   root.replaceChildren(surface);
 
   return {
     ready,
     readyStatus,
+    shutdownNotice,
     operatorControls,
     startButton,
     restartButton,

@@ -24,6 +24,8 @@ import { ResponseStream } from "./response-stream";
 
 export type { SecondarySceneOptions } from "./model";
 
+const POINTER_IDLE_TIMEOUT_MS = 20_000;
+
 export interface SecondaryRendererRuntime {
   sendRendererEvent(event: RendererToControllerEvent): void;
   requestFrame(callback: () => void): number;
@@ -36,6 +38,7 @@ export class SecondarySceneController {
   private readonly keyOverlay: KeyOverlay;
   private readonly ready: HTMLElement;
   private readonly readyStatus: HTMLElement;
+  private readonly shutdownNotice: HTMLElement;
   private readonly startButton: HTMLButtonElement;
   private readonly restartButton: HTMLButtonElement;
   private readonly stopButton: HTMLButtonElement;
@@ -56,6 +59,8 @@ export class SecondarySceneController {
   private soundMixStatus?: SoundMixStatusEvent;
   private readonly pendingSoundMixTargets = new Set<SoundMixTarget>();
   private soundMixControlsArmed = false;
+  private pointerIdleTimer?: number;
+  private shutdownNoticeLatched = false;
 
   public constructor(
     private readonly root: HTMLElement,
@@ -68,6 +73,7 @@ export class SecondarySceneController {
     this.keyOverlay = new KeyOverlay(elements.keyOverlay);
     this.ready = elements.ready;
     this.readyStatus = elements.readyStatus;
+    this.shutdownNotice = elements.shutdownNotice;
     this.startButton = elements.startButton;
     this.restartButton = elements.restartButton;
     this.stopButton = elements.stopButton;
@@ -77,6 +83,7 @@ export class SecondarySceneController {
     this.windMix = elements.windMix;
     this.instrumentMix = elements.instrumentMix;
     this.p1Layer = elements.p1Layer;
+    this.root.dataset.cursorVisibility = "hidden";
   }
 
   public applyEvent(event: RendererEvent): void {
@@ -118,6 +125,7 @@ export class SecondarySceneController {
     const windUp = (): void => this.emitSoundMixAdjustment("wind", 1);
     const instrumentDown = (): void => this.emitSoundMixAdjustment("instrument", -1);
     const instrumentUp = (): void => this.emitSoundMixAdjustment("instrument", 1);
+    const pointerActivity = (): void => this.showPointerTemporarily();
     this.startButton.addEventListener("click", start);
     this.restartButton.addEventListener("click", restart);
     this.stopButton.addEventListener("click", stop);
@@ -125,6 +133,8 @@ export class SecondarySceneController {
     this.windMix.plusButton.addEventListener("click", windUp);
     this.instrumentMix.minusButton.addEventListener("click", instrumentDown);
     this.instrumentMix.plusButton.addEventListener("click", instrumentUp);
+    this.root.addEventListener("pointerenter", pointerActivity);
+    this.root.addEventListener("pointermove", pointerActivity);
     this.releaseRuntimeListeners = () => {
       this.startButton.removeEventListener("click", start);
       this.restartButton.removeEventListener("click", restart);
@@ -133,6 +143,8 @@ export class SecondarySceneController {
       this.windMix.plusButton.removeEventListener("click", windUp);
       this.instrumentMix.minusButton.removeEventListener("click", instrumentDown);
       this.instrumentMix.plusButton.removeEventListener("click", instrumentUp);
+      this.root.removeEventListener("pointerenter", pointerActivity);
+      this.root.removeEventListener("pointermove", pointerActivity);
     };
 
     let bound = true;
@@ -145,6 +157,7 @@ export class SecondarySceneController {
 
   public dispose(): void {
     this.cancelPresentationAck();
+    this.hidePointer();
     this.releaseRuntimeListeners?.();
     this.releaseRuntimeListeners = undefined;
     this.runtime = undefined;
@@ -210,6 +223,7 @@ export class SecondarySceneController {
   }
 
   private applyStatus(event: ControllerStatusEvent): void {
+    this.shutdownNotice.hidden = !this.shutdownNoticeLatched;
     this.root.dataset.controllerState = event.state;
     this.soundMixControlsArmed = false;
     this.renderSoundMix();
@@ -245,6 +259,13 @@ export class SecondarySceneController {
   }
 
   private applyRunStatus(event: RunStatusEvent): void {
+    if (
+      event.state === "shutting-down" ||
+      (event.state === "running" && event.reason === "operator-stop-pending")
+    ) {
+      this.shutdownNoticeLatched = true;
+    }
+    this.shutdownNotice.hidden = !this.shutdownNoticeLatched;
     this.root.dataset.controllerState = event.state;
     this.soundMixControlsArmed = event.state === "ready" || event.state === "running";
     this.renderSoundMix();
@@ -264,6 +285,10 @@ export class SecondarySceneController {
         this.setOperatorState(key, { start: true });
         return;
       case "running":
+        if (event.reason === "operator-stop-pending") {
+          this.setOperatorState(key, {});
+          return;
+        }
         this.ready.hidden = true;
         this.root.dataset.scene = "running";
         this.readyStatus.textContent = "SHOW RUNNING / STOP QUEUES AT RESET";
@@ -316,6 +341,25 @@ export class SecondarySceneController {
     );
     this.setButtonState(this.stopButton, "stop-show", visible.stop === true);
     this.stopShortcutHint.hidden = visible.stop !== true;
+  }
+
+  private showPointerTemporarily(): void {
+    this.root.dataset.cursorVisibility = "visible";
+    if (this.pointerIdleTimer !== undefined) {
+      window.clearTimeout(this.pointerIdleTimer);
+    }
+    this.pointerIdleTimer = window.setTimeout(() => {
+      this.pointerIdleTimer = undefined;
+      this.root.dataset.cursorVisibility = "hidden";
+    }, POINTER_IDLE_TIMEOUT_MS);
+  }
+
+  private hidePointer(): void {
+    if (this.pointerIdleTimer !== undefined) {
+      window.clearTimeout(this.pointerIdleTimer);
+      this.pointerIdleTimer = undefined;
+    }
+    this.root.dataset.cursorVisibility = "hidden";
   }
 
   private setButtonState(

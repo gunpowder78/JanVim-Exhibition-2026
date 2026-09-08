@@ -111,6 +111,25 @@ describe("secondary preload contract", () => {
     expect(received).toEqual([ready]);
   });
 
+  it("delivers only the precise running status for an accepted pending Stop", () => {
+    const ipc = new FakeIpc();
+    const api = createPreloadApi(ipc);
+    const received: RendererEvent[] = [];
+    api.onShowEvent((value) => received.push(value));
+
+    const accepted = {
+      schema: 1,
+      type: "run-status",
+      generationId: 3,
+      state: "running",
+      reason: "operator-stop-pending",
+    } as const;
+    ipc.emit(SHOW_EVENT_CHANNEL, accepted);
+    ipc.emit(SHOW_EVENT_CHANNEL, { ...accepted, reason: "unbounded-wait" });
+
+    expect(received).toEqual([accepted]);
+  });
+
   it("drops renderer editor actions with unbounded repeat or input rate", () => {
     const ipc = new FakeIpc();
     const api = createPreloadApi(ipc);

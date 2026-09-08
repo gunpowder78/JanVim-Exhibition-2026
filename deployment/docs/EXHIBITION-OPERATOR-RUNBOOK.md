@@ -72,7 +72,7 @@ pwsh -NoProfile -File 'D:\github\JanVim-Exhibition-Deploy\operator\Start-Exhibit
 - `SCREEN-1` 显示 JanVim，并按唯一展演时钟执行编辑回写。
 - `SCREEN-2` 显示叙事页和声音控制，页面上可见 `STOP SHOW`。
 - `SCREEN-3` 显示黑底白鸟的《见山》，自动无边框全屏、无标题栏、无任务栏；无需按 F。
-- 鼠标移入《见山》后仍可显示和点击；相机手势影响鸟群并产生风声。
+- 鼠标进入或移动到叙事页后显示，静止 20 秒后自动隐藏；移动后再次显示。
 - JanVim 的真实光标动作产生拨弦声，鸟群产生风声。
 
 若任一画面位置错误、《见山》出现标题栏或任务栏、没有声音，使用下文的正常关闭，
@@ -93,11 +93,11 @@ pwsh -NoProfile -File 'D:\github\JanVim-Exhibition-Deploy\operator\Start-Exhibit
 
 点击或按键后：
 
-1. 不要重复点击，等待声音平滑淡出。
-2. 等待最多 45 秒，让 JanVim、《见山》、声音和控制器按身份依次退出。
+1. B 屏中央应立即显示两行黄色提示：“三屏演示正在退出，”和“请等待...”。
+2. 不要重复点击或按键。停止请求会等当前 90 秒循环到复位边界，再让声音平滑淡出；随后 JanVim、《见山》、声音和控制器按身份依次退出。
 3. 启动命令的 PowerShell 最终应返回提示符，并显示 `exhibition-complete`、
    `showExitCode: 0` 和 `soundClean: true` 对应的完成信息。
-4. 确认淡出后没有复响，三个展演画面均已关闭。
+4. 黄色提示应保持到 B 屏关闭；确认淡出后没有复响，三个展演画面均已关闭。
 
 准备下一场时，重新执行“开演前验证”，看到 `DEPLOYMENT_VERIFY_PASS` 后再启动。
 

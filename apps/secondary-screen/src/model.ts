@@ -46,6 +46,7 @@ export interface SoundMixRowElements {
 export interface SceneElements {
   ready: HTMLElement;
   readyStatus: HTMLElement;
+  shutdownNotice: HTMLElement;
   operatorControls: HTMLElement;
   startButton: HTMLButtonElement;
   restartButton: HTMLButtonElement;

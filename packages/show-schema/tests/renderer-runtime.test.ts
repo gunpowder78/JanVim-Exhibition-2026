@@ -183,6 +183,15 @@ describe("Task 9 renderer runtime schema", () => {
       expect(() => parseRendererEvent({ ...event, reason: "not-allowed" })).toThrow();
     }
 
+    const stopPending = {
+      schema: 1,
+      type: "run-status",
+      generationId: 4,
+      state: "running",
+      reason: "operator-stop-pending",
+    } as const;
+    expect(parseRendererEvent(stopPending)).toEqual(stopPending);
+
     expect(
       parseRendererEvent({
         schema: 1,
