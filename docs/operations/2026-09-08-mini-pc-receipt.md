@@ -396,3 +396,48 @@ manifest 1,466,941 bytes，SHA-256
 任务保持 Interactive / Highest、登录延时 `PT30S`、IgnoreNew；旧《见山》任务 Disabled。
 真实 Windows 重启后的自动开演，以及本轮用户现场确认画面和可听声音仍待完成。
 此次手动任务试运行不冒充真实重启、离线、强制恢复或全天无人值守验收。
+
+## 2026-09-09 登录自启验收与 Narrative 退出反馈
+
+用户于 22:38:59 实际重启 Windows，并确认登录后的三屏演示自动启动、演示效果正确；由此完成
+登录自启的人工验收。该场运行 13 个循环后以 `operator-stop` 正常结束，任务返回 0。用户同时
+报告 `Ctrl+Shift+S` 看似无效、Narrative 难以显示鼠标。代码和现场日志确认全局快捷键在 Windows
+层注册，不依赖 Narrative 焦点；页面原样式会隐藏一般区域的鼠标，而停止请求在当前 90 秒循环
+的复位边界前没有视觉反馈。旧日志出现一次 `stop-already-queued`，说明第一次停止已受理，但旧版
+没有记录来源，不能把该条历史记录单独当作快捷键验收。
+
+提交 `1a2d1f84e25088bca7d5d4fda5e8b695a4cd4447` 增加以下有界行为：鼠标进入或移动到
+Narrative 后立即显示，静止 20 秒隐藏，再次移动恢复；按钮或全局快捷键的 Stop 一旦受理，立即
+发布精确的 `running / operator-stop-pending` 状态，并在 Narrative 中央以 60% 画面宽度显示
+两行黄色文字“三屏演示正在退出，”与“请等待...”。提示锁存到窗口关闭。停止排队后若会话或
+Narrative surface 恰好故障，控制器直接进入原有有界关闭流程，不会清除 Stop 后自动恢复演示。
+现有复位边界停止、声音淡出和无复响策略保持不变；日志现在区分 `renderer` 与 `shortcut`。
+
+实现遵循先失败后修复的测试顺序。独立审查发现并推动修复了预加载 schema 丢弃 pending 状态、
+会话故障清除 Stop、surface 丢失重建 Narrative 三条竞态。最终相关 46 个测试文件 / 904 项通过，
+typecheck、lint、build 通过；没有重复声明耗时较长的全量 1,310 项测试。最终控制器 bundle 为
+554,384 bytes，SHA-256
+`54e189293b9e1675ad9af3309d39e42cfb663bd12a05af2b28d157624e7aedc2`。
+
+独立部署包位于
+`D:\VirtualData\JanVim-Exhibition-Rehearsals\deployment-package-20260908T154214142Z-9eb2c1cb1bf2`。
+ZIP 331,656,863 bytes，SHA-256
+`b707703ee5d2a9a957c975b708898e0c72fb58b747aadf7388b49dc333612116`；manifest
+1,474,833 bytes，SHA-256
+`dab991f5bc20c96ad0ad328a9621e1d88d79b2625a092952e2292a4c093d5253`。原已通过重启
+验收的包完整保留于 `D:\github\JanVim-Exhibition-Deploy-preserved-20260908T154835972Z`，其
+manifest 仍为 `850c36cf215e9c42f94b9793f6b0b79b5b62b911c64a6c8251fac52717e900d8`。
+
+新包安装后以原计划任务进行两次实跑。第一次用当前控制器进程所属的唯一 UI Automation 按钮
+调用 `STOP SHOW`，未使用坐标或键盘注入；截图确认黄色提示正确居中显示，日志记录
+`source=renderer / disposition=queued`。第二次由用户实际按下 `Ctrl+Shift+S`，用户确认退出提示
+出现，日志唯一记录 `source=shortcut / disposition=queued`。第二场完成 2 个循环、0 重试、
+0 恢复，终态 `intentional-success / operator-stop`；声音运行 220.4757 秒并以 `clean=true`
+结束，任务回到 `Ready / LastTaskResult=0`，活动指针、展示进程及 57140/57141 端口均无残留。
+运行后 9,190 个不可变文件再次通过，允许的运行状态为 39 文件 / 171,757 bytes。外部展厅映射
+SHA-256 仍为 `2ba4526770f4f1498116d81be846950e26701183700d5b252dbcffc5000fe675`。
+
+本轮证据位于
+`D:\github\exhibition-mini-pc-receipt-20260907\studio-stop-feedback-20260908-2345`，包括按钮和
+快捷键两次黄色提示截图。用户已完成人工快捷键与提示验收；20 秒鼠标静止隐藏已通过确定性测试，
+仍待用户肉眼确认。新功能包安装后的再次真实重启、离线和强制恢复验收仍分别待完成。
