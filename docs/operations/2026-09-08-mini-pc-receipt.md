@@ -2,7 +2,7 @@
 
 接管于 2026-09-07 开始，2026-09-08（Asia/Shanghai）汇总。目标机为 PELADN WO4，Windows 11 Pro x64 / 10.0.26100。证据目录沿用接管日期：`D:\github\exhibition-mini-pc-receipt-20260907`。
 
-当前状态：`MINI_PC_SOURCE_AND_ASSET_HANDOFF_READY`。两个源码工作树、所需运行资产和开发工具已接收，按交接第 13 节完成开发接管。READY 发布后已完成 Realtek WASAPI 适配、实际静音服务运行、四轮有人值守启动诊断、长路径系统修复、声音连接预算修复及运行后缓存门禁。用户已在候选 5 实际听见拨弦和风声，并确认正常 Stop 平滑淡出且没有复响；其《见山》只最大化的缺陷由候选 6 修正。候选 6 已安装到固定路径，完成 3 个连续显示器模拟循环、正常 Stop 和机器全屏审计；用户进一步确认右侧《见山》无标题栏、无任务栏且无需按 F 即全屏。本机三屏现场验收据此通过，最新完整测试为 **1,289/1,289 passed**。物理双投影、离线及强制恢复仍未执行，不能据此扩展为物理展场验收通过。最新结果及包身份见末节；下文保留此前全量测试 EPERM、四次启动失败和其他阶段性限制，不用后来的成功覆盖原始失败证据。
+当前状态：`MINI_PC_SOURCE_AND_ASSET_HANDOFF_READY`。两个源码工作树、所需运行资产和开发工具已接收，按交接第 13 节完成开发接管。READY 发布后已完成 Realtek WASAPI 适配、实际静音服务运行、四轮有人值守启动诊断、长路径系统修复、声音连接预算修复及运行后缓存门禁。用户已在候选 5 实际听见拨弦和风声，并确认正常 Stop 平滑淡出且没有复响；其《见山》只最大化的缺陷由候选 6 修正。候选 6 完成 3 个连续显示器模拟循环、正常 Stop 和机器全屏审计；用户进一步确认右侧《见山》无标题栏、无任务栏且无需按 F 即全屏。本机三屏现场验收据此通过，最新完整测试为 **1,289/1,289 passed**。随后生成只增加操作说明及身份记录的候选 7，严格证明 9,128 个运行与冻结文件和候选 6 一致，安装验证通过并冻结为命名黄金基线。物理双投影、离线及强制恢复仍未执行，不能据此扩展为物理展场验收通过。最新结果及包身份见末节；下文保留此前全量测试 EPERM、四次启动失败和其他阶段性限制，不用后来的成功覆盖原始失败证据。
 
 ## 两仓身份与保全
 
@@ -239,3 +239,35 @@ builder exit 0；包目录 9,134 个 payload 文件通过严格清单核验。�
 运行中只读 Win32 审计确认《见山》主窗口实际外框为 `(1920, -123) 1920×1200`，`fullscreen=true`、`borderless=true`、`maximized=false`、`topmost=true`，且没有 click-through 或 no-activate。另一个 16×16、空标题的 `Winit Thread Event Target` 是透明且不可激活的事件窗口，不构成画面。桌面截图显示右侧屏幕没有标题栏或任务栏。正常 Stop 通过唯一可见 `STOP SHOW` 的 UI Automation `InvokePattern` 执行；退出码 0。3 秒后部署进程 0、监听端口 0、active pointer 不存在，固定包 installed 核验继续通过。
 
 以上仍是三台显示器上的 `monitor-simulation`，`physicalProjectorsTested=false`、`offlineVerified=false`、`forcedRestartRecoveryVerified=false`。2026-09-08 13:34 +08:00，用户确认“刚才右侧《见山》已经无标题栏、无任务栏，而且无需按 F 就全屏”。结合此前显示、相机、可听拨弦与风声、正常 Stop 平滑淡出且无复响的人工反馈，候选 6 的本机三屏有人值守验收通过；物理双投影、离线与强制恢复按交接边界另行排练。
+
+## 14:03 操作说明与黄金基线冻结
+
+完整中文操作说明已写入 `deployment/docs/EXHIBITION-OPERATOR-RUNBOOK.md`，覆盖开机接线、
+三屏配置、开演前验证、启动、运行值守、正常 Stop、技术后备停止、重启恢复和黄金包整体
+回退。快速卡、部署说明及故障排查同步改为《见山》默认无边框全屏，并明确无需按 F；正常
+结束首选 B 屏 `STOP SHOW`，`Stop-Exhibition.ps1` 只作为技术后备，不计作正常 Stop 验收。
+
+操作说明提交为 `4b19a77691e7b52de6668f9c0f85e4f09c25a21c`。相关部署、操作入口和全屏回归
+**47/47 passed**。从该提交构建候选 7 后，独立打开 ZIP 校验 9,137 个条目的集合、字节数和
+逐项 SHA；与已人工验收候选 6 比较时，9,128 个运行及冻结文件完全一致。允许差异严格限定
+为五份操作文档、接收回执、sourceCommit 身份文件及 Vitest 测试结果缓存，没有运行文件删除。
+
+| 黄金包文件 | bytes | SHA-256 |
+| --- | ---: | --- |
+| `JanVim-Exhibition-Deploy.zip` | 331532559 | `f2da64042855e8a596d3da26ffd9f509794866ab3b33ff3b26d7a0f1de86877f` |
+| `package-manifest.json` | 1466006 | `1a492a13c4b674234503a225eb8bad63e4f9f205a2d585179bfc5100d3678472` |
+
+候选 7 已安装到固定目录，严格核验 9,136 个 payload 文件，固定入口输出
+`DEPLOYMENT_VERIFY_PASS`。已人工验收的候选 6 在移动前后均通过 installed 核验，并整体保存于
+`D:\github\JanVim-Exhibition-Deploy-preserved-20260908T055947633Z`；没有删除旧包。
+
+两个仓库均创建并推送注释标签 `exhibition-mini-pc-golden-2026-09-08`：JanVim 标签目标为
+`4b19a77691e7b52de6668f9c0f85e4f09c25a21c`，《见山》协同标签目标为
+`6d1a4577a9484092fde94308352c80ee710ed18f`。现场实际《见山》身份仍以 9,799,168 bytes /
+`ac160b7eb4e34c52906b151aed441ea683ad093d89e59459b5ecb12c3055770f` 为准。
+
+命名黄金目录为
+`D:\VirtualData\JanVim-Exhibition-Rehearsals\golden-baselines\exhibition-mini-pc-2026-09-08`，
+其中保存 ZIP、handoff、manifest、操作说明、验证日志及 `golden-baseline.json`。后续少量效果
+修改必须从黄金标签另建分支、生成新包并保留本目录；不得覆盖黄金包或把候选文件零散混入。
+黄金验收边界仍为本机三屏 `monitor-simulation`，不包含物理双投影、离线和强制恢复。
