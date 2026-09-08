@@ -365,3 +365,34 @@ build 与真实 bundle 身份核对。完整测试的原始失败日志保留，
 检查上限。真实 UDP 回归先复现旧代码返回 4，再验证新代码的空闲端口 2、自身端口 0、
 外来所有者 3；权限异常和无关 ObjectNotFound 仍为 4。连同启动预检 17 项通过，并通过
 typecheck、lint、build；控制器 bundle 身份不变。随后构建第二个独立候选继续任务复验。
+
+## 22:10 新启动包安装与任务复测回执
+
+固定安装目录当前为提交 `2a17a5c27e444357839503cb546d6b2e58fae1ab` 的独立包。
+ZIP 331,559,140 bytes，SHA-256
+`88a192996aabc2dfc8b9e290c6b9dd30e900e4895889ee3caa5a0f5f818dacb1`；
+manifest 1,466,941 bytes，SHA-256
+`850c36cf215e9c42f94b9793f6b0b79b5b62b911c64a6c8251fac52717e900d8`。
+第一次修复候选完整保留于 `D:\github\JanVim-Exhibition-Deploy-preserved-20260908T140404260Z`；
+此前黄金包、黄金 ZIP、标签和展厅映射仍保留，没有覆盖或自动合并。
+
+22:05:54 手动触发原 `Start_JanVim_Exhibition`，47.915 秒建立完整场次。当前无相机，
+三屏按默认顺序映射；实际窗口边界和截图确认《见山》在 `(3840,-133)` 的 1920×1200
+第三屏无边框全屏。维护终端在截图中遮挡了第一屏的一部分，不将截图当作完整物理投影验收。
+运行完成 2 个循环，漂移 28.6551 ms、0 重试、0 恢复；保留既有 3 个有界素材缺省跳过。
+声音运行 224.3346 秒、最多同时 8 个拨弦节点，正常 Stop 后 `clean=true`。
+
+最初自动化 Stop 定位脚本按顶层窗口过滤未找到唯一控件，失败回执保留。随后按按钮语义
+查找、核对其当前控制器进程归属，并用 `UIAutomation.InvokePattern` 执行正常 `STOP SHOW`；
+未使用坐标点击或键盘注入。控制器终态为 `intentional-success / operator-stop`，JanVim 自然
+退出、lease 移除；最终任务 `Ready / LastTaskResult=0`，活动指针、展示进程和声音端口均无残留。
+
+运行后再次校验 9,142 个不可变文件通过，39 个允许的运行状态文件共 171,767 bytes；清单
+身份仍一致。展厅人工映射 SHA-256 前后均为
+`2ba4526770f4f1498116d81be846950e26701183700d5b252dbcffc5000fe675`。
+本轮完整外部证据位于 `studio-autostart-20260908-2100/port-binding-fix`，最终结果为
+`verified-task-smoke.json`；保留早先失败记录，没有覆盖其状态。
+
+任务保持 Interactive / Highest、登录延时 `PT30S`、IgnoreNew；旧《见山》任务 Disabled。
+真实 Windows 重启后的自动开演，以及本轮用户现场确认画面和可听声音仍待完成。
+此次手动任务试运行不冒充真实重启、离线、强制恢复或全天无人值守验收。
