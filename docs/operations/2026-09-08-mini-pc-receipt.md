@@ -2,7 +2,7 @@
 
 接管于 2026-09-07 开始，2026-09-08（Asia/Shanghai）汇总。目标机为 PELADN WO4，Windows 11 Pro x64 / 10.0.26100。证据目录沿用接管日期：`D:\github\exhibition-mini-pc-receipt-20260907`。
 
-当前状态：`MINI_PC_SOURCE_AND_ASSET_HANDOFF_READY`。两个源码工作树、所需运行资产和开发工具已接收，按交接第 13 节完成开发接管。READY 发布后已完成 Realtek WASAPI 适配、实际静音服务运行、四轮有人值守启动诊断、长路径系统修复、声音连接预算修复及运行后缓存门禁。候选 5 已安装到固定路径并通过只读部署验证；最新完整测试为 **1,289/1,289 passed**。本标记不表示可听声音、GUI、相机或物理投影验收通过；现场状态继续为 `awaiting-mini-pc-attended-acceptance`。最新结果及包身份见末节；下文保留此前全量测试 EPERM、四次启动失败和其他阶段性限制，不用后来的成功覆盖原始失败证据。
+当前状态：`MINI_PC_SOURCE_AND_ASSET_HANDOFF_READY`。两个源码工作树、所需运行资产和开发工具已接收，按交接第 13 节完成开发接管。READY 发布后已完成 Realtek WASAPI 适配、实际静音服务运行、四轮有人值守启动诊断、长路径系统修复、声音连接预算修复及运行后缓存门禁。用户已在候选 5 实际听见拨弦和风声，并确认正常 Stop 平滑淡出且没有复响；其《见山》只最大化的缺陷由候选 6 修正。候选 6 已安装到固定路径，完成 3 个连续显示器模拟循环、正常 Stop 和机器全屏审计；最新完整测试为 **1,289/1,289 passed**。用户仍需确认候选 6 的全屏观感，物理双投影验收也仍待执行，因此现场状态继续为 `awaiting-mini-pc-attended-acceptance`。最新结果及包身份见末节；下文保留此前全量测试 EPERM、四次启动失败和其他阶段性限制，不用后来的成功覆盖原始失败证据。
 
 ## 两仓身份与保全
 
@@ -118,11 +118,11 @@ READY 发布后，2026-09-08 00:26:32 +08:00 的只读复核观察到 Realtek �
 
 适配验证：测试先行日志 `audio-adapter-schema-red.log` 确认旧实现拒绝 Realtek、接受 Senary；最小替换后 `audio-adapter-schema-initial-green.log` 记录数组类型失败，再修复类型检查。`npm test -- tests/deployment-operator.test.ts tests/deployment-package.test.ts --maxWorkers=1 --testTimeout=10000` **41/41 passed，exit 0，27.27 秒**；typecheck、lint 与 build 均 exit 0，main bundle 的 549,054 bytes / SHA 保持匹配。隔离 sclang 通过 `compileFile` 仅编译 SC 服务，未调用返回的服务函数，同时确认所选端点在真实输出列表中；`audio-adapter-sc-check.json` 记录两项通过且 server 未 boot。独立审阅未发现阻止本次提交的缺陷，并复核旧部署三处对应文件仍匹配原 manifest。00:36 的这一阶段尚未执行实时无声合成或生成新包，后续新增结果见末节。
 
-接下来由现场确认实际耳机/音箱接线及就绪状态，再在有人值守条件下验证可听输出与联合声音。当前已从最初的“找不到 Realtek WASAPI 端点”推进到精确端点选中、实际静音服务启动及清理通过；音量、听感及 Stop 淡出仍未验收。
+现场随后确认了实际耳机/音箱接线及就绪状态。候选 5 的联合展演中，用户实际听见拨弦和风声，并确认正常 Stop 平滑淡出且没有复响；声卡现场听音和 Stop 声音终态据此通过。候选 6 只改变《见山》窗口全屏助手，声音文件保持冻结；其机器记录同样显示 Realtek 硬件输出、拨弦与风群均被接收、正常 Stop 后活动拨弦归零且声音服务 clean 退出。
 
 接收时未发现 present Camera/Image 设备，GPU 为 AMD Radeon 760M，驱动 32.0.13028.3，仅静态确认了 1920×1080 桌面；DX12 Compute、三屏和两台物理投影仪尚未实跑。`D:\VirtualData\JanVim-Exhibition-Rehearsals\site-config\display-map.json` 与 `sound-mix-v1.json` 当时均缺失；显示映射须等现场用配置器确认，混音缺失按现有规则从 0/0 dB 起步，不迁入 GMK +5/-1 作为耳机安全响度。
 
-Windows 测试音、SC 官方示例听音、真实光标拨弦与相机鸟群风声、自动 Start、C 屏黑底白鸟/最大化/置顶/鼠标、独立增益保存继承、正常 Stop 淡出无复响、正常重启后新开演均待有人值守确认。GUI、相机与可听声音未启动；新候选只单独生成和核验，旧部署包未替换。
+Windows 测试音、真实光标拨弦与相机鸟群风声、自动 Start、正常 Stop 淡出无复响均已在有人值守条件下执行；用户已确认显示和相机正常，并确认拨弦、风声及 Stop 听感。候选 5 暴露 C 屏只有最大化而非默认全屏；候选 6 已用精确窗口句柄改为无边框全屏并完成机器审计，尚待用户对最终观感作一句确认。独立增益保存继承和正常重启后新开演没有在本轮另行登记为人工通过。
 
 作品要求保持：`songfeng-source` / `20260902-songfeng-source-r8` 长文，唯一 show clock；A 屏剑客光标和四行原诗 reset（64 bytes / `b699de273f5bbaedb08241495f52ce863d3e8e1851275ce3b6251484d75190a8`）；SCREEN-2 为 Web 展示表面；鸟群默认 10 Hz、原采样 500 ms 截止期，统一 Stop 优先且终态不可复响；WIND/INSTRUMENT 独调并由 JanVim 唯一持久化。声音单会话 3,600 秒上限保留，全天续航未解决。
 
@@ -213,6 +213,29 @@ builder exit 0；包目录 9,182 个 payload 文件通过严格 manifest 核验�
 
 固定路径执行 `operator\Verify-Deployment.ps1` exit 0 并输出 `DEPLOYMENT_VERIFY_PASS`：包清单、运行状态、Electron、JanVim 固定产物、《见山》运行时、PowerShell、SuperCollider、精确 Realtek WASAPI 端点、相机存在性及 schema 2 / confirmed / production-3 三屏映射全部通过。相机检查只确认设备存在，没有打开相机；日志为 `attended-20260908/candidate-5/verify-deployment.log`。
 
-真实音频目标已确定为 `Windows WASAPI : Speakers (Realtek High Definition Audio)`，设备为 ACTIVE、默认多媒体输出、双声道 48 kHz 共享模式；没有安装 ASIO、改变默认端点或修改系统音量。Windows 播放设置中的该端点测试按钮已通过 UI Automation 调用并正常返回，设置未改变。代码层声音连接根因和长路径根因已经修复，但用户尚未对联合展演作出“实际听见”确认，因此声卡现场验收仍为待完成。
+真实音频目标已确定为 `Windows WASAPI : Speakers (Realtek High Definition Audio)`，设备为 ACTIVE、默认多媒体输出、双声道 48 kHz 共享模式；没有安装 ASIO、改变默认端点或修改系统音量。Windows 播放设置中的该端点测试按钮已通过 UI Automation 调用并正常返回，设置未改变。代码层声音连接根因和长路径根因已经修复；用户随后在候选 5 联合展演中实际听见拨弦和风声，并确认正常 Stop 平滑淡出且没有复响，声卡现场听音据此通过。
 
-明早需要用户配合的工作统一保留为：启动候选 5，确认三屏内容、相机手势和可听拨弦/风声；观察至少一个完整循环并正常 Stop，确认淡出后无复响；随后按项目规则完成三次连续物理投影循环、一次离线运行和一次强制重启恢复。当前机器记录的是三台显示器，不能据此声称两台物理投影仪验收通过。在这些结果写入物理排练记录前，状态继续为 `awaiting-mini-pc-attended-acceptance`，候选 5 不能称为可开演包。
+上述用户配合项中，三屏、相机、可听拨弦/风声及正常 Stop 听感已经执行；候选 5 的《见山》默认全屏失败也由用户明确指出。候选 6 已完成机器全屏审计和 3 个连续显示器模拟循环，仍需用户确认最终全屏观感。当前机器记录的是三台显示器，不能据此声称两台物理投影仪验收通过；交接还明确排除了本阶段追加离线与强制故障验收，因此这些项目继续保留为以后单独排练。状态继续为 `awaiting-mini-pc-attended-acceptance`，候选 6 尚不能称为物理现场可开演包。
+
+## 13:02 候选 6 默认全屏修复与现场复验
+
+候选 5 的联合展演完成后，用户确认“实际听见拨弦和风声，Stop 后平滑淡出且没有复响”，同时指出《见山》仅为最大化窗口，仍需人工按 F 才能进入全屏。当前原生 TOML 的 `[display]` 只读取 `invert_colors` 与 `bird_color_preset`，不存在启动全屏键；直接增加未知字段不会改变运行行为。由于《见山》启动时还未确定展演 SCREEN-3，改原生启动全屏也可能落到错误显示器。
+
+修复提交 `8f1ed4d2fcdd93e0d43d14a4fa92bcfe1c307744` 只修改部署侧精确窗口助手及其测试。助手仍要求本次子进程的启动时间身份及唯一初始可见顶层 HWND，随后移除边框样式，将窗口外框精确设为 SCREEN-3，并在原 10 秒有限预算内核验无边框、非最大化、置顶、可交互及实际像素边界。没有使用全局键盘注入、F 快捷键或坐标点击，也没有修改《见山》冻结二进制、TOML 或旧部署包。真实 EXE 隔离探针及完整联合运行都通过。
+
+修复后的定点窗口测试 4/4 通过，相关部署与恢复回归 80/80 通过；typecheck、lint、build 均 exit 0。完整 `npm test -- --maxWorkers=1 --testTimeout=10000` 为 **66/66 文件、1,289/1,289 项通过，exit 0，1,163.04 秒**。main bundle 保持 549,304 bytes / `77408bde85dc374ba21d011cecb088278197ae6c7785f205a58bc7130bdc8826`。
+
+候选 6 构建根为 `D:\VirtualData\JanVim-Exhibition-Rehearsals\deployment-package-20260908T044531712Z-46276dbcea8d`：
+
+| 候选 6 文件 | bytes | SHA-256 |
+| --- | ---: | --- |
+| `JanVim-Exhibition-Deploy.zip` | 331524857 | `a4a700ae349d43eb187d7ff558dacfff83694f3d0a0c2ee2e4f2bb4f02db67c7` |
+| `JanVim-Exhibition-Deploy/package-manifest.json` | 1465745 | `70132fe1706a59a826846defa4391ec17ddcdc2181d48ae0b1ff230bd07f24cd` |
+
+builder exit 0；包目录 9,134 个 payload 文件通过严格清单核验。独立打开 ZIP 后，9,135 个条目的集合、大小和逐项 SHA 全部匹配；Electron 为 44.0.0 / 73 文件。候选 5 在移动前后都通过 installed 核验，并完整保存在 `D:\github\JanVim-Exhibition-Deploy-preserved-20260908T044959961Z`，包括 9,182 个不可变文件和 39 个允许状态文件；没有删除或覆盖旧包。候选 6 安装后严格核验 9,134 个固定文件，固定入口再次输出 `DEPLOYMENT_VERIFY_PASS`。
+
+候选 6 的联合运行 `joint-show-20260908T045449997Z-2acd5f514535` 持续约 319 秒，完成 3 个连续 90 秒显示器模拟循环；每轮 45 个 cue、41 个 primary 完成、5 个 secondary 呈现，重试和恢复均为 0。3 次有界 P1 fixture skip 是既有缺失 formula/image/matrix 资产，不是运行时失败。声音侧接收拨弦 583、风群 2,437、拒绝 0、限流丢弃 4、最大同时拨弦 8；正常 Stop 后活动拨弦为 0，`clean=true`。
+
+运行中只读 Win32 审计确认《见山》主窗口实际外框为 `(1920, -123) 1920×1200`，`fullscreen=true`、`borderless=true`、`maximized=false`、`topmost=true`，且没有 click-through 或 no-activate。另一个 16×16、空标题的 `Winit Thread Event Target` 是透明且不可激活的事件窗口，不构成画面。桌面截图显示右侧屏幕没有标题栏或任务栏。正常 Stop 通过唯一可见 `STOP SHOW` 的 UI Automation `InvokePattern` 执行；退出码 0。3 秒后部署进程 0、监听端口 0、active pointer 不存在，固定包 installed 核验继续通过。
+
+以上仍是三台显示器上的 `monitor-simulation`，`physicalProjectorsTested=false`、`offlineVerified=false`、`forcedRestartRecoveryVerified=false`。候选 6 的机器全屏证据已完整，最后只等待用户确认右侧《见山》观感确实无需按 F、没有窗口边框或任务栏；物理双投影、离线与强制恢复按交接边界另行排练。
