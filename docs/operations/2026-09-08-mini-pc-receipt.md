@@ -271,3 +271,9 @@ builder exit 0；包目录 9,134 个 payload 文件通过严格清单核验。�
 其中保存 ZIP、handoff、manifest、操作说明、验证日志及 `golden-baseline.json`。后续少量效果
 修改必须从黄金标签另建分支、生成新包并保留本目录；不得覆盖黄金包或把候选文件零散混入。
 黄金验收边界仍为本机三屏 `monitor-simulation`，不包含物理双投影、离线和强制恢复。
+
+PR 已创建并保持未合并：JanVim 展演控制器
+[#2](https://github.com/gunpowder78/JanVim-Exhibition-2026/pull/2) 从
+`feat/exhibition-mini-pc-integration` 合入 `feat/sound-flock-ingress-v1`；《见山》
+[#17](https://github.com/gunpowder78/jianshan02Boid/pull/17) 从同名集成分支合入
+`feat/site-mix-v2-handoff`。后者只提交接收回执，不修改《见山》功能。
