@@ -224,7 +224,7 @@ function runHelper(
 
 describe("exact JianShan window placement helper", () => {
   windowsIt(
-    "maximizes the one exact process-owned window as interactive topmost",
+    "makes the one exact process-owned window borderless fullscreen and interactive topmost",
     async () => {
       const root = mkdtempSync(join(tmpdir(), "janvim-place-jianshan-success-"));
       let fixture: RunningFixture | undefined;
@@ -239,7 +239,10 @@ describe("exact JianShan window placement helper", () => {
           pid: fixture.ready.pid,
           matchedWindowCount: 1,
           requested: { x: 80, y: 80, width: 640, height: 480 },
-          maximized: true,
+          actual: { x: 80, y: 80, width: 640, height: 480 },
+          fullscreen: true,
+          borderless: true,
+          maximized: false,
           topmost: true,
           clickThrough: false,
           noActivate: false,
@@ -326,12 +329,12 @@ describe("exact JianShan window placement helper", () => {
       "GetClientRect",
       "GetWindowRect",
       "GetWindowLongPtrW",
+      "SetWindowLongPtrW",
       "SetWindowPos",
       "ShowWindowAsync",
-      "IsZoomed",
     ]);
     expect(source).not.toMatch(
-      /SendKeys|AppActivate|mouse_event|keybd_event|SetCursorPos|FindWindow|MainWindowHandle/iu,
+      /SendKeys|AppActivate|SendInput|SendMessage|PostMessage|WM_KEY|mouse_event|keybd_event|SetCursorPos|FindWindow|MainWindowHandle/iu,
     );
   });
 });
