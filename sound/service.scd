@@ -629,10 +629,12 @@ setupApplication = {
                         \armed, 0,
                         \stop, 0
                     ]);
-                    spaceSynth = Synth.before(mixer, \jvSignalSpace, [
-                        \inBus, spaceBus.index,
-                        \outBus, voiceBus.index
-                    ]);
+                    if(instrumentProfile == \stoneAndSignalV2) {
+                        spaceSynth = Synth.before(mixer, \jvSignalSpace, [
+                            \inBus, spaceBus.index,
+                            \outBus, voiceBus.index
+                        ]);
+                    };
 
                     if(capturePath.notEmpty) {
                         captureFrames = ((duration + 1.5).min(120) * 48000).asInteger;

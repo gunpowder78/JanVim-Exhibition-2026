@@ -192,6 +192,8 @@ test("silent flock-v1 service gates wind independently, bounds flaps, and preser
   const service = await launch(["flock-v1"]);
   try {
     await service.ready();
+    assert.ok(!(await service.tree()).some(({ name }) => name === "jvSignalSpace"),
+      "legacy service does not instantiate candidate DSP");
     await service.live();
     const first = (await until(service.winds, (nodes) => nodes.length === 1, "first live wind"))[0];
     assert.equal(first.controls.gate, 1);
@@ -301,6 +303,8 @@ test("stone-and-signal uses the existing service, stem gain, Wind, node bound, a
     "jvSignalEarth", "jvSignalBlade", "jvSignalBass"].includes(name);
   try {
     await service.ready();
+    assert.ok((await service.tree()).some(({ name }) => name === "jvSignalSpace"),
+      "candidate profile alone instantiates its shared ambience node");
     await service.send("site-mix", [float(-6), float(-4)]);
     await service.send("cursor", [float(0.5), float(0.5), float(0.5)]);
     await delay(150);

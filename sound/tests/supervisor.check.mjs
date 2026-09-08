@@ -540,6 +540,10 @@ test("occupied language port fails without terminating its occupant", async (t) 
       "silent",
       "--duration",
       "1",
+      "--input",
+      "real-cursor",
+      "--instrument-profile",
+      "stone-and-signal-v2",
       "--output",
       runRoot,
     ],
@@ -550,5 +554,6 @@ test("occupied language port fails without terminating its occupant", async (t) 
   assert.equal(occupant.address().port, 57140);
   const summary = JSON.parse(await readFile(path.join(runRoot, "summary.json"), "utf8"));
   assert.equal(summary.clean, false);
+  assert.equal(summary.instrumentProfile, "stone-and-signal-v2");
   assert.match(summary.reason, /language|service|startup/i);
 });

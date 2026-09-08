@@ -100,6 +100,8 @@ pwsh -NoProfile -File `
   真实静音 SC 服务、Wind 独立性、双路增益、统一 Stop、故障回收与 NRT。
 - `run-instrument-profile.ps1`、`run-policy.ps1`、`run-policy-isolation.check.ps1`、
   `run-sclang.check.ps1` 全部退出 0；确定性用例使用假时钟，不等待真实 8 分钟循环。
+- 实际 `start-sound.ps1` 候选静音烟测干净退出，结束 `summary.json` 保留
+  `instrumentProfile: stone-and-signal-v2`；没有连接输入 owner 或创建硬件输出。
 - `npm ci`、`npm run typecheck`、`npm run build`、`npm run lint` 退出 0。
 - 应用总测试在冻结 Node/.NET 与恢复的非 Git runtime 下为 1321/1322；唯一失败是
   `offline-package.test.ts` 的既有负向用例实际约 5.79 秒，超过固定 5 秒预算；保持预算不改。
