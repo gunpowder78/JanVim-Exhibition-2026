@@ -295,6 +295,48 @@ test("site sound mix updates current and future stems independently", { timeout:
   } finally { await service.cleanup(); }
 });
 
+test("stone-and-signal uses the existing service, stem gain, Wind, node bound, and whole Stop", { timeout: 60000 }, async t => {
+  const service = await launch(["flock-v1", "instrument-stone-and-signal-v2"]);
+  const candidateVoice = name => ["jvSignalCall", "jvSignalAM", "jvSignalFlint", "jvSignalRelic",
+    "jvSignalEarth", "jvSignalBlade", "jvSignalBass"].includes(name);
+  try {
+    await service.ready();
+    await service.send("site-mix", [float(-6), float(-4)]);
+    await service.send("cursor", [float(0.5), float(0.5), float(0.5)]);
+    await delay(150);
+    assert.ok(!(await service.tree()).some(({ name }) => candidateVoice(name)),
+      "candidate starts with silence instead of sounding on its first cursor");
+
+    for (let second = 0; second < 4; second += 1) {
+      await delay(1000);
+      await service.send("heartbeat");
+    }
+    await service.send("cursor", [float(0.5), float(0.5), float(0.5)]);
+    let nodes = await until(service.tree, list => list.some(({ name }) => name === "jvSignalCall"),
+      "fixed production seed selects the first signal call");
+    const call = nodes.find(({ name }) => name === "jvSignalCall");
+    assert.ok(Math.abs(call.controls.gain - (10 ** (-4 / 20))) < 0.00001,
+      "candidate instrument inherits the existing persisted Instrument gain");
+    assert.ok(nodes.filter(({ name }) => candidateVoice(name) || name === "jvPluck").length <= 8,
+      "all instrument types share the existing eight-node capacity");
+
+    await service.live();
+    nodes = await until(service.tree, list => list.some(({ name }) => name === "jvWind"),
+      "Wind remains independently driven by flock ingress");
+    assert.equal(nodes.filter(({ name }) => name === "jvSignalCall").length, 1);
+
+    await service.stop();
+    await service.send("cursor", [float(0.5), float(0.5), float(0.5)]);
+    const fading = await service.tree();
+    assert.ok(fading.some(({ name, controls }) => name === "jvMix" && controls.stop === 1),
+      "candidate uses the existing 1.5-second whole-show fade");
+    assert.equal(fading.filter(({ name }) => name === "jvSignalCall").length, 1,
+      "late cursor cannot create a candidate node after Stop");
+    await service.complete();
+    t.diagnostic(`silent stone-and-signal service evidence: ${service.evidence}; no hearing claim`);
+  } finally { await service.cleanup(); }
+});
+
 test("four-argument silent service ignores ingress paths and preserves legacy flock", { timeout: 60000 }, async (t) => {
   const service = await launch();
   try {

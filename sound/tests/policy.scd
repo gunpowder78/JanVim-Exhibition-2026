@@ -185,7 +185,7 @@ try {
 
     // Snapshot is bounded and detached from mutable policy state.
     snapshot = p.at(\snapshot).value;
-    assertEqual.value(snapshot.size, 6, "snapshot must expose only bounded counters/state");
+    assertEqual.value(snapshot.size, 7, "snapshot must expose only bounded counters/state");
     snapshot.put(\lastSeq, 999999);
     snapshot.put(\rejected, 999999);
     snapshot = p.at(\snapshot).value;
@@ -217,6 +217,37 @@ try {
     assertEqual.value(snapshot.at(\acceptedFlocks), 2147483647, "acceptedFlocks must saturate at int32 max");
     assertEqual.value(snapshot.at(\rejected), 2147483647, "rejected must saturate at int32 max");
     assertEqual.value(snapshot.at(\rateDropped), 2147483647, "rateDropped must saturate at int32 max");
+
+    // Candidate timbres still use the authenticated cursor path, leave Wind independent,
+    // and cannot be resurrected after the existing whole-show Stop.
+    p = factory.value(session, nil, true, \stoneAndSignalV2, 20260005);
+    p.at(\handle).value(["/janvim/sound/v1/start", session, 1, 100.0], 100.0);
+    assertNil.value(p.at(\handle).value([
+        "/janvim/sound/v1/cursor", session, 2, 100.0, 0.5, 0.5, 0.5
+    ], 100.0), "candidate begins with four seconds of silence");
+    4.do { |offset|
+        var now = 101.0 + offset;
+        assertNil.value(p.at(\handle).value([
+            "/janvim/sound/v1/heartbeat", session, 3 + offset, now
+        ], now), "candidate fixture heartbeat remains non-sounding");
+    };
+    action = p.at(\handle).value([
+        "/janvim/sound/v1/cursor", session, 7, 104.0, 0.5, 0.5, 0.5
+    ], 104.0);
+    assertEqual.value(action.at(\type), \amTuning,
+        "approved profile replaces per-cursor plucks with sparse selected timbres");
+    action = p.at(\handle).value([
+        "/janvim/sound/v1/flock", session, 8, 104.1, 0.7, 0.25
+    ], 104.1);
+    assertEqual.value(action.at(\type), \wind,
+        "candidate instrument profile does not alter the independent Wind path");
+    action = p.at(\handle).value([
+        "/janvim/sound/v1/stop", session, 9, 104.2
+    ], 104.2);
+    assertEqual.value(action.at(\type), \stop, "candidate shares the existing whole-show Stop");
+    assertNil.value(p.at(\handle).value([
+        "/janvim/sound/v1/cursor", session, 10, 104.3, 0.5, 0.5, 0.5
+    ], 104.3), "late cursor cannot revive the stopped candidate");
 
     // Ten hours of fake-clock heartbeat activity is finite and wall-clock independent.
     p = factory.value(session);

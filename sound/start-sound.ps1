@@ -13,12 +13,18 @@ param(
 
     [switch] $FlockIngress,
 
+    [ValidateSet('LegacyPluckV1', 'StoneAndSignalV2')]
+    [string] $InstrumentProfile = 'LegacyPluckV1',
+
     [string] $NodeExecutable
 )
 
 $ErrorActionPreference = 'Stop'
 if ($FlockIngress -and $SoundInput -ne 'RealCursor') {
     throw 'FlockIngress requires -Input RealCursor'
+}
+if ($InstrumentProfile -eq 'StoneAndSignalV2' -and $SoundInput -ne 'RealCursor') {
+    throw 'StoneAndSignalV2 requires -Input RealCursor'
 }
 . (Join-Path $PSScriptRoot 'node-runtime.ps1')
 $node = Resolve-JanVimNodeExecutable -ExplicitPath $NodeExecutable
@@ -37,6 +43,10 @@ if ($SoundInput -eq 'RealCursor') {
 if ($FlockIngress) {
     $arguments.Add('--flock-input')
     $arguments.Add('enabled')
+}
+if ($InstrumentProfile -eq 'StoneAndSignalV2') {
+    $arguments.Add('--instrument-profile')
+    $arguments.Add('stone-and-signal-v2')
 }
 if (-not [string]::IsNullOrWhiteSpace($RunRoot)) {
     if (-not [System.IO.Path]::IsPathFullyQualified($RunRoot)) {

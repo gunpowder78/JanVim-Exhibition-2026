@@ -4,6 +4,7 @@ import { mkdir, readFile, mkdtemp, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import console from "node:console";
+import { createHash } from "node:crypto";
 import process from "node:process";
 import { clearTimeout, setTimeout } from "node:timers";
 import dgram from "node:dgram";
@@ -444,6 +445,98 @@ test("renders production pluck, wind, site sound mix, stop, and heartbeat-watchd
     },
   };
   console.log(`NRT_EVIDENCE ${JSON.stringify(evidence)}`);
+});
+
+test("renders the stone-and-signal candidate from its deterministic selector without a wind bed", async () => {
+  const { testsDirectory, repositoryDirectory } = soundPaths();
+  const rehearsalDirectory = await freshRehearsalDirectory("sound-stone-signal-v2-");
+  const launcher = join(resolve(testsDirectory, ".."), "sclang-launch.psm1");
+  const renderer = join(testsDirectory, "render-stone-and-signal.scd");
+  const command = [
+    "$ErrorActionPreference = 'Stop'",
+    `Import-Module ${psLiteral(launcher)} -Force`,
+    `$result = Invoke-JanVimIsolatedSclang -ScriptPath ${psLiteral(renderer)} -ScriptArguments @(${psLiteral(rehearsalDirectory)}) -UdpPort 57140 -TimeoutMilliseconds 30000 -KillTimeoutMilliseconds 2000 -MaxCaptureCharacters 131072 -WorkingDirectory ${psLiteral(testsDirectory)}`,
+    "if ($result.StdOut) { Write-Output $result.StdOut.TrimEnd() }",
+    "if ($result.StdErr) { [Console]::Error.WriteLine($result.StdErr.TrimEnd()) }",
+    "if ($result.TimedOut) { throw 'candidate NRT renderer exceeded 30 seconds' }",
+    "if ($result.KillDeadlineExceeded -or $result.CaptureIncomplete) { throw 'candidate NRT cleanup exceeded its bound' }",
+    "if ($result.StdOutTruncated -or $result.StdErrTruncated) { throw 'candidate NRT output exceeded its bound' }",
+    "if ($null -eq $result.ExitCode) { throw 'candidate NRT exit code unavailable' }",
+    "exit $result.ExitCode",
+  ].join("; ");
+  const render = spawnSync("pwsh", ["-NoProfile", "-NonInteractive", "-Command", command], {
+    cwd: repositoryDirectory,
+    encoding: "utf8",
+    maxBuffer: 512 * 1024,
+    timeout: 35000,
+  });
+
+  assert.equal(render.status, 0,
+    `candidate NRT render failed\nstdout:\n${render.stdout}\nstderr:\n${render.stderr}`);
+  assert.match(render.stdout, /PASS: sound\/tests\/render-stone-and-signal\.scd/);
+  for (const type of ["signalCall", "amTuning", "flint", "relic", "earth", "blade", "bass"]) {
+    assert.match(render.stdout, new RegExp(`CANDIDATE_RENDER_EVENT ${type} `),
+      `candidate render omitted ${type}`);
+  }
+
+  const wavPath = join(rehearsalDirectory, "stone-and-signal-v2-candidate.wav");
+  const wav = await readFile(wavPath);
+  const analysis = analyzeWav(wav, [
+    { name: "initialSilence", start: 0, end: 3.5 },
+    { name: "amTuning", start: 4.2, end: 6.2 },
+    { name: "signalAndRelic", start: 20.2, end: 29.5 },
+    { name: "bass", start: 44.2, end: 47.0 },
+    { name: "bladeAndFlint", start: 56.2, end: 61.0 },
+    { name: "earthAndFlint", start: 84.2, end: 90.0 },
+    { name: "stopFade", start: 129.0, end: 130.4 },
+    { name: "postStop", start: 132.0, end: 133.4 },
+  ]);
+  assert.deepEqual(analysis.format, {
+    container: "RIFF",
+    encoding: "PCM16LE",
+    sampleRate: 48000,
+  });
+  assert.ok(analysis.duration >= 133.5 && analysis.duration <= 133.5 + 64 / 48000);
+  requireSignalBounds(analysis,
+    ["amTuning", "signalAndRelic", "bass", "bladeAndFlint", "earthAndFlint"],
+    ["initialSilence", "postStop"]);
+  const stopFade = analysis.segments.find(({ name }) => name === "stopFade");
+  assert.ok(stopFade.peak > 1 / 32768, "candidate Stop fade must contain its decaying source");
+  assert.ok(stopFade.peak <= 0.2001, "candidate Stop fade exceeds the production ceiling");
+
+  const sha256 = createHash("sha256").update(wav).digest("hex");
+  const receipt = {
+    schema: 1,
+    candidate: "stone-and-signal-v2",
+    source: {
+      branch: "feat/sound-stone-and-signal-v2-candidate",
+      baseCommit: "dab0a0b005b9ff69bd2cda2d6fbcca31388527ea",
+    },
+    render: {
+      input: "simulated-cursor",
+      seed: 20260005,
+      realtimeServer: false,
+      audioDeviceUsed: false,
+      continuousWindBed: false,
+      wavPath,
+      bytes: wav.length,
+      sha256,
+      durationSeconds: analysis.duration,
+      format: analysis.format,
+      channels: analysis.channels,
+      segments: analysis.segments.map(({ name, start, end, peak, rms }) =>
+        ({ name, start, end, peak, rms })),
+    },
+    acceptance: {
+      automatedNrt: "passed",
+      humanListening: "pending",
+      productionEnabled: false,
+    },
+  };
+  const receiptPath = join(rehearsalDirectory, "stone-and-signal-v2-candidate.receipt.json");
+  await writeFile(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`, "utf8");
+  console.log(`STONE_SIGNAL_NRT_EVIDENCE ${JSON.stringify({ rehearsalDirectory, wavPath,
+    receiptPath, sha256, bytes: wav.length, duration: analysis.duration })}`);
 });
 
 test("refuses a responding occupant on the private server port without displacing it", async () => {

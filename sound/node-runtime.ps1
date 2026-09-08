@@ -74,7 +74,8 @@ function Resolve-JanVimNodeExecutable {
             $verifiedNode
         }
         else {
-            (Get-Command node.exe -CommandType Application -ErrorAction Stop).Source
+            (Get-Command node.exe -CommandType Application -ErrorAction Stop |
+                Select-Object -First 1).Source
         }
     }
     else {

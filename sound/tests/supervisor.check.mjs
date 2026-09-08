@@ -33,6 +33,27 @@ test("PowerShell launcher forwards explicit flock ingress and rejects simulated 
   }
 });
 
+test("candidate instrument profile is explicit while the launcher keeps legacy defaults", async t => {
+  const { prepareRunRoot } = await import("../run.mjs");
+  const root = await prepareRunRoot(null);
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await copyFile(path.resolve("sound/start-sound.ps1"), path.join(root, "start-sound.ps1"));
+  await copyFile(path.resolve("sound/node-runtime.ps1"), path.join(root, "node-runtime.ps1"));
+  await writeFile(path.join(root, "run.mjs"), 'process.stdout.write(JSON.stringify(process.argv.slice(2)));');
+  const node = "D:/github/exhibition-mini-pc-tools/node-v22.23.0-win-x64/node.exe";
+  const launch = args => runProcess("pwsh.exe", ["-NoProfile", "-NonInteractive", "-File",
+    path.join(root, "start-sound.ps1"), "-NodeExecutable", node, ...args], { timeoutMs: 5000 });
+
+  const legacy = await launch([]);
+  assert.equal(legacy.exitCode, 0, legacy.stderr);
+  assert.deepEqual(JSON.parse(legacy.stdout), ["--mode", "silent", "--duration", "45"]);
+
+  const candidate = await launch(["-Input", "RealCursor", "-InstrumentProfile", "StoneAndSignalV2"]);
+  assert.equal(candidate.exitCode, 0, candidate.stderr);
+  assert.deepEqual(JSON.parse(candidate.stdout), ["--mode", "silent", "--duration", "45",
+    "--input", "real-cursor", "--instrument-profile", "stone-and-signal-v2"]);
+});
+
 const runProcess = (executable, args, options = {}) =>
   new Promise((resolve, reject) => {
     const child = spawn(executable, args, {
@@ -80,6 +101,19 @@ test("real cursor CLI is opt-in and explicit simulation preserves the old return
   for (const args of [["--input"], ["--input", "real"],
     ["--input", "real-cursor", "--input", "simulated"]]) {
     assert.throws(() => parseCli(args), /invalid/i);
+  }
+});
+
+test("stone-and-signal profile is opt-in and rejects unknown or duplicate values", async () => {
+  const { parseCli } = await import("../run.mjs");
+  assert.deepEqual(parseCli(["--input", "real-cursor", "--instrument-profile", "stone-and-signal-v2"]), {
+    command: "run", duration: 45, mode: "silent", output: null, input: "real-cursor",
+    instrumentProfile: "stone-and-signal-v2",
+  });
+  assert.deepEqual(parseCli(["--instrument-profile", "legacy-pluck-v1"]), parseCli([]));
+  for (const argv of [["--instrument-profile"], ["--instrument-profile", "unknown"],
+    ["--instrument-profile", "stone-and-signal-v2", "--instrument-profile", "legacy-pluck-v1"]]) {
+    assert.throws(() => parseCli(argv), /invalid/i);
   }
 });
 

@@ -40,12 +40,13 @@ export function parseCli(argv) {
     return { command: "stop", runRoot: path.normalize(argv[1]) };
   }
 
-  const values = { duration: "45", mode: "silent", output: null, input: "simulated" };
+  const values = { duration: "45", mode: "silent", output: null, input: "simulated",
+    "instrument-profile": "legacy-pluck-v1" };
   const seen = new Set();
   for (let index = 0; index < argv.length; index += 2) {
     const option = argv[index];
     const value = argv[index + 1];
-    if (!["--duration", "--mode", "--output", "--input", "--flock-input"].includes(option) || value === undefined) {
+    if (!["--duration", "--mode", "--output", "--input", "--flock-input", "--instrument-profile"].includes(option) || value === undefined) {
       invalid("unknown or missing option");
     }
     if (seen.has(option)) invalid("duplicate option");
@@ -55,6 +56,12 @@ export function parseCli(argv) {
 
   if (!["silent", "listen"].includes(values.mode)) invalid("mode must be silent or listen");
   if (!["simulated", "real-cursor"].includes(values.input)) invalid("input must be simulated or real-cursor");
+  if (!["legacy-pluck-v1", "stone-and-signal-v2"].includes(values["instrument-profile"])) {
+    invalid("instrument profile is unknown");
+  }
+  if (values["instrument-profile"] === "stone-and-signal-v2" && values.input !== "real-cursor") {
+    invalid("stone-and-signal-v2 requires real-cursor input");
+  }
   if (seen.has("--flock-input") && (values["flock-input"] !== "enabled" || values.input !== "real-cursor")) {
     invalid("flock input requires --input real-cursor --flock-input enabled");
   }
@@ -73,6 +80,8 @@ export function parseCli(argv) {
     output: values.output === null ? null : path.normalize(values.output),
     ...(values.input === "real-cursor" ? { input: "real-cursor" } : {}),
     ...(seen.has("--flock-input") ? { flockInput: "enabled" } : {}),
+    ...(values["instrument-profile"] === "stone-and-signal-v2"
+      ? { instrumentProfile: "stone-and-signal-v2" } : {}),
   };
 }
 
@@ -1386,6 +1395,8 @@ async function runSupervisor(options) {
       String(serviceDuration),
       capturePath,
       ...(flockInput ? ["flock-v1"] : []),
+      ...(options.instrumentProfile === "stone-and-signal-v2"
+        ? ["instrument-stone-and-signal-v2"] : []),
     ];
     service = await spawnManagedChild({
       args: serviceArgs,
@@ -1523,6 +1534,7 @@ async function runSupervisor(options) {
       languageCreation: service.identity,
       serviceHost: pinned.host,
       mode: options.mode,
+      ...(options.instrumentProfile ? { instrumentProfile: options.instrumentProfile } : {}),
       nodeExecutable: process.execPath,
       nodePid: process.pid,
       receiver: {
