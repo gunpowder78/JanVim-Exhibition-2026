@@ -6,6 +6,9 @@
 现场启动、运行和关闭请按 `docs\EXHIBITION-OPERATOR-RUNBOOK.md`；每日简表见
 `docs\DAILY-OPERATOR-CARD.md`。
 
+PELADN WO4 当前另有主机级计划任务，登录后延时 30 秒启动固定目录；详见
+`docs\AUTOSTART-TASK.md`。部署 ZIP 不会在其他主机上自动创建或修改计划任务。
+
 ## 第三方准备
 
 目标机必须具备：

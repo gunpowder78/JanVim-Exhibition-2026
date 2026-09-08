@@ -16,6 +16,8 @@
 | `show-stop-shortcut-unavailable` | 关闭占用 `Ctrl+Shift+S` 的软件后重启展演；本次启动已安全中止。 |
 | `active-deployment-already-exists` | 先运行 `Stop-Exhibition.ps1`。若仍失败，正常重启 Windows，再运行同一停止脚本和验证脚本。 |
 | `deployment-cleanup-incomplete` | 记录诊断并重启 Windows；重启后执行 `Stop-Exhibition.ps1`，再验证和启动。 |
+| 登录后没有自动开演 | 等待 30 秒触发及十几秒启动；查询 `Start_JanVim_Exhibition` 状态和 `LastTaskResult`。不要同时手动启动。完整维护步骤见 `AUTOSTART-TASK.md`。 |
+| 自动任务重复启动 | 新任务必须使用 `IgnoreNew`，旧 `Start_JianShan_Boid` 必须为 Disabled。不要启用两个任务。 |
 
 技术后备停止命令：
 

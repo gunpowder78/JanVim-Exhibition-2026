@@ -35,6 +35,9 @@ D:\VirtualData\JanVim-Exhibition-Rehearsals\golden-baselines\exhibition-mini-pc-
 使用黄金包前必须以该目录的 `golden-baseline.json` 和 `deployment-handoff.json` 核对
 字节数与 SHA-256。不要仅凭文件名判断身份。
 
+PELADN WO4 的 `Start_JanVim_Exhibition` 登录计划任务是主机外部配置，不改变黄金包身份；
+其动作、原任务回退 XML 和冒烟测试见 `AUTOSTART-TASK.md` 及接收证据目录。
+
 ## 后续效果修改规则
 
 1. 黄金标签和黄金目录保持只读，不在其上继续提交或零散改文件。
@@ -48,4 +51,3 @@ D:\VirtualData\JanVim-Exhibition-Rehearsals\golden-baselines\exhibition-mini-pc-
 
 当前黄金结论限于小主机三台显示器的有人值守验收。物理双投影、离线运行、强制恢复、
 热插拔自愈、HP 性能及 7×24 小时无人值守没有在本基线中宣称通过。
-

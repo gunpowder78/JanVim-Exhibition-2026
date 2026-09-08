@@ -277,3 +277,28 @@ PR 已创建并保持未合并：JanVim 展演控制器
 `feat/exhibition-mini-pc-integration` 合入 `feat/sound-flock-ingress-v1`；《见山》
 [#17](https://github.com/gunpowder78/jianshan02Boid/pull/17) 从同名集成分支合入
 `feat/site-mix-v2-handoff`。后者只提交接收回执，不修改《见山》功能。
+
+## 14:48 登录计划任务迁移
+
+本机原任务 `\Start_JianShan_Boid` 实际为 `MSFT_TaskLogonTrigger`，即用户登录后触发，延时
+`PT30S`；它以 `hxj` 的 Interactive / Highest 身份执行
+`C:\JianShan02Boid\release\win-unpacked\restart_once.bat`。它不是 Windows 尚未登录时的
+系统启动触发；交互登录语义应继续保留，才能访问三屏 GUI、相机及当前用户音频端点。
+
+管理员确认后已新建 `\Start_JanVim_Exhibition`，保留同一登录身份、权限和 30 秒延时，动作改为
+固定黄金包的 `operator\Start-Exhibition.ps1`，工作目录为
+`D:\github\JanVim-Exhibition-Deploy`。PowerShell 窗口以 Minimized 启动，重复实例策略使用
+`IgnoreNew`，避免再次触发时停止正在展出的场次。新任务验证为 Ready 后，旧任务才被禁用；
+旧任务没有删除，原始 XML、禁用后 XML 和新任务 XML 均保存于
+`D:\github\exhibition-mini-pc-receipt-20260907\scheduled-task-20260908`。
+
+新任务已手动触发冒烟测试：约 17 秒内建立 active pointer，三屏及《见山》无边框全屏均出现；
+由于 Highest 任务的 Electron 控件受 Windows UIPI 隔离，Stop 审计提升到相同权限后，通过唯一
+`STOP SHOW` 的 UI Automation `InvokePattern` 正常关闭。最终任务回到 Ready，
+`LastTaskResult=0`，部署进程、57140/57141 listener 及 active pointer 均为 0。没有使用坐标点击、
+键盘注入或按进程名批量终止。
+
+主机级维护说明写入 `deployment/docs/AUTOSTART-TASK.md`，并同步更新每日卡、完整操作说明、
+部署说明、故障排查和黄金基线说明。计划任务属于外部系统配置，不改变已经冻结的黄金 ZIP、
+manifest 或 Git 标签。真正的“重启 Windows → 登录 → 等待 30 秒”仍需在下一次计划停机窗口
+执行；本次手动触发成功不冒充真实重启验收。
