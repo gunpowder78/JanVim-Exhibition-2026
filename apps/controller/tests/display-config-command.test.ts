@@ -25,6 +25,16 @@ function replaceFlag(arguments_: string[], name: string, value: string): string[
 }
 
 describe("manual display-configuration command", () => {
+  it("resolves only into a separate per-run map while reading the fixed site override", () => {
+    const saved = `${rehearsalParent}\\site-config\\display-map.json`;
+    const args = [...replaceFlag(validArguments(), "display-config-mode", "resolve"), `--saved-display-map=${saved}`];
+    expect(parseDisplayConfigCommand(args, repositoryRoot)).toMatchObject({ mode: "Resolve", savedMapPath: saved });
+    expect(() => parseDisplayConfigCommand(args.slice(0, -1), repositoryRoot)).toThrow(/missing/i);
+    expect(() => parseDisplayConfigCommand(replaceFlag(args, "saved-display-map", "C:\\unrelated.json"), repositoryRoot)).toThrow(/site-config/i);
+    expect(() => parseDisplayConfigCommand(replaceFlag(replaceFlag(args, "rehearsal-root", `${rehearsalParent}\\site-config`), "display-map", saved), repositoryRoot)).toThrow(/separate/i);
+    expect(() => parseDisplayConfigCommand(replaceFlag(args, "display-config-mode", "configure"), repositoryRoot)).toThrow(/unexpected/i);
+  });
+
   it("selects exactly one of the three Electron command families", () => {
     expect(selectElectronCommandFamily(["--g2-mode=capture"])).toBe("g2");
     expect(selectElectronCommandFamily(["--show-mode=show"])).toBe("show");

@@ -21,6 +21,7 @@ import {
   captureConfigurationSnapshot,
   assertNoDisplayConfigReparseTraversal,
   runDisplayConfigurator,
+  resolveAutomaticDisplayMap,
   writeDisplayMapAtomic,
   type DisplayConfigBrowserWindowAdapter,
   type DisplayConfigBrowserWindowConstructor,
@@ -473,6 +474,70 @@ function productionRequest(topologySha256 = SNAPSHOT_TOKEN) {
     ],
   };
 }
+
+describe("automatic exhibition display selection", () => {
+  const layout = parseDisplayLayout(readFileSync(join(repositoryRoot, "show/display-layout.json")));
+  const utc = "2026-09-08T13:30:00.000Z";
+  const saved = buildDisplayMapBytes(layout, captureConfigurationSnapshot(RAW_DISPLAYS), {
+    ...productionRequest(),
+    bindings: [
+      { softId: "SCREEN-1", displayId: "C" },
+      { softId: "SCREEN-2", displayId: "A" },
+      { softId: "SCREEN-3", displayId: "B" },
+    ],
+  }, utc);
+
+  it.each([undefined, Buffer.from("broken json"), saved])("defaults missing, invalid or inapplicable maps without changing their bytes: %i", (previous) => {
+    const before = previous?.toString();
+    const right = rawDisplay("new-right", "new name", 3840);
+    right.bounds.y = -133; right.workArea.y = -133;
+    const snapshot = captureConfigurationSnapshot([
+      right, rawDisplay("new-middle", "TV", 1920), rawDisplay("new-left", "Dell", 0),
+      rawDisplay("extra", "extra", 5760),
+    ]);
+    const result = resolveAutomaticDisplayMap(layout, snapshot, previous, utc);
+    const map = parseDisplayMap(result.bytes);
+    expect(result.source).toBe("default-left-to-right");
+    expect(map.bindings.map(binding => binding.displayId)).toEqual(["new-left", "new-middle", "new-right"]);
+    expect(map.unassignedDisplays.map(display => display.displayId)).toEqual(["extra"]);
+    expect(previous?.toString()).toBe(before);
+  });
+
+  it("honors saved roles across name, work-area and resolution changes when all mapped IDs remain", () => {
+    const changed = RAW_DISPLAYS.map(display => ({ ...display, label: "renamed", workArea: { ...display.workArea, height: 1000 } }));
+    const result = resolveAutomaticDisplayMap(layout, captureConfigurationSnapshot(changed), saved, utc);
+    expect(result.source).toBe("saved-map");
+    const map = parseDisplayMap(result.bytes);
+    expect(map.bindings.map(binding => binding.displayId)).toEqual(["C", "A", "B"]);
+    expect(map.bindings.every(binding => binding.workingArea.height === 1000)).toBe(true);
+  });
+
+  it.each([
+    { displays: RAW_DISPLAYS.slice(0, 2) },
+    { displays: [rawDisplay("A", "mirror", 0), rawDisplay("B", "mirror", 0), RAW_DISPLAYS[2]] },
+  ])("rejects insufficient or mirrored displays before publishing a map", ({ displays }) => {
+    expect(() => resolveAutomaticDisplayMap(layout, captureConfigurationSnapshot(displays), undefined, utc)).toThrow(/three|extended/i);
+  });
+
+  it("publishes a per-run map headlessly without opening windows or registering IPC", async () => {
+    const harness = createRuntimeHarness();
+    const savedMapPath = "D:\\VirtualData\\JanVim-Exhibition-Rehearsals\\site-config\\display-map.json";
+    await expect(runDisplayConfigurator({ ...command, mode: "Resolve", savedMapPath }, harness.host)).resolves.toBe(0);
+    expect(parseDisplayMap(harness.atomicFileSystem.files.get(displayMapPath)!).bindings.map(binding => binding.displayId)).toEqual(["A", "B", "C"]);
+    expect(harness.windows).toHaveLength(0);
+    expect(harness.partitions).toHaveLength(0);
+    expect(harness.screenReads).toBe(2);
+  });
+
+  it("refuses to publish when the display topology changes during resolution", async () => {
+    const harness = createRuntimeHarness();
+    let reads = 0;
+    const host = { ...harness.host, screen: { getAllDisplays: () => ++reads === 1 ? RAW_DISPLAYS : RAW_DISPLAYS.slice(0, 2) } };
+    await expect(runDisplayConfigurator({ ...command, mode: "Resolve", savedMapPath: "D:\\VirtualData\\JanVim-Exhibition-Rehearsals\\site-config\\display-map.json" }, host)).rejects.toThrow(/topology changed/i);
+    expect(harness.atomicFileSystem.files.has(displayMapPath)).toBe(false);
+    expect(harness.windows).toHaveLength(0);
+  });
+});
 
 describe("display topology snapshot and map publication", () => {
   it("rejects a reparse point in any existing target ancestor", () => {

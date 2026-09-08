@@ -2,15 +2,16 @@
 
 完整步骤见同目录 `EXHIBITION-OPERATOR-RUNBOOK.md`；以下只供每日快速核对。
 
-1. 检查主机、电源、三根显示线、相机和有线耳机；Windows 必须为三屏扩展模式。
+1. 检查主机、电源、至少三台显示器和 Realtek 有线声音输出；Windows 必须为扩展模式，相机可选。
    本机登录 `hxj` 后会延时 30 秒自动开演；自动启动时不要再执行第 3 步。
 2. 在 PowerShell 7 执行：
 
    ```powershell
-   pwsh -NoProfile -File 'D:\github\JanVim-Exhibition-Deploy\operator\Verify-Deployment.ps1'
+   pwsh -NoProfile -File 'D:\github\JanVim-Exhibition-Deploy\operator\Verify-Deployment.ps1' -DeferDisplayMapping
    ```
 
-   必须看到 `DEPLOYMENT_VERIFY_PASS`。
+   必须看到 `DEPLOYMENT_VERIFY_PASS`。启动器随后解析映射；有适用人工配置就沿用，否则按桌面
+   从左到右（同列从上到下）选前三屏。配置器仅在技术人员发现映射错误时手动运行。
 3. 自动任务已禁用或正常 Stop 后需要再次开演时，手动启动：
 
    ```powershell

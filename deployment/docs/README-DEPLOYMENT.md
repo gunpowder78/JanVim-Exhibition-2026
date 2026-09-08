@@ -16,9 +16,9 @@ PELADN WO4 当前另有主机级计划任务，登录后延时 30 秒启动固�
 - PowerShell 7.6.5 x64；`pwsh.exe` 可由 PATH 唯一找到。
 - SuperCollider 3.14.1，安装于 `C:\Program Files\SuperCollider-3.14.1`。
 - 当前 GPU 的 Windows 11 驱动，并能运行 DX12 Compute。
-- UVC 相机驱动；Windows“隐私和安全性 → 相机”允许桌面应用访问。
+- 需要相机交互时才要求 UVC 驱动与 Windows 桌面应用相机权限；无相机可直接自动展示。
 - 小主机输出端点 `Windows WASAPI : Speakers (Realtek High Definition Audio)`，48 kHz、立体声；现场确认接入的有线耳机。
-- 三台显示设备采用 Windows“扩展这些显示器”，不要求沿用旧接口或旧显示器 ID。
+- 至少三台显示设备采用 Windows“扩展这些显示器”，不要求沿用旧接口或旧显示器 ID。
 
 Node.js 22.23.0、Electron、JavaScript 依赖、《见山》VC144/MediaPipe/OpenCV 文件和手势模型
 已经随包提供。目标机不需要 Git、npm、Rust、Cargo、Python、Visual Studio 或 ASIO。
@@ -35,26 +35,28 @@ Node.js 22.23.0、Electron、JavaScript 依赖、《见山》VC144/MediaPipe/Ope
    ```powershell
    Set-Location 'D:\github\JanVim-Exhibition-Deploy'
    pwsh -NoProfile -File '.\operator\Verify-Deployment.ps1' `
-     -HandoffReceiptPath '<deployment-handoff.json 的绝对路径>'
+     -HandoffReceiptPath '<deployment-handoff.json 的绝对路径>' -DeferDisplayMapping
    ```
 
    只有看到 `DEPLOYMENT_VERIFY_PASS` 才继续。校验不会打开相机、GUI 或播放声音。
 
 ## 三屏配置
 
-接好三屏并设为扩展模式后执行：
+接好至少三屏并设为扩展模式即可启动。有适用的人工映射时沿用；否则按桌面从左到右、
+同列从上到下在前三屏依次显示 JanVim、叙事页和《见山》。只有实测映射错误时，正常 Stop 后
+由技术人员手动执行：
 
 ```powershell
 pwsh -NoProfile -File 'D:\github\JanVim-Exhibition-Deploy\operator\Configure-Displays.ps1'
 ```
 
 按配置器画面把 A、B、C 对应为 `SCREEN-1`、`SCREEN-2`、`SCREEN-3`，保存并关闭。
-配置写入外部 `site-config\display-map.json`，不会改部署包。换接口、投影仪、缩放或拓扑后，
-由技术人员重新执行本步骤。
+配置写入外部 `site-config\display-map.json`，不会改部署包。每次启动生成独立运行映射，
+自动选择不会覆盖这里保存的人工配置。
 
 ## 第一次开演
 
-先把耳机音量调低并确认相机无遮挡，然后执行：
+先把耳机音量调低；需要相机交互时确认相机无遮挡，然后执行：
 
 ```powershell
 pwsh -NoProfile -File 'D:\github\JanVim-Exhibition-Deploy\operator\Start-Exhibition.ps1'

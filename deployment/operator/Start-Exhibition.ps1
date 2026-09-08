@@ -242,26 +242,60 @@ $pointerWritten = $false
 try {
     if (Test-Path -LiteralPath $pointerPath) { throw 'active-deployment-already-exists' }
 
-    # Deployment stage: verify
-    $verification = Invoke-DeploymentProcessCaptured `
-        -FilePath $powerShell `
-        -Arguments @('-NoLogo', '-NoProfile', '-NonInteractive', '-File', $verify) `
-        -TimeoutMs 60000
-    if ($verification.ExitCode -ne 0 -or $verification.Stdout -cnotmatch 'DEPLOYMENT_VERIFY_PASS') {
-        throw 'deployment-verification-failed'
-    }
-
-    $display = Read-ProductionDisplayMap -Path $displayMapPath
-    $plan = New-ExhibitionLaunchPlan `
-        -PackageRoot $packageRoot `
-        -DisplayMapPath $displayMapPath `
-        -DurationSeconds ([int]$defaults.durationSeconds)
-
+    # Allocate evidence before preflight: login failures must survive a closing console.
     $runId = 'deployment-{0}-{1}' -f `
         [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ'), `
         [Guid]::NewGuid().ToString('N').Substring(0, 12)
     $runRoot = Join-Path $defaults.rehearsalParent $runId
     [void](New-Item -ItemType Directory -Path $runRoot)
+    [IO.File]::WriteAllText((Join-Path $runRoot 'startup.json'), ([ordered]@{
+        atUtc = [DateTime]::UtcNow.ToString('o')
+        status = 'verifying'
+        verificationTimeoutMs = 240000
+    } | ConvertTo-Json -Compress))
+    Write-Host "正在校验展演部署；进度记录：$runRoot"
+
+    # Deployment stage: verify
+    # A cold manifest read has its own 120 s deadline. The complete verifier also
+    # includes 30 s artifact, 20 s audio, 5 s version and 2 s Node probes, plus
+    # hashing/PnP/display work. Its parent deadline must encompass those stages.
+    $verification = Invoke-DeploymentProcessCaptured `
+        -FilePath $powerShell `
+        -Arguments @('-NoLogo', '-NoProfile', '-NonInteractive', '-File', $verify,
+            '-DeferDisplayMapping',
+            '-ProgressPath', (Join-Path $runRoot 'verification-progress.jsonl')) `
+        -TimeoutMs 240000
+    foreach ($stream in @('Stdout', 'Stderr')) {
+        $content = [string]$verification.$stream
+        if ($content.Length -gt 32768) { $content = $content.Substring(0, 32768) }
+        [IO.File]::WriteAllText((Join-Path $runRoot "verification-$stream.txt"), $content)
+    }
+    if ($verification.ExitCode -ne 0 -or $verification.Stdout -cnotmatch 'DEPLOYMENT_VERIFY_PASS') {
+        throw 'deployment-verification-failed'
+    }
+
+    # Deployment stage: display-map
+    # Resolve only after immutable payload verification; never open the configuration UI.
+    $savedDisplayMapPath = $displayMapPath
+    $displayMapPath = Join-Path $runRoot 'display-map.json'
+    $resolution = Invoke-DeploymentProcessCaptured `
+        -FilePath (Join-Path $packageRoot 'app\node_modules\electron\dist\electron.exe') `
+        -Arguments @(
+            (Join-Path $packageRoot 'app\apps\controller'),
+            '--display-config-mode=resolve', "--rehearsal-root=$runRoot",
+            "--display-map=$displayMapPath", "--saved-display-map=$savedDisplayMapPath"
+        ) -TimeoutMs 20000
+    foreach ($stream in @('Stdout', 'Stderr')) {
+        $content = [string]$resolution.$stream
+        if ($content.Length -gt 32768) { $content = $content.Substring(0, 32768) }
+        [IO.File]::WriteAllText((Join-Path $runRoot "display-resolution-$stream.txt"), $content)
+    }
+    if ($resolution.ExitCode -ne 0) { throw 'deployment-display-resolution-failed' }
+    $display = Read-ProductionDisplayMap -Path $displayMapPath
+    $plan = New-ExhibitionLaunchPlan `
+        -PackageRoot $packageRoot `
+        -DisplayMapPath $displayMapPath `
+        -DurationSeconds ([int]$defaults.durationSeconds)
 
     # Deployment stage: prepare
     $prepare = Invoke-DeploymentProcessCaptured `
@@ -395,6 +429,12 @@ try {
 }
 catch {
     $failure = $_.Exception.Message
+    if (-not [string]::IsNullOrWhiteSpace($runRoot) -and (Test-Path -LiteralPath $runRoot -PathType Container)) {
+        try {
+            $diagnostic = $failure.Substring(0, [Math]::Min(2048, $failure.Length))
+            [IO.File]::WriteAllText((Join-Path $runRoot 'startup-failure.txt'), $diagnostic)
+        } catch {}
+    }
     $cleanupFailed = $false
     foreach ($entry in @(
         @{ Process = $showProcess; Identity = $showIdentity },
@@ -433,7 +473,14 @@ catch {
     if ($pointerWritten -and -not $cleanupFailed) {
         try { Remove-ActiveDeploymentPointer -Path $pointerPath } catch { $cleanupFailed = $true }
     }
-    if ($cleanupFailed) { throw "${failure}:deployment-cleanup-incomplete" }
+    if ($cleanupFailed) {
+        if (-not [string]::IsNullOrWhiteSpace($runRoot)) {
+            try {
+                [IO.File]::AppendAllText((Join-Path $runRoot 'startup-failure.txt'), ':deployment-cleanup-incomplete')
+            } catch {}
+        }
+        throw "${failure}:deployment-cleanup-incomplete"
+    }
     throw $failure
 }
 finally {

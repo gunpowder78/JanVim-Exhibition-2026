@@ -6,9 +6,10 @@ import {
 } from "./g2-command.js";
 
 export interface DisplayConfigCommand {
-  readonly mode: "Configure";
+  readonly mode: "Configure" | "Resolve";
   readonly rehearsalRoot: string;
   readonly displayMapPath: string;
+  readonly savedMapPath?: string;
 }
 
 const JANVIM_PRODUCT_ROOT = "D:\\github\\JanVim";
@@ -17,6 +18,7 @@ const KNOWN_FLAGS = new Set([
   "display-config-mode",
   "rehearsal-root",
   "display-map",
+  "saved-display-map",
 ]);
 
 export function parseDisplayConfigCommand(
@@ -25,7 +27,8 @@ export function parseDisplayConfigCommand(
 ): DisplayConfigCommand {
   assertAbsoluteLocalPath(repositoryRoot, "Repository root");
   const flags = parseFlags(argv);
-  if (requiredFlag(flags, "display-config-mode") !== "configure") {
+  const mode = requiredFlag(flags, "display-config-mode");
+  if (mode !== "configure" && mode !== "resolve") {
     throw new Error("Display configuration mode is invalid");
   }
 
@@ -55,6 +58,16 @@ export function parseDisplayConfigCommand(
     throw new Error("Display map must be a direct child of the rehearsal root");
   }
 
+  if (mode === "resolve") {
+    const savedMapPath = requiredFlag(flags, "saved-display-map");
+    assertAbsoluteLocalPath(savedMapPath, "Saved display map");
+    if (!pathsEqual(savedMapPath, win32.join(G2_REHEARSAL_PARENT, "site-config", "display-map.json")) ||
+        pathsEqual(savedMapPath, displayMapPath)) {
+      throw new Error("Saved display map must be the separate site-config display-map.json");
+    }
+    return Object.freeze({ mode: "Resolve", rehearsalRoot, displayMapPath, savedMapPath: win32.resolve(savedMapPath) });
+  }
+  if (flags.has("saved-display-map")) throw new Error("Unexpected saved display map in configure mode");
   return Object.freeze({
     mode: "Configure" as const,
     rehearsalRoot,

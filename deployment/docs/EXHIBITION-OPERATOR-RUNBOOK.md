@@ -4,13 +4,14 @@
 `D:\github\JanVim-Exhibition-Deploy`。
 
 日常开演只使用固定部署目录中的 `operator` 脚本，不从源码工作树、旧保留目录或 ZIP
-内部直接启动。当前保底的完整身份见同目录 `GOLDEN-BASELINE.md` 及外部黄金基线回执。
+内部直接启动。此前黄金保底身份见同目录 `GOLDEN-BASELINE.md` 及外部黄金基线回执；
+当前安装身份以本包 `evidence/source-identities.json` 与对应 `deployment-handoff.json` 为准。
 本机已配置登录后自动开演，主机级计划任务说明见 `AUTOSTART-TASK.md`。
 
 ## 一、开机后检查
 
-1. 确认三台显示设备均通电，Windows 使用“扩展这些显示器”。
-2. 确认相机已连接且无遮挡，没有其他软件占用相机。
+1. 确认至少三台显示设备均通电，Windows 使用“扩展这些显示器”。
+2. 相机可接可不接；需要交互时再确认相机已连接、无遮挡且未被其他软件占用。无相机时自动展示继续。
 3. 确认有线音箱或耳机接在小主机 Realtek 输出。现场输出端点必须为
    `Speakers (Realtek High Definition Audio)`；不要改用电视 HDMI，也不要安装 ASIO。
 4. 初次试听时先把 Windows 音量调低，再由现场人员逐步确认安全响度。不要用脚本改变
@@ -18,10 +19,12 @@
 5. 确认没有上一场仍在运行。不要同时打开两次启动命令。
 
 当前小主机登录 `hxj` 后，计划任务 `Start_JanVim_Exhibition` 会沿用原设置延时 30 秒并自动
-执行黄金包启动入口。自动开演时不要再手工执行启动命令；入口会先完成同样的部署验证。
+执行固定部署目录的启动入口。自动开演时不要再手工执行启动命令；入口会先完成同样的部署验证。
 若本次登录用于维护，应在关机或注销前由管理员禁用任务，详见 `AUTOSTART-TASK.md`。
 
-若更换了显示接口、投影仪、缩放比例或屏幕排列，先由技术人员重新配置：
+有适用的人工映射时自动沿用。没有配置或配置不适用于当前设备时，按桌面位置从左到右
+（同列从上到下）在前三台屏幕依次显示 JanVim、叙事页和《见山》，不要求先运行配置器。
+显示设备名称变化不影响测试。只有技术人员实测发现映射错误时，正常 Stop 后手动运行：
 
 ```powershell
 pwsh -NoProfile -File 'D:\github\JanVim-Exhibition-Deploy\operator\Configure-Displays.ps1'
@@ -35,7 +38,7 @@ pwsh -NoProfile -File 'D:\github\JanVim-Exhibition-Deploy\operator\Configure-Dis
 打开 PowerShell 7，执行：
 
 ```powershell
-pwsh -NoProfile -File 'D:\github\JanVim-Exhibition-Deploy\operator\Verify-Deployment.ps1'
+pwsh -NoProfile -File 'D:\github\JanVim-Exhibition-Deploy\operator\Verify-Deployment.ps1' -DeferDisplayMapping
 ```
 
 只有最后出现下面一行才可继续：
@@ -46,7 +49,8 @@ DEPLOYMENT_VERIFY_PASS
 
 验证失败时不要继续启动。记录表格中失败的那一行及终端诊断，按
 `TROUBLESHOOTING.md` 处理。验证只读取部署包、运行状态、声卡、相机和显示映射，
-不会打开展演画面或播放声音。
+不会打开展演画面或播放声音。此命令把映射解析留给启动器，允许没有人工映射配置；
+`DEPLOYMENT_VERIFY_PASS` 仅代表部署预检，不等于显示映射或现场验收通过。
 
 ## 三、启动
 
@@ -58,6 +62,10 @@ pwsh -NoProfile -File 'D:\github\JanVim-Exhibition-Deploy\operator\Start-Exhibit
 
 命令启动后保持这个 PowerShell 窗口开启，不要再次执行启动命令，也不要点击旧的
 `Start Rehearsal`。系统会依次启动声音、《见山》和展演控制器。
+
+校验阶段会显示本次证据目录。冷启动可能比再次启动慢；完整校验最多 4 分钟，完成后立即继续。
+若窗口自行退出且没有画面，保留目录中的 `verification-progress.jsonl` 和 `startup-failure.txt`，
+按 `AUTOSTART-TASK.md` 查看任务结果。不要把证据目录存在当作展演已启动。
 
 正常启动应满足：
 

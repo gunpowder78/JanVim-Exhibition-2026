@@ -67,8 +67,8 @@ $crashWindowMilliseconds = 600000L
 $restartDelaysMilliseconds = @(1000, 2000, 4000)
 # JANVIM_REVIEWED_ELECTRON_RELEASE_IDENTITY_BEGIN
 $reviewedElectronMainRelativePath = 'apps/controller/dist/main/electron-main.js'
-$reviewedElectronMainBytes = 549304L
-$reviewedElectronMainSha256 = '77408bde85dc374ba21d011cecb088278197ae6c7785f205a58bc7130bdc8826'
+$reviewedElectronMainBytes = 553166L
+$reviewedElectronMainSha256 = 'e0bc73cf3860b209c598bca26dfcf0505caf3fc1c0b1e4e240c8ae15491e20af'
 $reviewedElectronMainRuntimeImports = @(
     'electron'
     'node:child_process'

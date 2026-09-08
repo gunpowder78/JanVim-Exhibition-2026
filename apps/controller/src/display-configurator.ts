@@ -352,6 +352,43 @@ export function writeDisplayMapAtomic(
   }
 }
 
+/** Freeze the current topology for this run; the technician's site map is read-only. */
+export function resolveAutomaticDisplayMap(
+  layout: DisplayLayout,
+  snapshot: ConfigurationSnapshot,
+  savedBytes: Uint8Array | undefined,
+  capturedAtUtc: string,
+): { bytes: Buffer; source: "saved-map" | "default-left-to-right" } {
+  if (snapshot.displays.length < 3) {
+    throw new Error("Exhibition requires at least three extended displays");
+  }
+  for (const [index, left] of snapshot.displays.entries()) {
+    for (const right of snapshot.displays.slice(index + 1)) {
+      const a = left.bounds;
+      const b = right.bounds;
+      if (a.x < b.x + b.width && b.x < a.x + a.width &&
+          a.y < b.y + b.height && b.y < a.y + a.height) {
+        throw new Error("Exhibition requires distinct extended display areas");
+      }
+    }
+  }
+  let saved;
+  try { saved = savedBytes === undefined ? undefined : parseDisplayMap(savedBytes); }
+  catch { saved = undefined; }
+  const applicable = saved?.mode === "production-3" && saved.layoutSha256 === layout.layoutSha256 &&
+    saved.bindings.every(binding => snapshot.displays.some(display => display.displayId === binding.displayId));
+  const ordered = [...snapshot.displays].sort((a, b) => a.bounds.x - b.bounds.x || a.bounds.y - b.bounds.y);
+  const bindings = applicable && saved !== undefined
+    ? saved.bindings.map(({ softId, displayId }) => ({ softId, displayId }))
+    : SOFT_ROLE_ORDER.map((softId, index) => ({ softId, displayId: ordered[index]!.displayId }));
+  return {
+    bytes: buildDisplayMapBytes(layout, snapshot, {
+      mode: "production-3", topologySha256: snapshot.topologySha256, bindings,
+    }, capturedAtUtc),
+    source: applicable ? "saved-map" : "default-left-to-right",
+  };
+}
+
 function assertTemporaryIdentity(
   expected: DisplayMapFileIdentity,
   actual: DisplayMapFileIdentity,
@@ -384,6 +421,29 @@ export async function runDisplayConfigurator(
   const initialSnapshot = captureConfigurationSnapshot(
     host.screen.getAllDisplays(),
   );
+  if (command.mode === "Resolve") {
+    try {
+      if (host.pathExists(command.displayMapPath)) throw new Error("Resolved display map already exists");
+      let savedBytes: Buffer | undefined;
+      try {
+        if (command.savedMapPath !== undefined && host.pathExists(command.savedMapPath)) {
+          savedBytes = (source.readFile ?? readSavedDisplayMap)(command.savedMapPath);
+        }
+      } catch { /* An unreadable manual override is inapplicable; use current displays. */ }
+      const resolved = resolveAutomaticDisplayMap(layout, initialSnapshot, savedBytes, host.nowUtc());
+      writeDisplayMapAtomic(command.displayMapPath, resolved.bytes, () => {
+        assertNoTerminalEvidence(command.rehearsalRoot, host.pathExists);
+        if (captureConfigurationSnapshot(host.screen.getAllDisplays()).topologySha256 !== initialSnapshot.topologySha256) {
+          throw new Error("Display topology changed during automatic resolution");
+        }
+      }, host.atomicFileSystem, host.randomSuffix());
+      process.stdout.write(`${JSON.stringify({ status: "display-map-resolved", source: resolved.source, displayMapPath: command.displayMapPath })}\n`);
+      return 0;
+    } catch (error) {
+      process.stderr.write(`Display resolution failed: ${String(error).slice(0, 512)}\n`);
+      throw error;
+    }
+  }
   const mainEntry = pathToFileURL(
     win32.join(
       host.repositoryRoot,
@@ -678,6 +738,19 @@ export async function runDisplayConfigurator(
     if (!mainWindow.isDestroyed()) safely(() => mainWindow.destroy());
     throw error;
   }
+}
+
+function readSavedDisplayMap(path: string): Buffer {
+  assertNoDisplayConfigReparseTraversal(path);
+  const stat = lstatSync(path);
+  if (!stat.isFile() || stat.size > 65536) throw new Error("Saved display map is invalid");
+  const descriptor = openSync(path, "r");
+  try {
+    const bytes = Buffer.alloc(65537);
+    const count = readSync(descriptor, bytes, 0, bytes.length, 0);
+    if (count > 65536) throw new Error("Saved display map is too large");
+    return bytes.subarray(0, count);
+  } finally { closeSync(descriptor); }
 }
 
 function normalizePhysicalDisplay(value: unknown): DisplayMapPhysicalSnapshot {

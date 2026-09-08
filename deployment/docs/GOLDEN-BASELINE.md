@@ -2,6 +2,9 @@
 
 状态：本机三屏有人值守验收通过；冻结为后续少量效果修改的回退点。
 
+本页记录此前冻结的黄金包。新增登录启动修复候选的身份以其 `deployment-handoff.json` 和
+`evidence/source-identities.json` 为准，不能把本页的历史人工验收直接归给新候选。
+
 ## Git 身份
 
 - JanVim 展演控制器标签：`exhibition-mini-pc-golden-2026-09-08`
