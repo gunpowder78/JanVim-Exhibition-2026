@@ -3,6 +3,8 @@
 本包用于有人值守的 Windows 11 Pro x64 三屏展演。安装根固定为
 `D:\github\JanVim-Exhibition-Deploy`，运行证据和现场配置固定写入
 `D:\VirtualData\JanVim-Exhibition-Rehearsals`。不要从源码工作树直接开演。
+现场启动、运行和关闭请按 `docs\EXHIBITION-OPERATOR-RUNBOOK.md`；每日简表见
+`docs\DAILY-OPERATOR-CARD.md`。
 
 ## 第三方准备
 
@@ -56,8 +58,9 @@ pwsh -NoProfile -File 'D:\github\JanVim-Exhibition-Deploy\operator\Start-Exhibit
 ```
 
 系统自动启动声音、《见山》和 JanVim 展演，不再点击 `Start Rehearsal`。《见山》应自动位于
-C 屏、最大化、永久置顶、黑底白鸟；鼠标移入后仍可显示、点击。A 屏持续长文回写，B 屏显示
-叙事和声音控制。正常停止使用 `Ctrl+Shift+S`；也可点击 B 屏 `STOP SHOW`。
+C 屏、无标题栏、无任务栏、无需按 F 的无边框全屏并永久置顶；鼠标移入后仍可显示、点击。
+A 屏持续长文回写，B 屏显示叙事和声音控制。正常停止首选点击 B 屏一次 `STOP SHOW`；也可
+按一次 `Ctrl+Shift+S`。等待声音淡出和启动命令返回，不要重复停止。
 
 每次会话最多 3,600 秒，且需要工作人员在场。本包不声明断网、强制恢复、HP 性能、热插拔
 自愈或 7×24 小时无人值守能力。

@@ -6,6 +6,7 @@
 |---|---|
 | `display-map-*`、三屏顺序错误 | 确认 Windows 为三屏扩展模式，运行 `Configure-Displays.ps1`，重新识别并保存 A/B/C。 |
 | 《见山》不在 C 屏 | 正常停止，重新配置三屏，再启动；不要拖窗后把临时位置当成新配置。 |
+| 《见山》出现标题栏、任务栏或需要按 F | 正常停止并重新运行 `Start-Exhibition.ps1`；保底应自动无边框全屏。不要按 F 掩盖问题。 |
 | C 屏占位页盖住《见山》或置顶丢失 | 正常停止并重新运行 `Start-Exhibition.ps1`；置顶只属于本次精确《见山》窗口。 |
 | C 屏鼠标看不见或不能点击 | 把鼠标移入《见山》窗口再试；仍异常则正常停止并重启。不要使用坐标点击或键盘注入脚本。 |
 | `camera` / 相机失败 | 检查 USB、设备管理器及 Windows 相机隐私权限，关闭占用相机的其他软件后重启。 |
@@ -24,4 +25,5 @@ pwsh -NoProfile -File 'D:\github\JanVim-Exhibition-Deploy\operator\Stop-Exhibiti
 
 该脚本只使用当次 `active-deployment.json` 中的 PID、启动时间和可执行文件身份。不要手工删除
 lease、token、descriptor、源码或配置；不要按 `electron`、`pwsh`、`node`、`jianshan` 等进程名
-批量终止。无法恢复时保留外部运行目录，由工作人员重启主机并重新验证。
+批量终止。该脚本是技术后备，不计作正常 Stop 验收；它可能令原启动命令返回非零清理诊断。
+无法恢复时保留外部运行目录，由工作人员正常重启主机并重新验证。
