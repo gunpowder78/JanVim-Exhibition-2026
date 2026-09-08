@@ -1,5 +1,11 @@
 # 声音闭环（模拟基线、真实光标与鸟群入口候选）
 
+`StoneAndSignalV2` 隔离候选只在显式
+`-Input RealCursor -InstrumentProfile StoneAndSignalV2` 时启用；缺省仍为旧拨弦。
+候选身份、试听 WAV、启动、停止、回退和验证边界见
+[空山远讯 II · 石与电候选交接](../docs/operations/2026-09-09-stone-and-signal-v2-candidate.md)。
+该候选尚未推送、安装或通过人工听感验收。
+
 鸟群入口隔离候选位于 `.worktrees/sound-flock-ingress-v1`，仅显式
 `-Input RealCursor -FlockIngress`（Node `--input real-cursor --flock-input enabled`）启用。
 当次 READY、私有 `flock-input.json`、Stop 规则及验证限制见
