@@ -2,7 +2,7 @@
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type {
   Cue,
@@ -149,6 +149,10 @@ function bindTask9Runtime(
 }
 
 describe("secondary scene controller", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("keeps the ready page honest until controller checks complete", () => {
     const { root } = makeController();
     const readyText = root.querySelector("[data-region='ready']")?.textContent ?? "";
@@ -250,6 +254,90 @@ describe("secondary scene controller", () => {
       state: "stopped",
     });
     expect(hint?.hidden).toBe(true);
+  });
+
+  it("shows the pointer on Narrative activity and hides it after 20 seconds idle", () => {
+    vi.useFakeTimers();
+    const { root, controller } = makeController();
+    const frames = new FakeAnimationFrames();
+    const unbind = bindTask9Runtime(controller, frames, []);
+
+    expect(root.dataset.cursorVisibility).toBe("hidden");
+    root.dispatchEvent(new MouseEvent("pointerenter", { clientX: 120, clientY: 240 }));
+    expect(root.dataset.cursorVisibility).toBe("visible");
+
+    for (let elapsed = 5_000; elapsed < 20_000; elapsed += 5_000) {
+      vi.advanceTimersByTime(5_000);
+      root.dispatchEvent(new MouseEvent("pointermove", { clientX: 120, clientY: 240 }));
+    }
+    vi.advanceTimersByTime(4_999);
+    expect(root.dataset.cursorVisibility).toBe("visible");
+    vi.advanceTimersByTime(1);
+    expect(root.dataset.cursorVisibility).toBe("hidden");
+
+    root.dispatchEvent(new MouseEvent("pointermove", { clientX: 121, clientY: 240 }));
+    expect(root.dataset.cursorVisibility).toBe("visible");
+    vi.advanceTimersByTime(20_000);
+    expect(root.dataset.cursorVisibility).toBe("hidden");
+
+    root.dispatchEvent(new MouseEvent("pointerleave", { clientX: 121, clientY: 240 }));
+    root.dispatchEvent(new MouseEvent("pointerenter", { clientX: 121, clientY: 240 }));
+    expect(root.dataset.cursorVisibility).toBe("visible");
+
+    unbind();
+    expect(root.dataset.cursorVisibility).toBe("hidden");
+    root.dispatchEvent(new MouseEvent("pointermove", { clientX: 122, clientY: 240 }));
+    expect(root.dataset.cursorVisibility).toBe("hidden");
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("keeps a two-line exit warning visible from accepted Stop until close", () => {
+    const { root, controller } = makeController();
+    const notice = root.querySelector<HTMLElement>("[data-shutdown-notice]");
+    const lines = notice?.querySelectorAll("[data-shutdown-line]");
+
+    expect(notice).toBeInstanceOf(HTMLElement);
+    expect(notice?.hidden).toBe(true);
+    expect([...lines ?? []].map((line) => line.textContent)).toEqual([
+      "三屏演示正在退出，",
+      "请等待...",
+    ]);
+
+    controller.applyEvent({
+      schema: 1,
+      type: "run-status",
+      generationId: 1,
+      state: "running",
+      reason: "operator-stop-pending",
+    });
+    expect(notice?.hidden).toBe(false);
+    expect(root.querySelector<HTMLButtonElement>("[data-action='stop-show']")?.disabled).toBe(true);
+
+    controller.applyEvent({
+      schema: 1,
+      type: "run-status",
+      generationId: 2,
+      state: "black-recovering",
+    });
+    expect(notice?.hidden).toBe(false);
+
+    controller.applyEvent({
+      schema: 1,
+      type: "run-status",
+      generationId: 3,
+      state: "shutting-down",
+      reason: "operator-stop",
+    });
+    expect(notice?.hidden).toBe(false);
+
+    controller.applyEvent({
+      schema: 1,
+      type: "run-status",
+      generationId: 3,
+      state: "stopped",
+      reason: "operator-stop",
+    });
+    expect(notice?.hidden).toBe(false);
   });
 
   it("site sound mix adjusts each stem independently and exposes autosave state", () => {

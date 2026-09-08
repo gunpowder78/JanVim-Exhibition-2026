@@ -1,0 +1,377 @@
+{
+  "schema": 1,
+  "version": "44.0.0",
+  "platform": "win32-x64",
+  "archive": {
+    "url": "https://github.com/electron/electron/releases/download/v44.0.0/electron-v44.0.0-win32-x64.zip",
+    "bytes": 157455369,
+    "sha256": "e61aa3bcea8152bc0730abd015e47c032d778a0ef10e2a1c78ba3c4ea47942f9"
+  },
+  "files": [
+    {
+      "path": "LICENSE",
+      "bytes": 1096,
+      "sha256": "5154e165bd6c2cc0cfbcd8916498c7abab0497923bafcd5cb07673fe8480087d"
+    },
+    {
+      "path": "LICENSES.chromium.html",
+      "bytes": 20472827,
+      "sha256": "f2310820377f4d8f2a5f6bc8744b985d6772cef9ee7d8d197b01fdb330db0bb8"
+    },
+    {
+      "path": "chrome_100_percent.pak",
+      "bytes": 719654,
+      "sha256": "ab7c4b7b6cb8832a31d44b95ec50ce52294f49422a3bdde4e21968eca2930cbe"
+    },
+    {
+      "path": "chrome_200_percent.pak",
+      "bytes": 1269017,
+      "sha256": "30fa4a6e27c9ff2fb0f939f01158477e621a67d86e9ecb84cf11b3947db8eb9d"
+    },
+    {
+      "path": "d3dcompiler_47.dll",
+      "bytes": 4741488,
+      "sha256": "a05f99734f7c4822fefc12b367af21fd0976ed6608752fb1e1e80b6ece7ecbbb"
+    },
+    {
+      "path": "dxcompiler.dll",
+      "bytes": 25744896,
+      "sha256": "494a0ca088d1b9dd8ff673d590aaddd6bdcff09c938befef8c88c2016c49ee9a"
+    },
+    {
+      "path": "dxil.dll",
+      "bytes": 1509760,
+      "sha256": "77e039c905030a641e53658a008b74e90635a5ea9b6b79eabd0f2003bdfca59a"
+    },
+    {
+      "path": "electron.exe",
+      "bytes": 244440576,
+      "sha256": "1dc2d12e5c60341782e68c4b65a8e49cbd86217f81568f90575547cec13b5610"
+    },
+    {
+      "path": "ffmpeg.dll",
+      "bytes": 3113472,
+      "sha256": "0b4a5071d9cee1c8318f365d977f271ce771be8cce214cd12e24b714e239ff16"
+    },
+    {
+      "path": "icudtl.dat",
+      "bytes": 10876560,
+      "sha256": "9f48c7f9c7c94d516a14870707e910ab94d75ae640ff6842c4af53276cd26ebe"
+    },
+    {
+      "path": "locales/af.pak",
+      "bytes": 636155,
+      "sha256": "3017b141bd16e24190d810f0748612f0fd4352ca8553002b9a63a7f77f7154f8"
+    },
+    {
+      "path": "locales/am.pak",
+      "bytes": 1029450,
+      "sha256": "67b938d162bc75db067120bb8366b5bafd9a75fa99a0ca9ad4f46b47d1d37634"
+    },
+    {
+      "path": "locales/ar.pak",
+      "bytes": 1130991,
+      "sha256": "10b104b02b795bc3c83a83664f77c31e5a44dcb3b581b7ed5e68e40362171e08"
+    },
+    {
+      "path": "locales/bg.pak",
+      "bytes": 1178203,
+      "sha256": "2eb9c74c67e4b13b45a73061fa978738e335bc245da71bab0ea9b205fe91074e"
+    },
+    {
+      "path": "locales/bn.pak",
+      "bytes": 1513545,
+      "sha256": "415621a5c0b1546e6e447d43b76414425a8703cc7681d637ec1f283ad0c787e7"
+    },
+    {
+      "path": "locales/ca.pak",
+      "bytes": 716917,
+      "sha256": "0271debd0cda19a4757ab3c8c6de8d8c741f1c60a54642c3ee480c38ba9fcd98"
+    },
+    {
+      "path": "locales/cs.pak",
+      "bytes": 743351,
+      "sha256": "799a789ce531991cb975425730db310f9a8fe74091eee568f3e65fcc7ef0cd57"
+    },
+    {
+      "path": "locales/da.pak",
+      "bytes": 666460,
+      "sha256": "260783e1c13d3187c9e42b6aa4b5e996a3731393b15a57b6f673ec1a22768444"
+    },
+    {
+      "path": "locales/de.pak",
+      "bytes": 717954,
+      "sha256": "ca51f2179e75a391634a010f31897ef233b752c15db75e258203809a543c3cda"
+    },
+    {
+      "path": "locales/el.pak",
+      "bytes": 1295538,
+      "sha256": "37d2e1ef69fea9bdb1e0902cbc61a458baa9009fc3761029bd1c1882a7a0c9b2"
+    },
+    {
+      "path": "locales/en-GB.pak",
+      "bytes": 580030,
+      "sha256": "01d9200a5daee1770f7147b166d25baa6a8dd72c138c3c526421e656dec789f5"
+    },
+    {
+      "path": "locales/en-US.pak",
+      "bytes": 586582,
+      "sha256": "23b271e8009bfa14783700cd0712b4ecaa5b8f2ea28a4d81ae1d7e05bc0c96b1"
+    },
+    {
+      "path": "locales/es-419.pak",
+      "bytes": 707634,
+      "sha256": "5e59d63a7a73f79ab85e62fd79cd8d9cdb9b5b9a9b4dbcb1a96279ce65ee626e"
+    },
+    {
+      "path": "locales/es.pak",
+      "bytes": 703901,
+      "sha256": "5b110026a9f491fa4816e91145ac8855527277ce716b5dec41765baaadf7f83d"
+    },
+    {
+      "path": "locales/et.pak",
+      "bytes": 642216,
+      "sha256": "dd1205eae606f12510e24ce39f301439c98b3293d766ca5839dc292a14d7973c"
+    },
+    {
+      "path": "locales/fa.pak",
+      "bytes": 1063054,
+      "sha256": "1bd4994b710c80d4658ec469a8f3cc12b08615774d39951cf13d284f6ed8b5f5"
+    },
+    {
+      "path": "locales/fi.pak",
+      "bytes": 655113,
+      "sha256": "1f3123d7fb5c22a95b5250ea17450b665c3c6cd6a6dfd28bbdde15e1bf684a0e"
+    },
+    {
+      "path": "locales/fil.pak",
+      "bytes": 741384,
+      "sha256": "8af47a96f25daa5c2bb0936358289ece0c6424359f5c83c644c40412e11b402f"
+    },
+    {
+      "path": "locales/fr.pak",
+      "bytes": 763492,
+      "sha256": "317b707e2dfba4044ab58f74fe53c8a0d447770f6633f251ccd0eb97e00b38c9"
+    },
+    {
+      "path": "locales/gu.pak",
+      "bytes": 1495625,
+      "sha256": "e86e8c240d4b6283abb03c49df9e8899607ef9def6d4933c7a541d63b5835271"
+    },
+    {
+      "path": "locales/he.pak",
+      "bytes": 929048,
+      "sha256": "1534938c992c1386785b91ce46941adde7c9ff3638dedb574eaf044ca439c963"
+    },
+    {
+      "path": "locales/hi.pak",
+      "bytes": 1586592,
+      "sha256": "10a6f19c1982590e33476427dee8d4293b0707e25dc536d6394b5782ecc3b642"
+    },
+    {
+      "path": "locales/hr.pak",
+      "bytes": 715279,
+      "sha256": "d46c64ae8af3562e37eb80438aa2bee228fafda251d58ba4d0991291f1c72aab"
+    },
+    {
+      "path": "locales/hu.pak",
+      "bytes": 765640,
+      "sha256": "0a46fc8d50f74effd1cfe1979e677df3de6fc47e6b551267303d93d57bd83f50"
+    },
+    {
+      "path": "locales/id.pak",
+      "bytes": 635080,
+      "sha256": "4474c516e9ebe29a340d2d80cb37bc3074ab163c1ae90f084a0b7b02a4f30117"
+    },
+    {
+      "path": "locales/it.pak",
+      "bytes": 693986,
+      "sha256": "078eba5ec8d7d0a5ae3178a33b0f5b6e27c354ce8416d2e554f0092085180446"
+    },
+    {
+      "path": "locales/ja.pak",
+      "bytes": 842141,
+      "sha256": "5f54ceffa5f846ce707d6ea816032d1407175bb56e1cc76dc2d139fd941bcf6b"
+    },
+    {
+      "path": "locales/kn.pak",
+      "bytes": 1720240,
+      "sha256": "af5fed2130102ecc0c878059c88faed9d6db2e8b147fb5ae9e15e3fe69706c8a"
+    },
+    {
+      "path": "locales/ko.pak",
+      "bytes": 718685,
+      "sha256": "158d98626e06a615f166463392821bdda325c5f86f0d0cabc422f4ff0a1627df"
+    },
+    {
+      "path": "locales/lt.pak",
+      "bytes": 777281,
+      "sha256": "af969f4407c190dd01a426fa1244cb1ec7cdf2909d1c3ba5b87ff662ba567303"
+    },
+    {
+      "path": "locales/lv.pak",
+      "bytes": 774751,
+      "sha256": "27e20dfa5585161ef8b641f628aefe6c88d9f9590ffedb647e0c9da1cacf219d"
+    },
+    {
+      "path": "locales/ml.pak",
+      "bytes": 1767850,
+      "sha256": "b5606265910e45098a88e989202a550531f6d00333c6b112ed4c5cbc07b2ff6a"
+    },
+    {
+      "path": "locales/mr.pak",
+      "bytes": 1467313,
+      "sha256": "8465d4077ed5414cbcb7d9bdb00d85e515a1a069703cdc1d4d67c9d6e5623fb0"
+    },
+    {
+      "path": "locales/ms.pak",
+      "bytes": 668356,
+      "sha256": "af7021a00befa586aa067ae3ccb339079e6f13ee0cab1621836f6abb608b6f2a"
+    },
+    {
+      "path": "locales/nb.pak",
+      "bytes": 638117,
+      "sha256": "fcaa70d6dd3e8205118d6c2aa3bf7c5f0fad06838151fc6d590328100103b00a"
+    },
+    {
+      "path": "locales/nl.pak",
+      "bytes": 664767,
+      "sha256": "7a9a05304d6806b6b23ddc3e1c6ae1bafebb1a5dd7f15034ae86cab5330349ee"
+    },
+    {
+      "path": "locales/pl.pak",
+      "bytes": 742064,
+      "sha256": "e30f8d353234bb4642402ec2b0c226d75ef1d2b90e03931f04eb7815b44dc7c3"
+    },
+    {
+      "path": "locales/pt-BR.pak",
+      "bytes": 697070,
+      "sha256": "04b104298da6c847b321f36ad6f3340d16f9636b3cc9f9c6f49dfcd43545cca5"
+    },
+    {
+      "path": "locales/pt-PT.pak",
+      "bytes": 701056,
+      "sha256": "bdfa7264dddf70f936f1785737969559a577b51d1952c820a468c611d18b17ca"
+    },
+    {
+      "path": "locales/ro.pak",
+      "bytes": 728144,
+      "sha256": "1e6b5b0dac63a9e951daf523de310f6bd9e5c53e281f37706d41bd35d2a08bb5"
+    },
+    {
+      "path": "locales/ru.pak",
+      "bytes": 1200996,
+      "sha256": "52a31a7ca057b8c76208620932120927a089502ddfb66c30de4324959f9e0075"
+    },
+    {
+      "path": "locales/sk.pak",
+      "bytes": 755475,
+      "sha256": "a53551e8d251fa01305afe1d0d187144c56bfdffd5d1aa9f96a9350b96c0a252"
+    },
+    {
+      "path": "locales/sl.pak",
+      "bytes": 722720,
+      "sha256": "e1371c8df577b979e3a515af34b0aaa3d07153c7a5c55d39a9b49a7ffe62d3d2"
+    },
+    {
+      "path": "locales/sr.pak",
+      "bytes": 1112919,
+      "sha256": "be4ce17afac24dffc1eb36609cb51e766e77097d6656b1008a2a825e59609cc1"
+    },
+    {
+      "path": "locales/sv.pak",
+      "bytes": 646537,
+      "sha256": "8bdff8855d23c739ece357f653c0a17bb36fe97577a5761912080d057ed341a5"
+    },
+    {
+      "path": "locales/sw.pak",
+      "bytes": 685130,
+      "sha256": "312b225a81cc3cc15f13f80c45dd0e0bb3655d31873d2956861207e70c33c1dc"
+    },
+    {
+      "path": "locales/ta.pak",
+      "bytes": 1758067,
+      "sha256": "91fb1460711df108d8d435a378c8be1d1e80b0886c0158d8c6ae92f35812681b"
+    },
+    {
+      "path": "locales/te.pak",
+      "bytes": 1629379,
+      "sha256": "fc8c2706c5dfd36e7af8e380a240e0f697cc5fe969b512092a2185896512c4af"
+    },
+    {
+      "path": "locales/th.pak",
+      "bytes": 1368830,
+      "sha256": "6552b5d1f190e3340b19e6f25858afff1d0afc5c28bb1650093d1198db862954"
+    },
+    {
+      "path": "locales/tr.pak",
+      "bytes": 697381,
+      "sha256": "0045a91695ecf866895a0b2624081e00c365416a989e8a3c2d0c8f4478cbc4b8"
+    },
+    {
+      "path": "locales/uk.pak",
+      "bytes": 1211530,
+      "sha256": "4bcf16ea2f89250a83a580b65aa12b25f7f528d33a75a2d3b94140bb732a7e9e"
+    },
+    {
+      "path": "locales/ur.pak",
+      "bytes": 1047994,
+      "sha256": "c218e21744df2ff0669a87d497d65d76333073577360d4c662c592de146bf82a"
+    },
+    {
+      "path": "locales/vi.pak",
+      "bytes": 830041,
+      "sha256": "6e3c4c5338f14644961b2277f880474c6d21f5338e592f156ae7fadfba560209"
+    },
+    {
+      "path": "locales/zh-CN.pak",
+      "bytes": 592111,
+      "sha256": "96bfac1181a719dfdf381174e8cca6365f140d356ab9330cb549a9b36ff964db"
+    },
+    {
+      "path": "locales/zh-TW.pak",
+      "bytes": 583881,
+      "sha256": "5a4aedbb70d21be261a5732660654c4b49d9477ebc698154089150eb708dbe2a"
+    },
+    {
+      "path": "resources.pak",
+      "bytes": 12435136,
+      "sha256": "c981108783cb7f15dcb4a8e94536d27791df70040344750684615c5beb954098"
+    },
+    {
+      "path": "resources/default_app.asar",
+      "bytes": 111073,
+      "sha256": "06d4a28be095a80eff94dbd18edcfac5b5805e1b5538e0fb7cee7c7ae81db76a"
+    },
+    {
+      "path": "snapshot_blob.bin",
+      "bytes": 368776,
+      "sha256": "3b44e8f5e909ca00da26c051791dcd5f57fd7ae36ec58ccf3ea9242f4f6ca98f"
+    },
+    {
+      "path": "v8_context_snapshot.bin",
+      "bytes": 742208,
+      "sha256": "5a4d92091bb4e7979b43802ddd70f7b775a6edc8d93a78de33fa47a17ddbfc8f"
+    },
+    {
+      "path": "version",
+      "bytes": 6,
+      "sha256": "fa825b8c682299935776ae3334f8159d72c6a9d290bbe5fc673a2749b356b266"
+    },
+    {
+      "path": "vk_swiftshader.dll",
+      "bytes": 5520384,
+      "sha256": "a3239fabefee509d40221a55d0bb1711746f59c9b620ffdb34335b450592acbb"
+    },
+    {
+      "path": "vk_swiftshader_icd.json",
+      "bytes": 106,
+      "sha256": "32d83ff113fef532a9f97e0d2831f8656628ab1c99e9060f0332b1532839afd9"
+    },
+    {
+      "path": "vulkan-1.dll",
+      "bytes": 939008,
+      "sha256": "f3b192d1df5dc8d046c84d6e15bc575c9f6605fe0497b126d8b6664a9a75032f"
+    }
+  ]
+}

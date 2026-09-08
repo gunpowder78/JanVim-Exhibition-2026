@@ -318,6 +318,14 @@ interface InvocationRecord {
   observedWatchdogAttempts: WatchdogAttemptRecord[];
 }
 
+interface BoundedProcessTimeoutRecord {
+  reason: string;
+  timeoutMilliseconds: number;
+  timeoutElapsedMilliseconds: number;
+  processId: number;
+  exitedBeforeDispose: boolean;
+}
+
 interface LauncherFixture {
   root: string;
   script: string;
@@ -328,6 +336,7 @@ interface LauncherFixture {
   sequenceLog: string;
   closeLog: string;
   closeLifecycleLog: string;
+  boundedProcessLog: string;
   leaseMutationLog: string;
   inputMutationLog: string;
   launchMutationLog: string;
@@ -1354,6 +1363,76 @@ function patchCopiedContentLockIdentity(script: string, contentLock: string): vo
   writeText(script, changed);
 }
 
+function observeCopiedBoundedProcess(fixture: LauncherFixture): void {
+  if (
+    fixture.script === productionScript ||
+    fixture.script !== join(fixture.root, "scripts", "start-show.ps1")
+  ) {
+    throw new Error("refusing to instrument a non-fixture launcher");
+  }
+  const source = readFileSync(fixture.script, "utf8");
+  const startMarker = "function Invoke-BoundedProcess {";
+  const endMarker = "function Write-ControllerIncident {";
+  const start = source.indexOf(startMarker);
+  const end = source.indexOf(endMarker);
+  if (
+    start < 0 || end <= start ||
+    start !== source.lastIndexOf(startMarker) ||
+    end !== source.lastIndexOf(endMarker)
+  ) {
+    throw new Error("bounded-process observation function markers are ambiguous");
+  }
+  let body = source.slice(start, end);
+  const newline = body.includes("\r\n") ? "\r\n" : "\n";
+  const replaceUnique = (anchor: string, replacement: string): void => {
+    const offset = body.indexOf(anchor);
+    if (offset < 0 || offset !== body.lastIndexOf(anchor)) {
+      throw new Error(`bounded-process observation anchor is ambiguous: ${anchor}`);
+    }
+    body = body.slice(0, offset) + replacement + body.slice(offset + anchor.length);
+  };
+  const sinkAnchor =
+    "    $stderrSink = [JanVimExhibitionBoundedOutputV1]::new($MaximumOutputBytes)";
+  replaceUnique(sinkAnchor, [
+    sinkAnchor,
+    "    $miniPcTestTimeoutObservation = $null",
+  ].join(newline));
+  const timeoutAnchor = "                $processFailure = 'timeout'";
+  // Observe the real timeout branch and its own clock; do not replace execution.
+  replaceUnique(timeoutAnchor, [
+    timeoutAnchor,
+    "                $miniPcTestTimeoutObservation = [ordered]@{",
+    "                    reason = $Reason",
+    "                    timeoutMilliseconds = $TimeoutMilliseconds",
+    "                    timeoutElapsedMilliseconds = $processClock.ElapsedMilliseconds",
+    "                    processId = $process.Id",
+    "                    exitedBeforeDispose = $false",
+    "                }",
+  ].join(newline));
+  const disposeAnchor = "        $process.Dispose()";
+  replaceUnique(disposeAnchor, [
+    "        if ($null -ne $miniPcTestTimeoutObservation) {",
+    "            $miniPcTestTimeoutObservation.exitedBeforeDispose = $process.HasExited",
+    "        }",
+    disposeAnchor,
+    "        if ($null -ne $miniPcTestTimeoutObservation) {",
+    "            $observationPath = $env:SHOW_TEST_BOUNDED_PROCESS_LOG",
+    "            if ([string]::IsNullOrWhiteSpace($observationPath)) {",
+    "                throw 'bounded-process-observation-path-missing'",
+    "            }",
+    "            $observationLine = ($miniPcTestTimeoutObservation | ConvertTo-Json -Compress) + [Environment]::NewLine",
+    "            $existingBytes = if ([IO.File]::Exists($observationPath)) {",
+    "                [IO.FileInfo]::new($observationPath).Length",
+    "            } else { 0 }",
+    "            if ($existingBytes + [Text.Encoding]::UTF8.GetByteCount($observationLine) -gt 4096) {",
+    "                throw 'bounded-process-observation-limit-exceeded'",
+    "            }",
+    "            [IO.File]::AppendAllText($observationPath, $observationLine, [Text.UTF8Encoding]::new($false))",
+    "        }",
+  ].join(newline));
+  writeText(fixture.script, source.slice(0, start) + body + source.slice(end));
+}
+
 function makeLauncherFixture(): LauncherFixture {
   if (!existsSync(productionScript)) {
     throw new Error(`production launcher missing: ${productionScript}`);
@@ -1367,6 +1446,7 @@ function makeLauncherFixture(): LauncherFixture {
   const sequenceLog = join(root, "sequence.log");
   const closeLog = join(root, "close-invocations.ndjson");
   const closeLifecycleLog = join(root, "close-lifecycle.ndjson");
+  const boundedProcessLog = join(root, "bounded-process-timeouts.ndjson");
   const leaseMutationLog = join(root, "lease-mutation.log");
   const inputMutationLog = join(root, "input-mutation.log");
   const launchMutationLog = join(root, "launch-mutation.log");
@@ -1585,6 +1665,7 @@ function makeLauncherFixture(): LauncherFixture {
     sequenceLog,
     closeLog,
     closeLifecycleLog,
+    boundedProcessLog,
     leaseMutationLog,
     inputMutationLog,
     launchMutationLog,
@@ -1791,6 +1872,7 @@ function runLauncher(
         SHOW_TEST_SEQUENCE_LOG: fixture.sequenceLog,
         SHOW_TEST_CLOSE_LOG: fixture.closeLog,
         SHOW_TEST_CLOSE_LIFECYCLE_LOG: fixture.closeLifecycleLog,
+        SHOW_TEST_BOUNDED_PROCESS_LOG: fixture.boundedProcessLog,
         SHOW_TEST_WATCHDOG_ATTEMPTS: fixture.watchdogAttempts,
         SHOW_TEST_LEASE_PATH: fixture.leasePath,
         SHOW_TEST_LEASE_MUTATION_LOG: fixture.leaseMutationLog,
@@ -1840,6 +1922,19 @@ function closeLifecycleRecords(
     .split(/\r?\n/u)
     .filter(Boolean)
     .map((line) => JSON.parse(line) as { event: string; atMs: number });
+}
+
+function boundedProcessTimeoutRecords(
+  fixture: LauncherFixture,
+): BoundedProcessTimeoutRecord[] {
+  if (!existsSync(fixture.boundedProcessLog)) return [];
+  if (statSync(fixture.boundedProcessLog).size > 4_096) {
+    throw new Error("bounded-process observation log exceeds its limit");
+  }
+  return readFileSync(fixture.boundedProcessLog, "utf8")
+    .split(/\r?\n/u)
+    .filter(Boolean)
+    .map((line) => JSON.parse(line) as BoundedProcessTimeoutRecord);
 }
 
 function flag(arguments_: readonly string[], name: string): string {
@@ -3474,7 +3569,7 @@ describe("offline show launcher and external watchdog", () => {
     }
   }, 20_000);
 
-  it("rejects unknown parameters, an existing terminal marker, and frozen content mutations", () => {
+  it("rejects unknown parameters before controller launch", () => {
     const unknown = makeLauncherFixture();
     try {
       const result = runLauncher(unknown, [
@@ -3482,16 +3577,29 @@ describe("offline show launcher and external watchdog", () => {
         "-UnexpectedParameter",
         "value",
       ]);
-      expect(result.status).not.toBe(0);
+      expect(result.error).toBeUndefined();
+      expect(result.status).toBeGreaterThan(0);
       expect(invocations(unknown)).toHaveLength(0);
     } finally {
       unknown.cleanup();
     }
+  }, 15_000);
 
-    for (const mutate of [
+  it.each([
+    [
+      "an existing terminal marker",
       (fixture: LauncherFixture) => writeText(fixture.terminalMarker, "{}\n"),
+    ],
+    [
+      "a mutated source poem",
       (fixture: LauncherFixture) => writeText(fixture.poem, "mutated poem\n"),
+    ],
+    [
+      "a mutated frozen show configuration",
       (fixture: LauncherFixture) => writeText(fixture.showConfig, "layout_engine='dynamic'\n"),
+    ],
+    [
+      "a string artifact-lock schema",
       (fixture: LauncherFixture) => {
         const lock = JSON.parse(readFileSync(fixture.artifactLock, "utf8")) as {
           schema: number | string;
@@ -3499,16 +3607,28 @@ describe("offline show launcher and external watchdog", () => {
         lock.schema = "1";
         writeText(fixture.artifactLock, `${JSON.stringify(lock, null, 2)}\n`);
       },
+    ],
+    [
+      "a string display-map schema",
       (fixture: LauncherFixture) =>
         writeText(fixture.externalMap, '{"schema":"1","mappingStatus":"confirmed"}\n'),
+    ],
+    [
+      "an unconfirmed display map",
       (fixture: LauncherFixture) =>
         writeText(fixture.externalMap, '{"schema":1,"mappingStatus":"unconfirmed"}\n'),
+    ],
+    [
+      "a mismatched display geometry hash",
       (fixture: LauncherFixture) => {
         const map = confirmedDisplayMap();
         map.secondary.geometrySha256 = "0".repeat(64);
         writeText(fixture.externalMap, `${JSON.stringify(map, null, 2)}\n`);
       },
-    ]) {
+    ],
+  ] as const)(
+    "rejects %s before controller launch",
+    (_label, mutate) => {
       const fixture = makeLauncherFixture();
       try {
         mutate(fixture);
@@ -3516,13 +3636,15 @@ describe("offline show launcher and external watchdog", () => {
           fixture,
           launcherArguments(fixture, "ValidateOnly"),
         );
-        expect(result.status).not.toBe(0);
+        expect(result.error).toBeUndefined();
+        expect(result.status).toBeGreaterThan(0);
         expect(invocations(fixture)).toHaveLength(0);
       } finally {
         fixture.cleanup();
       }
-    }
-  }, 15_000);
+    },
+    15_000,
+  );
 
   it("rejects a pre-existing watchdog journal before controller launch without replacing it", () => {
     const fixture = makeLauncherFixture();
@@ -3639,17 +3761,31 @@ describe("offline show launcher and external watchdog", () => {
 
   it("terminates a hung network snapshot before any show process starts", () => {
     const fixture = makeLauncherFixture();
-    const startedAt = Date.now();
     try {
+      observeCopiedBoundedProcess(fixture);
       const result = runLauncher(
         fixture,
         launcherArguments(fixture, "ValidateOnly"),
         { routeBehavior: "hang", timeoutMs: 8_000 },
       );
       expect(result.error).toBeUndefined();
-      expect(result.status).not.toBe(0);
-      expect(Date.now() - startedAt).toBeLessThan(7_000);
+      expect(result.status).toBeGreaterThan(0);
+      expect(output(result)).toContain("network-snapshot-failed");
       expect(invocations(fixture)).toHaveLength(0);
+      expect(existsSync(fixture.leasePath)).toBe(false);
+      expect(existsSync(fixture.terminalMarker)).toBe(false);
+      expect(existsSync(fixture.watchdogAttempts)).toBe(false);
+
+      const timeouts = boundedProcessTimeoutRecords(fixture);
+      expect(timeouts, output(result)).toHaveLength(1);
+      expect(timeouts[0]).toMatchObject({
+        reason: "network-snapshot-failed",
+        timeoutMilliseconds: 5_000,
+        exitedBeforeDispose: true,
+      });
+      expect(timeouts[0]!.processId).toBeGreaterThan(0);
+      expect(timeouts[0]!.timeoutElapsedMilliseconds).toBeGreaterThanOrEqual(5_000);
+      expect(timeouts[0]!.timeoutElapsedMilliseconds).toBeLessThan(7_000);
     } finally {
       fixture.cleanup();
     }
@@ -4398,6 +4534,7 @@ describe("offline show launcher and external watchdog", () => {
     const fixture = makeLauncherFixture();
     const janvim = await startFakeJanVim(fixture);
     try {
+      observeCopiedBoundedProcess(fixture);
       const result = runLauncher(
         fixture,
         launcherArguments(fixture, "Show"),
@@ -4416,8 +4553,6 @@ describe("offline show launcher and external watchdog", () => {
       expect(result.status, output(result)).toBe(70);
       expect(invocations(fixture)).toHaveLength(1);
       expect(lifecycle.map((record) => record.event)).toEqual(["started"]);
-      expect(Date.now() - lifecycle[0]!.atMs).toBeGreaterThanOrEqual(1_800);
-      expect(Date.now() - lifecycle[0]!.atMs).toBeLessThan(3_000);
       expect(existsSync(fixture.leasePath)).toBe(true);
       expect(await waitForExit(janvim.child, 100)).toBe(false);
       expect(existsSync(fixture.watchdogAttempts)).toBe(false);
@@ -4425,6 +4560,18 @@ describe("offline show launcher and external watchdog", () => {
         readFileSync(fixture.incidentPath, "utf8"),
       ) as { reason: string };
       expect(incident.reason).toBe("run-lease-unprovable");
+
+      const timeouts = boundedProcessTimeoutRecords(fixture);
+      expect(timeouts, output(result)).toHaveLength(1);
+      expect(timeouts[0]).toMatchObject({
+        reason: "window-close-helper-failed",
+        timeoutMilliseconds: 2_000,
+        exitedBeforeDispose: true,
+      });
+      expect(timeouts[0]!.processId).toBeGreaterThan(0);
+      expect(timeouts[0]!.processId).not.toBe(janvim.pid);
+      expect(timeouts[0]!.timeoutElapsedMilliseconds).toBeGreaterThanOrEqual(2_000);
+      expect(timeouts[0]!.timeoutElapsedMilliseconds).toBeLessThan(3_000);
     } finally {
       janvim.child.kill();
       await waitForExit(janvim.child, 2_000);

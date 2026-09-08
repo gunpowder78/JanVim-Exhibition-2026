@@ -170,7 +170,7 @@ options = ServerOptions.new
     .maxNodes_(1024)
     .sampleRate_(48000)
     .loadDefs_(false)
-    .device_("Windows WASAPI : Headphones (Senary Audio)")
+    .device_("Windows WASAPI : Speakers (Realtek High Definition Audio)")
     .verbosity_(-1)
     .zeroConf_(false);
 server = Server(\janvimSoundService, NetAddr("127.0.0.1", serverPort), options);

@@ -123,6 +123,35 @@ function Assert-Identity {
     }
 }
 
+function Assert-RuntimeStateClean {
+    param([Parameter(Mandatory = $true)][string] $SourceRoot)
+
+    foreach ($profile in @('safe-mode', 'plugin-lab')) {
+        foreach ($kind in @('cache', 'state')) {
+            $directory = $SourceRoot
+            $present = $true
+            foreach ($segment in @('runtime', 'user-root', $profile, $kind)) {
+                $directory = Join-Path $directory $segment
+                if (-not (Test-Path -LiteralPath $directory)) { $present = $false; break }
+                [void](Assert-PlainItem -Path $directory -Kind Container -Reason 'runtime-state')
+            }
+            if (-not $present) { continue }
+            $pending = [Collections.Generic.Stack[string]]::new()
+            $pending.Push($directory)
+            $entries = 0
+            while ($pending.Count -gt 0) {
+                foreach ($item in Get-ChildItem -LiteralPath $pending.Pop() -Force) {
+                    $entries++
+                    if ($entries -gt 2048) { throw 'runtime-state-tree-count-exceeded' }
+                    if (-not $item.PSIsContainer) { throw 'package-runtime-state-not-clean' }
+                    [void](Assert-PlainItem -Path $item.FullName -Kind Container -Reason 'runtime-state')
+                    $pending.Push($item.FullName)
+                }
+            }
+        }
+    }
+}
+
 $source = Resolve-BuilderPath -Path $SourceRoot -Reason 'source-root'
 $candidate = Resolve-BuilderPath -Path $JianShanCandidateRoot -Reason 'jianshan-candidate'
 $node = Resolve-BuilderPath -Path $NodeExecutable -Reason 'node'
@@ -130,6 +159,7 @@ $output = Resolve-BuilderPath -Path $OutputParent -Reason 'output-parent'
 [void](Assert-PlainItem -Path $source -Kind Container -Reason 'source-root')
 [void](Assert-PlainItem -Path $candidate -Kind Container -Reason 'jianshan-candidate')
 [void](Assert-PlainItem -Path $output -Kind Container -Reason 'output-parent')
+Assert-RuntimeStateClean -SourceRoot $source
 $script:AllowedWorkspaceLinks.Add(
     (Join-Path $source 'node_modules\@janvim-exhibition\controller'),
     (Join-Path $source 'apps\controller')
@@ -159,6 +189,9 @@ Assert-Identity `
     -Path $nodeLicense -Bytes 148217 `
     -Sha256 '8cc9bb466b19fc7e7cc99d03e9df1132021fda8b01eea2624c58bb372dbef576' `
     -Reason 'node-license'
+
+Import-Module (Join-Path $source 'deployment\operator\lib\Exhibition.Deployment.psm1') -Force
+$electronRuntime = Assert-DeploymentElectronRuntime -AppRoot $source
 
 $candidateIdentities = @(
     @('jianshan-rust\jianshan.exe', 9799168, 'ac160b7eb4e34c52906b151aed441ea683ad093d89e59459b5ecb12c3055770f'),
@@ -209,6 +242,7 @@ Copy-Item -LiteralPath $nodeLicense -Destination (Join-Path $packageRoot 'tools\
 Copy-PlainTree -Source (Join-Path $source 'deployment\operator') -Destination (Join-Path $packageRoot 'operator')
 Copy-PlainTree -Source (Join-Path $source 'deployment\config') -Destination (Join-Path $packageRoot 'config')
 Copy-PlainTree -Source (Join-Path $source 'deployment\docs') -Destination (Join-Path $packageRoot 'docs')
+[void](Assert-DeploymentElectronRuntime -AppRoot $appRoot)
 [void](New-Item -ItemType Directory -Path (Join-Path $packageRoot 'evidence'))
 
 $electronPath = Join-Path $source 'apps\controller\dist\main\electron-main.js'
@@ -221,6 +255,7 @@ $sourceEvidence = [ordered]@{
     sourceCommit = $sourceCommit
     fixedInstallRoot = $fixedInstallRoot
     electronMain = [ordered]@{ bytes = $electronItem.Length; sha256 = $electronHash }
+    electronRuntime = $electronRuntime
     jianshan = [ordered]@{ bytes = 9799168; sha256 = $candidateIdentities[0][2] }
     node = [ordered]@{ version = 'v22.23.0'; bytes = 86988616; sha256 = $expectedNodeHash }
 }
@@ -251,6 +286,7 @@ $receipt = [ordered]@{
     manifest = [ordered]@{ bytes = $manifest.manifestBytes; sha256 = $manifest.manifestSha256 }
     archive = [ordered]@{ bytes = $archiveItem.Length; sha256 = $archiveHash }
     electronMain = [ordered]@{ bytes = $electronItem.Length; sha256 = $electronHash }
+    electronRuntime = $electronRuntime
     janvimArtifact = [ordered]@{
         tag = $artifactLock.tag
         commit = $artifactLock.commit

@@ -1,0 +1,71 @@
+{
+  "schema": 2,
+  "mappingStatus": "confirmed",
+  "mode": "production-3",
+  "layoutSha256": "469002e89b3ed6b0357b082520efd01f2f4626a480c996faa61fb61bef97ef9b",
+  "capturedAtUtc": "2026-09-08T09:36:40.347Z",
+  "topologySha256": "9e8996f1ca76a9803626fc53a4f3d10360814e9a9dea554bae85382b92adbc00",
+  "bindings": [
+    {
+      "softId": "SCREEN-1",
+      "displayId": "3307128360",
+      "label": "hdmi",
+      "bounds": {
+        "x": 0,
+        "y": 0,
+        "width": 1920,
+        "height": 1080
+      },
+      "workingArea": {
+        "x": 0,
+        "y": 0,
+        "width": 1920,
+        "height": 1032
+      },
+      "scaleFactor": 1,
+      "rotation": 0,
+      "geometrySha256": "3ba352c8ab349a349982cc50d829758cbdefc8b2386075d9bb921ea357fe12cc"
+    },
+    {
+      "softId": "SCREEN-2",
+      "displayId": "1837957737",
+      "label": "hdmi",
+      "bounds": {
+        "x": 1920,
+        "y": 0,
+        "width": 1920,
+        "height": 1080
+      },
+      "workingArea": {
+        "x": 1920,
+        "y": 0,
+        "width": 1920,
+        "height": 1032
+      },
+      "scaleFactor": 1,
+      "rotation": 0,
+      "geometrySha256": "52b162a61fb35ac8e0fb6267ca4c74aeb664721e55048242f7448bb6a11966af"
+    },
+    {
+      "softId": "SCREEN-3",
+      "displayId": "2334534373",
+      "label": "hdmi",
+      "bounds": {
+        "x": -1920,
+        "y": 0,
+        "width": 1920,
+        "height": 1080
+      },
+      "workingArea": {
+        "x": -1920,
+        "y": 0,
+        "width": 1920,
+        "height": 1032
+      },
+      "scaleFactor": 1,
+      "rotation": 0,
+      "geometrySha256": "edbfed0e55c4347bf501f9ca94c14704d19a4f16d906305c865dafef5f6a0a4b"
+    }
+  ],
+  "unassignedDisplays": []
+}

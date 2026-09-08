@@ -1,0 +1,138 @@
+{
+  "schema": 1,
+  "status": "exhibition-hall-configuration-frozen",
+  "recordedAt": "2026-09-08T18:11:26.4778077+08:00",
+  "baselineName": "exhibition-hall-2026-09-08",
+  "baselineRoot": "D:\\VirtualData\\JanVim-Exhibition-Rehearsals\\golden-baselines\\exhibition-hall-2026-09-08",
+  "localBackupRoot": "C:\\Users\\hxj\\Documents\\JanVim-Exhibition-Baselines\\exhibition-hall-2026-09-08",
+  "backupScope": "Two local paths on this Mini PC; no off-machine backup claimed.",
+  "installedRoot": "D:\\github\\JanVim-Exhibition-Deploy",
+  "activeSiteConfigRoot": "D:\\VirtualData\\JanVim-Exhibition-Rehearsals\\site-config",
+  "runtime": {
+    "tag": "exhibition-mini-pc-golden-2026-09-08",
+    "janvimExhibitionCommit": "4b19a77691e7b52de6668f9c0f85e4f09c25a21c",
+    "jianshanCommit": "6d1a4577a9484092fde94308352c80ee710ed18f",
+    "archive": {
+      "bytes": 331532559,
+      "sha256": "f2da64042855e8a596d3da26ffd9f509794866ab3b33ff3b26d7a0f1de86877f"
+    },
+    "manifest": {
+      "bytes": 1466006,
+      "sha256": "1a492a13c4b674234503a225eb8bad63e4f9f205a2d585179bfc5100d3678472"
+    },
+    "sourceIdentities": {
+      "schema": 1,
+      "sourceCommit": "4b19a77691e7b52de6668f9c0f85e4f09c25a21c",
+      "fixedInstallRoot": "D:\\github\\JanVim-Exhibition-Deploy",
+      "electronMain": {
+        "bytes": 549304,
+        "sha256": "77408bde85dc374ba21d011cecb088278197ae6c7785f205a58bc7130bdc8826"
+      },
+      "electronRuntime": {
+        "version": "44.0.0",
+        "files": 73
+      },
+      "jianshan": {
+        "bytes": 9799168,
+        "sha256": "ac160b7eb4e34c52906b151aed441ea683ad093d89e59459b5ecb12c3055770f"
+      },
+      "node": {
+        "version": "v22.23.0",
+        "bytes": 86988616,
+        "sha256": "17347995af08dadcc73a1a154f0942559fbc3f37b9ba57d4576b4d2bcb2834a2"
+      }
+    }
+  },
+  "configuration": {
+    "displayMap": {
+      "bytes": 1703,
+      "sha256": "2ba4526770f4f1498116d81be846950e26701183700d5b252dbcffc5000fe675"
+    },
+    "soundMix": {
+      "bytes": 51,
+      "sha256": "0f9804ba04950d7711dd2d2351bdc1952b0baa9ba1f0c48445e62270b149258e"
+    },
+    "displayRoles": [
+      {
+        "role": "SCREEN-1",
+        "surface": "JanVim",
+        "configuratorNumber": 2,
+        "displayId": "3307128360",
+        "x": 0,
+        "y": 0
+      },
+      {
+        "role": "SCREEN-2",
+        "surface": "Web narrative",
+        "configuratorNumber": 3,
+        "displayId": "1837957737",
+        "x": 1920,
+        "y": 0
+      },
+      {
+        "role": "SCREEN-3",
+        "surface": "JianShan",
+        "configuratorNumber": 1,
+        "displayId": "2334534373",
+        "x": -1920,
+        "y": 0
+      }
+    ],
+    "resolution": [
+      1920,
+      1080
+    ],
+    "windowsScalePercent": 100,
+    "windGainDb": 6,
+    "instrumentGainDb": -10,
+    "audioEndpoint": "Windows WASAPI : Speakers (Realtek High Definition Audio)",
+    "audioSampleRate": 48000,
+    "audioChannels": 2,
+    "windowsMasterVolume": "Not measured by this snapshot; leave current host setting unchanged.",
+    "jianshanFullscreen": "Accepted borderless fullscreen on SCREEN-3; no F key needed.",
+    "camera": "USB camera connected during accepted rehearsal; optional-camera behavior is pending."
+  },
+  "acceptance": {
+    "userStatement": "当前配置状态已经联调检验效果良好，请固定下来。",
+    "humanHallProjectionAndAudioAccepted": true,
+    "runId": "joint-show-20260908T093940214Z-ea3d80844fcc",
+    "soundDurationSeconds": 1483.3477830000002,
+    "completedLoops": 16,
+    "retainedDetailedLoops": 3,
+    "cumulativeVisibleDriftMs": 171.50699999967765,
+    "retries": 0,
+    "boundedFixtureSkips": 3,
+    "recoveries": 0,
+    "controllerOutcome": "intentional-success",
+    "shutdown": {
+      "requestedBy": "operator-stop",
+      "agentShutdown": "acknowledged",
+      "hwndClose": "posted",
+      "janvimExit": "natural",
+      "bridgeClose": "closed",
+      "leaseRemoved": true
+    },
+    "soundClean": true,
+    "originalMachineAcceptanceScope": "monitor-simulation",
+    "originalMachinePhysicalProjectorsTested": false,
+    "originalMachineAcceptanceOutcome": "diagnostic",
+    "scopeNote": "Human hall acceptance supplements the unmodified machine report, whose scope remains monitor-simulation/diagnostic. This is not full unattended acceptance.",
+    "offlineVerified": false,
+    "forcedRestartRecoveryVerified": false,
+    "realRebootAutostartVerified": false,
+    "runActiveAtFreeze": false
+  },
+  "pending": [
+    "Cold-start/deployment-child-timeout and real reboot/logon autostart acceptance",
+    "Camera may be absent: approved requirement, not implemented in deployed package",
+    "Offline run and forced-restart recovery rehearsal"
+  ],
+  "preservation": {
+    "oldGoldenPackageUnchanged": true,
+    "installedPackageUnchanged": true,
+    "oldCheckoutsPreserved": true,
+    "pendingSourceEditsExcluded": true,
+    "mergePerformed": false
+  },
+  "pullRequest": "https://github.com/gunpowder78/JanVim-Exhibition-2026/pull/2"
+}

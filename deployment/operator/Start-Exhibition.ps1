@@ -69,7 +69,7 @@ function Invoke-DeploymentProcessCaptured {
 function Start-DeploymentChild {
     param(
         [Parameter(Mandatory = $true)][string] $FilePath,
-        [Parameter(Mandatory = $true)][string[]] $Arguments,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]] $Arguments,
         [Parameter(Mandatory = $true)][string] $WorkingDirectory,
         [hashtable] $Environment = @{}
     )
@@ -87,6 +87,67 @@ function Start-DeploymentChild {
         throw 'deployment-child-start-failed'
     }
     return $process
+}
+
+function Stop-DeploymentStartedChild {
+    param(
+        [Parameter(Mandatory = $true)][Diagnostics.Process] $Process,
+        [ValidateRange(1, 5000)][int] $TimeoutMs = 3000
+    )
+    # Only the original object returned by Start-DeploymentChild is accepted here.
+    # Never reconstruct an unidentified process from a PID.
+    try {
+        $pinnedHandle = $Process.SafeHandle
+        if ($pinnedHandle.IsInvalid -or $pinnedHandle.IsClosed) { return $false }
+        if ($Process.HasExited) { return $true }
+        try { [void]$Process.CloseMainWindow() } catch {}
+        if ($Process.WaitForExit($TimeoutMs)) { return $true }
+        $Process.Kill()
+        return $Process.WaitForExit(2000)
+    }
+    catch {
+        try { return $Process.HasExited } catch { return $false }
+    }
+}
+
+function Get-DeploymentControllerIdentity {
+    param(
+        [Parameter(Mandatory = $true)] $LeaseController,
+        [Parameter(Mandatory = $true)][string] $ExpectedExecutable
+    )
+    $names = @($LeaseController.PSObject.Properties.Name)
+    if ($names.Count -ne 2 -or 'pid' -cnotin $names -or 'startedAtUtc' -cnotin $names) {
+        throw 'show-controller-identity-invalid'
+    }
+    if (
+        ($LeaseController.pid -isnot [int] -and $LeaseController.pid -isnot [long]) -or
+        $LeaseController.pid -lt 1 -or $LeaseController.pid -gt [int]::MaxValue -or
+        $LeaseController.startedAtUtc -isnot [string] -or
+        $LeaseController.startedAtUtc -cnotmatch '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$'
+    ) { throw 'show-controller-identity-invalid' }
+
+    $candidate = $null
+    try {
+        $leaseStart = [DateTimeOffset]::ParseExact(
+            $LeaseController.startedAtUtc, "yyyy-MM-dd'T'HH:mm:ss.fff'Z'",
+            [Globalization.CultureInfo]::InvariantCulture,
+            ([Globalization.DateTimeStyles]::AssumeUniversal -bor [Globalization.DateTimeStyles]::AdjustToUniversal)
+        )
+        $candidate = [Diagnostics.Process]::GetProcessById([int]$LeaseController.pid)
+        $actual = Get-DeploymentProcessIdentity -Process $candidate -ExpectedExecutable $ExpectedExecutable
+        $actualStart = [DateTimeOffset]::ParseExact(
+            $actual.startedAtUtc, 'o', [Globalization.CultureInfo]::InvariantCulture,
+            [Globalization.DateTimeStyles]::RoundtripKind
+        )
+        # Electron's controllerStartedAtUtc floors creation time to milliseconds.
+        # Verify that contract, then retain the OS identity at its full precision.
+        if ($actualStart.ToUnixTimeMilliseconds() -ne $leaseStart.ToUnixTimeMilliseconds()) {
+            throw 'show-controller-identity-invalid'
+        }
+        return $actual
+    }
+    catch { throw 'show-controller-identity-invalid' }
+    finally { if ($null -ne $candidate) { $candidate.Dispose() } }
 }
 
 function Wait-DeploymentFile {
@@ -181,26 +242,60 @@ $pointerWritten = $false
 try {
     if (Test-Path -LiteralPath $pointerPath) { throw 'active-deployment-already-exists' }
 
-    # Deployment stage: verify
-    $verification = Invoke-DeploymentProcessCaptured `
-        -FilePath $powerShell `
-        -Arguments @('-NoLogo', '-NoProfile', '-NonInteractive', '-File', $verify) `
-        -TimeoutMs 60000
-    if ($verification.ExitCode -ne 0 -or $verification.Stdout -cnotmatch 'DEPLOYMENT_VERIFY_PASS') {
-        throw 'deployment-verification-failed'
-    }
-
-    $display = Read-ProductionDisplayMap -Path $displayMapPath
-    $plan = New-ExhibitionLaunchPlan `
-        -PackageRoot $packageRoot `
-        -DisplayMapPath $displayMapPath `
-        -DurationSeconds ([int]$defaults.durationSeconds)
-
+    # Allocate evidence before preflight: login failures must survive a closing console.
     $runId = 'deployment-{0}-{1}' -f `
         [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ'), `
         [Guid]::NewGuid().ToString('N').Substring(0, 12)
     $runRoot = Join-Path $defaults.rehearsalParent $runId
     [void](New-Item -ItemType Directory -Path $runRoot)
+    [IO.File]::WriteAllText((Join-Path $runRoot 'startup.json'), ([ordered]@{
+        atUtc = [DateTime]::UtcNow.ToString('o')
+        status = 'verifying'
+        verificationTimeoutMs = 240000
+    } | ConvertTo-Json -Compress))
+    Write-Host "正在校验展演部署；进度记录：$runRoot"
+
+    # Deployment stage: verify
+    # A cold manifest read has its own 120 s deadline. The complete verifier also
+    # includes 30 s artifact, 20 s audio, 5 s version and 2 s Node probes, plus
+    # hashing/PnP/display work. Its parent deadline must encompass those stages.
+    $verification = Invoke-DeploymentProcessCaptured `
+        -FilePath $powerShell `
+        -Arguments @('-NoLogo', '-NoProfile', '-NonInteractive', '-File', $verify,
+            '-DeferDisplayMapping',
+            '-ProgressPath', (Join-Path $runRoot 'verification-progress.jsonl')) `
+        -TimeoutMs 240000
+    foreach ($stream in @('Stdout', 'Stderr')) {
+        $content = [string]$verification.$stream
+        if ($content.Length -gt 32768) { $content = $content.Substring(0, 32768) }
+        [IO.File]::WriteAllText((Join-Path $runRoot "verification-$stream.txt"), $content)
+    }
+    if ($verification.ExitCode -ne 0 -or $verification.Stdout -cnotmatch 'DEPLOYMENT_VERIFY_PASS') {
+        throw 'deployment-verification-failed'
+    }
+
+    # Deployment stage: display-map
+    # Resolve only after immutable payload verification; never open the configuration UI.
+    $savedDisplayMapPath = $displayMapPath
+    $displayMapPath = Join-Path $runRoot 'display-map.json'
+    $resolution = Invoke-DeploymentProcessCaptured `
+        -FilePath (Join-Path $packageRoot 'app\node_modules\electron\dist\electron.exe') `
+        -Arguments @(
+            (Join-Path $packageRoot 'app\apps\controller'),
+            '--display-config-mode=resolve', "--rehearsal-root=$runRoot",
+            "--display-map=$displayMapPath", "--saved-display-map=$savedDisplayMapPath"
+        ) -TimeoutMs 20000
+    foreach ($stream in @('Stdout', 'Stderr')) {
+        $content = [string]$resolution.$stream
+        if ($content.Length -gt 32768) { $content = $content.Substring(0, 32768) }
+        [IO.File]::WriteAllText((Join-Path $runRoot "display-resolution-$stream.txt"), $content)
+    }
+    if ($resolution.ExitCode -ne 0) { throw 'deployment-display-resolution-failed' }
+    $display = Read-ProductionDisplayMap -Path $displayMapPath
+    $plan = New-ExhibitionLaunchPlan `
+        -PackageRoot $packageRoot `
+        -DisplayMapPath $displayMapPath `
+        -DurationSeconds ([int]$defaults.durationSeconds)
 
     # Deployment stage: prepare
     $prepare = Invoke-DeploymentProcessCaptured `
@@ -287,18 +382,9 @@ try {
     [void](Wait-DeploymentFile -Path $leasePath -TimeoutMs 45000 -MaximumBytes 4096 -Reason 'show-run-lease')
     $lease = Read-DeploymentJson -Path $leasePath -MaximumBytes 4096 -Reason 'show-run-lease'
     if ($lease.schema -ne 1 -or $null -eq $lease.controller) { throw 'show-run-lease-invalid' }
-    $controllerProcess = [Diagnostics.Process]::GetProcessById([int]$lease.controller.pid)
-    try {
-        $actualController = Get-DeploymentProcessIdentity -Process $controllerProcess
-    }
-    finally {
-        $controllerProcess.Dispose()
-    }
-    $controllerIdentity = [pscustomobject][ordered]@{
-        pid = [int]$lease.controller.pid
-        startedAtUtc = [string]$lease.controller.startedAtUtc
-        executable = $actualController.executable
-    }
+    $controllerIdentity = Get-DeploymentControllerIdentity `
+        -LeaseController $lease.controller `
+        -ExpectedExecutable (Join-Path $packageRoot 'app\node_modules\electron\dist\electron.exe')
     if (-not (Test-DeploymentProcessIdentity -Identity $controllerIdentity)) {
         throw 'show-controller-identity-invalid'
     }
@@ -343,7 +429,23 @@ try {
 }
 catch {
     $failure = $_.Exception.Message
+    if (-not [string]::IsNullOrWhiteSpace($runRoot) -and (Test-Path -LiteralPath $runRoot -PathType Container)) {
+        try {
+            $diagnostic = $failure.Substring(0, [Math]::Min(2048, $failure.Length))
+            [IO.File]::WriteAllText((Join-Path $runRoot 'startup-failure.txt'), $diagnostic)
+        } catch {}
+    }
     $cleanupFailed = $false
+    foreach ($entry in @(
+        @{ Process = $showProcess; Identity = $showIdentity },
+        @{ Process = $jianshanProcess; Identity = $jianshanIdentity }
+    )) {
+        if ($null -ne $entry.Process -and $null -eq $entry.Identity) {
+            if (-not (Stop-DeploymentStartedChild -Process $entry.Process)) {
+                $cleanupFailed = $true
+            }
+        }
+    }
     foreach ($identity in @($controllerIdentity, $showIdentity, $jianshanIdentity)) {
         if ($null -ne $identity) {
             try {
@@ -363,10 +465,22 @@ catch {
         }
         catch { $cleanupFailed = $true }
     }
+    elseif ($null -ne $soundProcess) {
+        if (-not (Stop-DeploymentStartedChild -Process $soundProcess)) {
+            $cleanupFailed = $true
+        }
+    }
     if ($pointerWritten -and -not $cleanupFailed) {
         try { Remove-ActiveDeploymentPointer -Path $pointerPath } catch { $cleanupFailed = $true }
     }
-    if ($cleanupFailed) { throw "${failure}:deployment-cleanup-incomplete" }
+    if ($cleanupFailed) {
+        if (-not [string]::IsNullOrWhiteSpace($runRoot)) {
+            try {
+                [IO.File]::AppendAllText((Join-Path $runRoot 'startup-failure.txt'), ':deployment-cleanup-incomplete')
+            } catch {}
+        }
+        throw "${failure}:deployment-cleanup-incomplete"
+    }
     throw $failure
 }
 finally {

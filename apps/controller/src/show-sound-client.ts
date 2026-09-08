@@ -40,6 +40,8 @@ export interface ShowSoundClientOptions {
 }
 
 const INT32_MAX = 2_147_483_647;
+const RECEIPT_TIMEOUT_MS = 5_000;
+const ATTACH_TIMEOUT_MS = 1_000;
 const ID = /^[A-Za-z0-9._-]{1,64}$/;
 const receiptSchema = z.object({
   active: z.literal(true), host: z.literal("127.0.0.1"),
@@ -331,14 +333,17 @@ export function createShowSoundClient(options: ShowSoundClientOptions): ShowSoun
       if (!ID.test(options.runId) || !/^[A-Za-z0-9._-]{1,96}$/.test(options.controllerRunId)) {
         disable("sound-identity-invalid"); return;
       }
-      deadline = timers.setTimeout(() => disable("sound-connect-timeout"), 1000);
+      deadline = timers.setTimeout(() => disable("sound-receipt-timeout"), RECEIPT_TIMEOUT_MS);
       void readReceipt(options.soundRunRoot!).then(value => {
         if (terminal) return;
+        if (deadline !== undefined) timers.clearTimeout(deadline);
+        deadline = undefined;
         receipt = value;
         socket = options.createSocket?.() ?? new Socket();
         socket.on("connect", onConnect).on("data", onData).on("drain", onDrain)
           .on("error", onError).on("close", onClose);
         socket.setNoDelay(true);
+        deadline = timers.setTimeout(() => disable("sound-connect-timeout"), ATTACH_TIMEOUT_MS);
         socket.connect({ host: "127.0.0.1", port: value.port });
       }).catch(() => disable("sound-receipt-or-connect-failed"));
     },

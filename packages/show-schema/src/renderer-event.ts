@@ -314,11 +314,18 @@ const runStatusEventSchema = z
         message: "safe-ready status requires a stable reason",
       });
     }
-    if (event.state !== "safe-ready" && event.reason !== undefined) {
+    const pendingOperatorStop =
+      event.state === "running" && event.reason === "operator-stop-pending";
+    if (
+      event.state !== "safe-ready" &&
+      event.reason !== undefined &&
+      !pendingOperatorStop
+    ) {
       context.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["reason"],
-        message: "reason is only valid for safe-ready status",
+        message:
+          "reason is only valid for safe-ready or a pending operator Stop",
       });
     }
   });

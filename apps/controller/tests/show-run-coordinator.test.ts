@@ -2447,6 +2447,121 @@ describe("show run coordinator", () => {
     ]);
   });
 
+  it("publishes and records an accepted shortcut Stop while waiting for the reset boundary", async () => {
+    const harness = createHarness({ mode: "Show" });
+    await startRunning(harness);
+    const surface = harness.surfaces[0]!;
+    surface.sent.length = 0;
+
+    expect(harness.coordinator.requestOperatorStop()).toBe(true);
+    expect(surface.sent).toContainEqual({
+      schema: 1,
+      type: "run-status",
+      generationId: 1,
+      state: "running",
+      reason: "operator-stop-pending",
+    });
+    expect(harness.logs).toContainEqual(
+      expect.objectContaining({
+        type: "stop-request",
+        source: "shortcut",
+        disposition: "queued",
+      }),
+    );
+    expect(harness.coordinator.diagnostics()).toMatchObject({
+      state: "running",
+      stopQueued: true,
+    });
+
+    await completeResetBoundary(harness, 1, 1);
+    await expect(harness.coordinator.completion).resolves.toEqual({
+      ok: true,
+      reason: "operator-stop",
+    });
+  });
+
+  it("publishes and records an accepted Narrative Stop while waiting for the reset boundary", async () => {
+    const harness = createHarness({ mode: "Show" });
+    await startRunning(harness);
+    const surface = harness.surfaces[0]!;
+    surface.sent.length = 0;
+
+    expect(harness.coordinator.handleRendererEvent(stopEvent())).toBe(true);
+    expect(surface.sent).toContainEqual({
+      schema: 1,
+      type: "run-status",
+      generationId: 1,
+      state: "running",
+      reason: "operator-stop-pending",
+    });
+    expect(harness.logs).toContainEqual(
+      expect.objectContaining({
+        type: "stop-request",
+        source: "renderer",
+        disposition: "queued",
+      }),
+    );
+
+    await completeResetBoundary(harness, 1, 1);
+    await expect(harness.coordinator.completion).resolves.toEqual({
+      ok: true,
+      reason: "operator-stop",
+    });
+  });
+
+  it("shuts down instead of recovering when the session fails after Stop is queued", async () => {
+    const harness = createHarness({ mode: "Show" });
+    await startRunning(harness);
+
+    expect(harness.coordinator.requestOperatorStop()).toBe(true);
+    harness.sessions[0]!.emitFault("agent-disconnected");
+    await settle();
+
+    await expect(harness.coordinator.completion).resolves.toEqual({
+      ok: true,
+      reason: "operator-stop",
+    });
+    expect(harness.coordinator.diagnostics()).toMatchObject({
+      state: "stopped",
+      stopQueued: false,
+      recoveries: [],
+    });
+    expect(harness.timers.active(1_000)).toBe(0);
+    expect(harness.coordinator.diagnostics().transitions).toEqual([
+      { from: "booting", to: "ready" },
+      { from: "ready", to: "running" },
+      { from: "running", to: "shutting-down", reason: "operator-stop" },
+      { from: "shutting-down", to: "stopped", reason: "operator-stop" },
+    ]);
+  });
+
+  it("shuts down instead of rebuilding Narrative after Stop is queued", async () => {
+    const harness = createHarness({ mode: "Show" });
+    await startRunning(harness);
+
+    expect(harness.coordinator.requestOperatorStop()).toBe(true);
+    harness.surfaces[0]!.destroy();
+    await settle();
+
+    await expect(harness.coordinator.completion).resolves.toEqual({
+      ok: true,
+      reason: "operator-stop",
+    });
+    expect(harness.surfaces).toHaveLength(1);
+    expect(harness.coordinator.diagnostics()).toMatchObject({
+      state: "stopped",
+      stopQueued: false,
+      recoveries: [],
+    });
+    expect(harness.timers.active(1_000)).toBe(0);
+    expect(harness.coordinator.diagnostics().transitions).toEqual([
+      { from: "booting", to: "ready" },
+      { from: "ready", to: "running" },
+      { from: "running", to: "shutting-down", reason: "operator-stop" },
+      { from: "shutting-down", to: "stopped", reason: "operator-stop" },
+    ]);
+  });
+
   it("correlates one critical cue on both endpoints using only the controller clock", async () => {
     const harness = createHarness();
     await startRunning(harness);

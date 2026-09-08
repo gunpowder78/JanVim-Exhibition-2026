@@ -46,5 +46,14 @@ try {
     exit 0
 }
 catch {
+    # The filtered Windows query reports an absent endpoint as ObjectNotFound,
+    # before the empty-array branch above can run. Let the bounded startup
+    # monitor wait for binding; every other query failure remains an error.
+    if (
+        $_.FullyQualifiedErrorId -ceq 'CmdletizationQuery_NotFound_LocalPort,Get-NetUDPEndpoint' -and
+        $_.CategoryInfo.Category -eq [Management.Automation.ErrorCategory]::ObjectNotFound
+    ) {
+        exit 2
+    }
     exit 4
 }

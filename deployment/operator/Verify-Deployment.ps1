@@ -1,6 +1,8 @@
 [CmdletBinding()]
 param(
-    [string] $HandoffReceiptPath
+    [string] $HandoffReceiptPath,
+    [string] $ProgressPath,
+    [switch] $DeferDisplayMapping
 )
 
 $ErrorActionPreference = 'Stop'
@@ -21,10 +23,36 @@ $defaults = Read-ExhibitionSiteDefaults -Path (Join-Path $packageRoot 'config\si
 $node = Join-Path $packageRoot 'tools\node\node.exe'
 $manifestTool = Join-Path $PSScriptRoot 'lib\package-manifest.mjs'
 $results = [Collections.Generic.List[object]]::new()
+$script:verificationClock = [Diagnostics.Stopwatch]::StartNew()
+$script:progressEntries = 0
+if (-not [string]::IsNullOrWhiteSpace($ProgressPath)) {
+    if (-not [IO.Path]::IsPathFullyQualified($ProgressPath)) { throw 'verification-progress-path-invalid' }
+    # CreateNew preserves evidence from every previous attempt.
+    $progressFile = [IO.File]::Open($ProgressPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::Read)
+    $progressFile.Dispose()
+}
+
+function Write-VerificationProgress {
+    param(
+        [ValidateLength(1, 80)][string] $Stage,
+        [ValidateSet('started', 'passed', 'failed')][string] $Status
+    )
+    if ([string]::IsNullOrWhiteSpace($ProgressPath)) { return }
+    if ($script:progressEntries -ge 32) { throw 'verification-progress-limit' }
+    $entry = [ordered]@{
+        atUtc = [DateTime]::UtcNow.ToString('o')
+        elapsedMs = $script:verificationClock.ElapsedMilliseconds
+        stage = $Stage
+        status = $Status
+    } | ConvertTo-Json -Compress
+    [IO.File]::AppendAllText($ProgressPath, $entry + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+    $script:progressEntries++
+}
 
 function Add-Check {
     param([string] $Name, [bool] $Passed, [string] $Detail)
     $results.Add([pscustomobject]@{ 检查 = $Name; 结果 = if ($Passed) { '通过' } else { '失败' }; 说明 = $Detail })
+    Write-VerificationProgress -Stage $Name -Status $(if ($Passed) { 'passed' } else { 'failed' })
     if (-not $Passed) { throw "deployment-prerequisite-failed:$Name" }
 }
 
@@ -48,7 +76,7 @@ function Invoke-Captured {
     param(
         [Parameter(Mandatory = $true)][string] $FilePath,
         [Parameter(Mandatory = $true)][string[]] $Arguments,
-        [ValidateRange(1, 60000)][int] $TimeoutMs = 20000
+        [ValidateRange(1, 120000)][int] $TimeoutMs = 20000
     )
     $info = [Diagnostics.ProcessStartInfo]::new()
     $info.FileName = $FilePath
@@ -81,6 +109,7 @@ function Invoke-Captured {
     }
 }
 
+Write-VerificationProgress -Stage 'node-identity' -Status 'started'
 Assert-FileIdentity `
     -Path $node -Bytes 86988616 `
     -Sha256 '17347995af08dadcc73a1a154f0942559fbc3f37b9ba57d4576b4d2bcb2834a2' `
@@ -90,14 +119,22 @@ Add-Check -Name '包内 Node.js' -Passed (
     $nodeVersion.ExitCode -eq 0 -and $nodeVersion.Stdout.Trim() -ceq 'v22.23.0'
 ) -Detail 'v22.23.0，身份匹配'
 
+Write-VerificationProgress -Stage 'package-manifest' -Status 'started'
 $manifestResult = Invoke-Captured `
     -FilePath $node `
-    -Arguments @($manifestTool, 'verify', '--root', $packageRoot) `
-    -TimeoutMs 60000
+    -Arguments @($manifestTool, 'verify-installed', '--root', $packageRoot) `
+    -TimeoutMs 120000
 if ($manifestResult.ExitCode -ne 0) { throw 'deployment-package-manifest-invalid' }
 $manifestReceipt = $manifestResult.Stdout | ConvertFrom-Json -NoEnumerate -DateKind String
-Add-Check -Name '部署包清单' -Passed ($manifestReceipt.status -ceq 'package-manifest-verified') `
-    -Detail "$($manifestReceipt.files) 个文件，SHA-256 $($manifestReceipt.manifestSha256)"
+Add-Check -Name '部署包清单' -Passed ($manifestReceipt.status -ceq 'package-installed-payload-verified') `
+    -Detail "$($manifestReceipt.immutableFiles) 个固定文件，清单 SHA-256 $($manifestReceipt.manifestSha256)"
+Add-Check -Name '运行缓存与状态' -Passed $true `
+    -Detail "$($manifestReceipt.runtimeStateFiles) 个额外运行文件，$($manifestReceipt.runtimeStateBytes) 字节；路径、类型与限额通过"
+
+Write-VerificationProgress -Stage 'electron-runtime' -Status 'started'
+$electronRuntime = Assert-DeploymentElectronRuntime -AppRoot (Join-Path $packageRoot 'app')
+Add-Check -Name 'Electron 运行时' -Passed $true `
+    -Detail "$($electronRuntime.version)，$($electronRuntime.files) 个官方运行时文件、版本与入口完整"
 
 if (-not [string]::IsNullOrWhiteSpace($HandoffReceiptPath)) {
     if (-not [IO.Path]::IsPathFullyQualified($HandoffReceiptPath)) { throw 'handoff-receipt-invalid' }
@@ -116,6 +153,7 @@ if (-not [string]::IsNullOrWhiteSpace($HandoffReceiptPath)) {
     Add-Check -Name '外部交接回执' -Passed $true -Detail '清单身份匹配'
 }
 
+Write-VerificationProgress -Stage 'janvim-runtime' -Status 'started'
 $runtimeVerification = Invoke-Captured `
     -FilePath (Get-Command pwsh.exe -CommandType Application -ErrorAction Stop)[0].Source `
     -Arguments @('-NoLogo', '-NoProfile', '-NonInteractive', '-File', (Join-Path $packageRoot 'app\scripts\verify-runtime.ps1')) `
@@ -124,8 +162,8 @@ Add-Check -Name 'JanVim 固定产物' -Passed ($runtimeVerification.ExitCode -eq
 
 $electron = Join-Path $packageRoot 'app\apps\controller\dist\main\electron-main.js'
 Assert-FileIdentity `
-    -Path $electron -Bytes 549054 `
-    -Sha256 'db7901a4a34eb1ecc07d151b2366c4d1ece6f17e239a8c3d9dccb9dd47b7add8' `
+    -Path $electron -Bytes 554384 `
+    -Sha256 '54e189293b9e1675ad9af3309d39e42cfb663bd12a05af2b28d157624e7aedc2' `
     -Label 'electron-main'
 Add-Check -Name '控制器 Electron bundle' -Passed $true -Detail '字节数与 SHA-256 匹配'
 
@@ -179,6 +217,7 @@ if(devices.includesEqual(target), {
 });
 )
 "@
+Write-VerificationProgress -Stage 'audio-endpoint' -Status 'started'
 try {
     [IO.File]::WriteAllText($probePath, $probeSource, [Text.UTF8Encoding]::new($false))
     $deviceProbe = Invoke-Captured `
@@ -193,14 +232,25 @@ finally {
     if (Test-Path -LiteralPath $probePath) { Remove-Item -LiteralPath $probePath -Force }
 }
 
-Import-Module PnpDevice -ErrorAction Stop
-$camera = @(
-    Get-PnpDevice -PresentOnly -ErrorAction Stop |
-        Where-Object { $_.Class -in @('Camera', 'Image') -and $_.Status -eq 'OK' } |
-        Select-Object -First 1
-)
-Add-Check -Name '相机' -Passed ($camera.Count -eq 1) -Detail '检测到可用 Camera/Image PnP 设备（未打开相机）'
+Write-VerificationProgress -Stage 'camera-pnp' -Status 'started'
+$cameraDetail = '未检测到可用相机；继续自动展示（相机交互可选）'
+try {
+    Import-Module PnpDevice -ErrorAction Stop
+    $camera = @(
+        Get-PnpDevice -PresentOnly -ErrorAction Stop |
+            Where-Object { $_.Class -in @('Camera', 'Image') -and $_.Status -eq 'OK' } |
+            Select-Object -First 1
+    )
+    if ($camera.Count -eq 1) {
+        $cameraDetail = '检测到可用 Camera/Image PnP 设备（未打开相机；交互可选）'
+    }
+}
+catch {
+    $cameraDetail = '相机枚举不可用；继续自动展示（相机交互可选）'
+}
+Add-Check -Name '相机（可选）' -Passed $true -Detail $cameraDetail
 
+Write-VerificationProgress -Stage 'display-driver' -Status 'started'
 $displayAdapter = @(
     Get-CimInstance Win32_VideoController -ErrorAction Stop |
         Where-Object { -not [string]::IsNullOrWhiteSpace($_.DriverVersion) } |
@@ -208,8 +258,13 @@ $displayAdapter = @(
 )
 Add-Check -Name 'GPU 驱动' -Passed ($displayAdapter.Count -eq 1) -Detail '检测到显示驱动；DX12 Compute 由首次《见山》启动确认'
 
-[void](Read-ProductionDisplayMap -Path (Join-Path $defaults.siteConfigRoot 'display-map.json'))
-Add-Check -Name '三屏映射' -Passed $true -Detail 'schema 2 / confirmed / production-3'
+if ($DeferDisplayMapping) {
+    Add-Check -Name '三屏映射' -Passed $true -Detail '由启动器在包校验后按当前扩展显示器解析；尚未进行显示验收'
+}
+else {
+    [void](Read-ProductionDisplayMap -Path (Join-Path $defaults.siteConfigRoot 'display-map.json'))
+    Add-Check -Name '三屏映射' -Passed $true -Detail 'schema 2 / confirmed / production-3'
+}
 
 $results | Format-Table -AutoSize
 'DEPLOYMENT_VERIFY_PASS'

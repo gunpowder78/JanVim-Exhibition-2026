@@ -111,6 +111,9 @@ public static class JanVimExhibitionJianShanWindowV1
     [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW", SetLastError = true)]
     public static extern IntPtr GetWindowLongPtrW(IntPtr hWnd, int index);
 
+    [DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW", SetLastError = true)]
+    public static extern IntPtr SetWindowLongPtrW(IntPtr hWnd, int index, IntPtr value);
+
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool SetWindowPos(
@@ -127,24 +130,32 @@ public static class JanVimExhibitionJianShanWindowV1
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool ShowWindowAsync(IntPtr hWnd, int command);
 
-    [DllImport("user32.dll")]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    public static extern bool IsZoomed(IntPtr hWnd);
 }
 '@
 }
 
+$gwlStyle = -16
 $gwOwner = [uint32]4
 $gwlExStyle = -20
+$wsCaption = [int64]0x00C00000
+$wsThickFrame = [int64]0x00040000
+$wsMinimizeBox = [int64]0x00020000
+$wsMaximizeBox = [int64]0x00010000
+$wsSystemMenu = [int64]0x00080000
+$wsMaximize = [int64]0x01000000
+$wsExDialogModalFrame = [int64]0x00000001
+$wsExWindowEdge = [int64]0x00000100
+$wsExClientEdge = [int64]0x00000200
+$wsExStaticEdge = [int64]0x00020000
 $wsExTopmost = [int64]0x00000008
 $wsExTransparent = [int64]0x00000020
 $wsExNoActivate = [int64]0x08000000
-$swMaximize = 3
+$borderedStyleMask = $wsCaption -bor $wsThickFrame -bor $wsMinimizeBox -bor $wsMaximizeBox -bor $wsSystemMenu
+$borderedExStyleMask = $wsExDialogModalFrame -bor $wsExWindowEdge -bor $wsExClientEdge -bor $wsExStaticEdge
+$swRestore = 9
 $hwndTopmost = [IntPtr](-1)
-$swpNoSize = [uint32]0x0001
-$swpNoMove = [uint32]0x0002
-$swpNoZOrder = [uint32]0x0004
 $swpNoActivate = [uint32]0x0010
+$swpFrameChanged = [uint32]0x0020
 $swpShowWindow = [uint32]0x0040
 $clock = [Diagnostics.Stopwatch]::StartNew()
 $window = [IntPtr]::Zero
@@ -212,53 +223,77 @@ Assert-JianShanProcessIdentity `
     -ProcessId $ChildProcessId `
     -ExpectedStart $expectedStart
 
-$moveFlags = $swpNoZOrder -bor $swpNoActivate -bor $swpShowWindow
+[void][JanVimExhibitionJianShanWindowV1]::ShowWindowAsync($window, $swRestore)
+[Threading.Thread]::Sleep(25)
+$initialStyle = [JanVimExhibitionJianShanWindowV1]::GetWindowLongPtrW(
+    $window,
+    $gwlStyle
+).ToInt64()
+$initialExtendedStyle = [JanVimExhibitionJianShanWindowV1]::GetWindowLongPtrW(
+    $window,
+    $gwlExStyle
+).ToInt64()
+$borderlessStyle = $initialStyle -band (-bnot $borderedStyleMask)
+$borderlessExtendedStyle = $initialExtendedStyle -band (-bnot $borderedExStyleMask)
+[void][JanVimExhibitionJianShanWindowV1]::SetWindowLongPtrW(
+    $window,
+    $gwlStyle,
+    [IntPtr]$borderlessStyle
+)
+[void][JanVimExhibitionJianShanWindowV1]::SetWindowLongPtrW(
+    $window,
+    $gwlExStyle,
+    [IntPtr]$borderlessExtendedStyle
+)
+$fullscreenFlags = $swpNoActivate -bor $swpFrameChanged -bor $swpShowWindow
 if (-not [JanVimExhibitionJianShanWindowV1]::SetWindowPos(
     $window,
-    [IntPtr]::Zero,
+    $hwndTopmost,
     $X,
     $Y,
     $Width,
     $Height,
-    $moveFlags
+    $fullscreenFlags
 )) {
-    throw 'jianshan-window-placement-failed'
+    throw 'jianshan-window-fullscreen-failed'
 }
 
-[void][JanVimExhibitionJianShanWindowV1]::ShowWindowAsync($window, $swMaximize)
-$topmostFlags = $swpNoMove -bor $swpNoSize -bor $swpShowWindow
-if (-not [JanVimExhibitionJianShanWindowV1]::SetWindowPos(
-    $window,
-    $hwndTopmost,
-    0,
-    0,
-    0,
-    0,
-    $topmostFlags
-)) {
-    throw 'jianshan-window-topmost-failed'
-}
-
-while (
-    -not [JanVimExhibitionJianShanWindowV1]::IsZoomed($window) -and
-    $clock.ElapsedMilliseconds -lt $TimeoutMs
-) {
+$fullscreen = $false
+$borderless = $false
+$maximized = $true
+$topmost = $false
+$clickThrough = $true
+$noActivate = $true
+$actual = [JanVimExhibitionJianShanWindowV1+RECT]::new()
+while ($clock.ElapsedMilliseconds -lt $TimeoutMs) {
+    if (-not [JanVimExhibitionJianShanWindowV1]::GetWindowRect($window, [ref]$actual)) {
+        throw 'jianshan-window-bounds-failed'
+    }
+    $style = [JanVimExhibitionJianShanWindowV1]::GetWindowLongPtrW(
+        $window,
+        $gwlStyle
+    ).ToInt64()
+    $extendedStyle = [JanVimExhibitionJianShanWindowV1]::GetWindowLongPtrW(
+        $window,
+        $gwlExStyle
+    ).ToInt64()
+    $borderless = (($style -band $borderedStyleMask) -eq 0) -and
+        (($extendedStyle -band $borderedExStyleMask) -eq 0)
+    $maximized = ($style -band $wsMaximize) -ne 0
+    $topmost = ($extendedStyle -band $wsExTopmost) -ne 0
+    $clickThrough = ($extendedStyle -band $wsExTransparent) -ne 0
+    $noActivate = ($extendedStyle -band $wsExNoActivate) -ne 0
+    $fullscreen = $borderless -and -not $maximized -and
+        $actual.Left -eq $X -and $actual.Top -eq $Y -and
+        ($actual.Right - $actual.Left) -eq $Width -and
+        ($actual.Bottom - $actual.Top) -eq $Height
+    if ($fullscreen -and $topmost -and -not $clickThrough -and -not $noActivate) {
+        break
+    }
     [Threading.Thread]::Sleep(25)
 }
 
-$actual = [JanVimExhibitionJianShanWindowV1+RECT]::new()
-if (-not [JanVimExhibitionJianShanWindowV1]::GetWindowRect($window, [ref]$actual)) {
-    throw 'jianshan-window-bounds-failed'
-}
-$extendedStyle = [JanVimExhibitionJianShanWindowV1]::GetWindowLongPtrW(
-    $window,
-    $gwlExStyle
-).ToInt64()
-$maximized = [JanVimExhibitionJianShanWindowV1]::IsZoomed($window)
-$topmost = ($extendedStyle -band $wsExTopmost) -ne 0
-$clickThrough = ($extendedStyle -band $wsExTransparent) -ne 0
-$noActivate = ($extendedStyle -band $wsExNoActivate) -ne 0
-if (-not $maximized -or -not $topmost -or $clickThrough -or $noActivate) {
+if (-not $fullscreen -or -not $topmost -or $clickThrough -or $noActivate) {
     throw 'jianshan-window-final-state-invalid'
 }
 
@@ -280,6 +315,8 @@ if (-not $maximized -or -not $topmost -or $clickThrough -or $noActivate) {
         width = $actual.Right - $actual.Left
         height = $actual.Bottom - $actual.Top
     }
+    fullscreen = $fullscreen
+    borderless = $borderless
     maximized = $maximized
     topmost = $topmost
     clickThrough = $clickThrough

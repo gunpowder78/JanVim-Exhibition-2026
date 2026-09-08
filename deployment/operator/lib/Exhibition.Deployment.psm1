@@ -289,13 +289,84 @@ function Read-ExhibitionSiteDefaults {
         $value.packageRoot -cne 'D:\github\JanVim-Exhibition-Deploy' -or
         $value.rehearsalParent -cne $script:RehearsalParent -or
         $value.siteConfigRoot -cne (Join-Path $script:RehearsalParent 'site-config') -or
-        $value.audioOutputDevice -cne 'Windows WASAPI : Headphones (Senary Audio)' -or
+        $value.audioOutputDevice -isnot [string] -or
+        $value.audioOutputDevice -cne 'Windows WASAPI : Speakers (Realtek High Definition Audio)' -or
         -not (Test-DeploymentInteger -Value $value.durationSeconds) -or
         [int64]$value.durationSeconds -ne 3600
     ) {
         throw 'site-defaults-invalid'
     }
     return $value
+}
+
+function Assert-DeploymentElectronRuntime {
+    [CmdletBinding()]
+    param([Parameter(Mandatory = $true)][string] $AppRoot)
+
+    $app = Resolve-DeploymentAbsolutePath -Path $AppRoot -Reason 'electron-app-root'
+    $inventory = (Read-DeploymentBoundedJson `
+        -Path (Join-Path $PSScriptRoot '..\..\config\electron-runtime.lock.json') `
+        -MaximumBytes 32768 -Reason 'electron-runtime-lock').Value
+    Assert-DeploymentExactProperties -Value $inventory `
+        -Expected @('schema', 'version', 'platform', 'archive', 'files') -Reason 'electron-runtime-lock'
+    if (
+        -not (Test-DeploymentInteger $inventory.schema) -or $inventory.schema -ne 1 -or
+        $inventory.version -isnot [string] -or $inventory.version -cne '44.0.0' -or
+        $inventory.platform -isnot [string] -or $inventory.platform -cne 'win32-x64' -or
+        $inventory.files -isnot [array] -or $inventory.files.Count -ne 73
+    ) { throw 'electron-runtime-lock-invalid' }
+    $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($entry in $inventory.files) {
+        Assert-DeploymentExactProperties -Value $entry -Expected @('path', 'bytes', 'sha256') -Reason 'electron-runtime-lock'
+        if (
+            $entry.path -isnot [string] -or $entry.path.Length -gt 256 -or
+            $entry.path -cnotmatch '^[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*$' -or
+            @($entry.path.Split('/') | Where-Object { $_ -in @('.', '..') }).Count -ne 0 -or
+            -not $seen.Add($entry.path) -or
+            -not (Test-DeploymentInteger $entry.bytes) -or $entry.bytes -lt 0 -or $entry.bytes -gt 268435456 -or
+            $entry.sha256 -isnot [string] -or $entry.sha256 -cnotmatch $script:HashPattern
+        ) { throw 'electron-runtime-lock-invalid' }
+    }
+    foreach ($directory in @($app, (Join-Path $app 'node_modules'), (Join-Path $app 'node_modules\electron'))) {
+        if (-not (Test-Path -LiteralPath $directory -PathType Container)) { throw 'electron-runtime-directory-missing' }
+        if (((Get-Item -LiteralPath $directory -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'electron-runtime-reparse-rejected'
+        }
+    }
+    $runtime = Join-Path $app 'node_modules\electron'
+    $relativeFiles = @('path.txt', 'package.json') + @($inventory.files | ForEach-Object { 'dist/' + $_.path })
+    foreach ($relative in $relativeFiles) {
+        $file = Join-Path $runtime $relative
+        if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "electron-runtime-file-missing:$relative" }
+        $segments = $relative.Split('/')
+        $candidate = $runtime
+        foreach ($segment in $segments) {
+            $candidate = Join-Path $candidate $segment
+            if (((Get-Item -LiteralPath $candidate -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw 'electron-runtime-reparse-rejected'
+            }
+        }
+    }
+    $launcher = Join-Path $runtime 'path.txt'
+    if ((Get-Item -LiteralPath $launcher).Length -ne 12 -or [IO.File]::ReadAllText($launcher) -cne 'electron.exe') {
+        throw 'electron-runtime-launcher-invalid'
+    }
+    $package = (Read-DeploymentBoundedJson -Path (Join-Path $runtime 'package.json') `
+        -MaximumBytes 65536 -Reason 'electron-runtime-package').Value
+    $versionPath = Join-Path $runtime 'dist\version'
+    if (
+        $package.version -isnot [string] -or $package.version -cne $inventory.version -or
+        (Get-Item -LiteralPath $versionPath).Length -ne 6 -or
+        [IO.File]::ReadAllText($versionPath) -cne $inventory.version
+    ) { throw 'electron-runtime-version-invalid' }
+    foreach ($entry in $inventory.files) {
+        $file = Join-Path $runtime ('dist/' + $entry.path)
+        if (
+            (Get-Item -LiteralPath $file).Length -ne $entry.bytes -or
+            (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant() -cne $entry.sha256
+        ) { throw ('electron-runtime-identity-mismatch:dist/' + $entry.path) }
+    }
+    return [pscustomobject]@{ version = $inventory.version; files = $inventory.files.Count }
 }
 
 function Assert-DeploymentProcessIdentityRecord {
@@ -428,24 +499,47 @@ function Get-DeploymentProcessIdentity {
     )
 
     try {
-        $Process.Refresh()
-        $path = $Process.Path
-        $started = $Process.StartTime.ToUniversalTime()
+        $pinnedHandle = $Process.SafeHandle
+        if ($pinnedHandle.IsInvalid -or $pinnedHandle.IsClosed) {
+            throw 'deployment-process-identity-unavailable'
+        }
     }
     catch {
         throw 'deployment-process-identity-unavailable'
     }
-    if ([string]::IsNullOrWhiteSpace($path)) {
-        throw 'deployment-process-identity-unavailable'
+    $path = $null
+    $started = $null
+    $available = $false
+    $expected = if ([string]::IsNullOrWhiteSpace($ExpectedExecutable)) { $null } else {
+        Resolve-DeploymentAbsolutePath -Path $ExpectedExecutable -Reason 'deployment-process-executable'
     }
-    $resolvedPath = Resolve-DeploymentAbsolutePath -Path $path -Reason 'deployment-process-executable'
-    if (-not [string]::IsNullOrWhiteSpace($ExpectedExecutable)) {
-        $expected = Resolve-DeploymentAbsolutePath `
-            -Path $ExpectedExecutable `
-            -Reason 'deployment-process-executable'
-        if (-not [string]::Equals($resolvedPath, $expected, [StringComparison]::OrdinalIgnoreCase)) {
-            throw 'deployment-process-executable-mismatch'
+    # A just-created native image can precede readable module metadata.
+    # Keep the original handle and bound the total retry delay to 1,950 ms.
+    for ($attempt = 0; $attempt -lt 40; $attempt++) {
+        try {
+            $Process.Refresh()
+            if ($Process.HasExited) { break }
+            $path = $Process.Path
         }
+        catch {
+            $path = $null
+        }
+        if (-not [string]::IsNullOrWhiteSpace($path)) {
+            $resolvedPath = Resolve-DeploymentAbsolutePath -Path $path -Reason 'deployment-process-executable'
+            if ($null -ne $expected -and -not [string]::Equals($resolvedPath, $expected, [StringComparison]::OrdinalIgnoreCase)) {
+                throw 'deployment-process-executable-mismatch'
+            }
+            try {
+                $started = $Process.StartTime.ToUniversalTime()
+                $available = $true
+            }
+            catch { $available = $false }
+        }
+        if ($available) { break }
+        if ($attempt -lt 39) { Start-Sleep -Milliseconds 50 }
+    }
+    if (-not $available) {
+        throw 'deployment-process-identity-unavailable'
     }
     return [pscustomobject][ordered]@{
         pid = [int]$Process.Id
@@ -554,6 +648,7 @@ function Stop-DeploymentProcessExact {
 }
 
 Export-ModuleMember -Function @(
+    'Assert-DeploymentElectronRuntime',
     'Read-ExhibitionSiteDefaults',
     'Read-ProductionDisplayMap',
     'New-ExhibitionLaunchPlan',

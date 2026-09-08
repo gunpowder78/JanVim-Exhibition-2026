@@ -1,0 +1,2 @@
+# Preserve the accepted configuration bytes and their SHA-256 identities.
+*.json -text whitespace=trailing-space,space-before-tab,cr-at-eol

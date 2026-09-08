@@ -553,7 +553,7 @@ export class ShowRunCoordinator {
   }
 
   public requestOperatorStop(): boolean {
-    return this.handleStopAction();
+    return this.handleStopAction("shortcut");
   }
 
   public requestEmergencyStop(
@@ -1003,7 +1003,7 @@ export class ShowRunCoordinator {
         );
         return true;
       case "stop-show":
-        return this.handleStopAction();
+        return this.handleStopAction("renderer");
     }
   }
 
@@ -1016,19 +1016,22 @@ export class ShowRunCoordinator {
     return this.startRun();
   }
 
-  private handleStopAction(): boolean {
+  private handleStopAction(source: "renderer" | "shortcut"): boolean {
     if (this.state === "running") {
       if (this.boundaryOperation !== undefined) {
         if (this.stopQueued) {
+          this.log({ type: "stop-request", source, disposition: "already-queued" });
           this.ignore("stop-already-queued");
           return false;
         }
         this.stopQueued = true;
         bestEffortSync(() => this.driver?.stop());
         this.queueBoundaryTerminal({ ok: true, reason: "operator-stop" });
+        this.announceQueuedStop(source);
         return true;
       }
       if (this.stopQueued || this.driver === undefined) {
+        this.log({ type: "stop-request", source, disposition: "already-queued" });
         this.ignore("stop-already-queued");
         return false;
       }
@@ -1037,6 +1040,7 @@ export class ShowRunCoordinator {
         return false;
       }
       this.stopQueued = true;
+      this.announceQueuedStop(source);
       return true;
     }
     if (
@@ -1045,11 +1049,18 @@ export class ShowRunCoordinator {
       this.state === "safe-cruise" ||
       this.state === "black-recovering"
     ) {
+      this.log({ type: "stop-request", source, disposition: "shutdown" });
       void this.beginShutdown({ ok: true, reason: "operator-stop" });
       return true;
     }
+    this.log({ type: "stop-request", source, disposition: "unavailable" });
     this.ignore("stop-not-available");
     return false;
+  }
+
+  private announceQueuedStop(source: "renderer" | "shortcut"): void {
+    this.log({ type: "stop-request", source, disposition: "queued" });
+    this.sendStatus("operator-stop-pending");
   }
 
   private startRun(deferTerminalFailure = false): boolean {
@@ -1662,6 +1673,15 @@ export class ShowRunCoordinator {
       return;
     }
 
+    if (this.stopQueued) {
+      this.log({
+        type: "stop-request-surface-loss",
+        disposition: "shutdown",
+      });
+      void this.beginShutdown({ ok: true, reason: "operator-stop" });
+      return;
+    }
+
     const oldSurface = this.surface;
     const session = this.session ?? this.pendingSession;
     const diagnostics = bestEffortSyncResult(
@@ -1791,6 +1811,16 @@ export class ShowRunCoordinator {
       failedState !== "black-recovering"
     ) {
       this.ignore("session-fault-out-of-context");
+      return;
+    }
+
+    if (this.stopQueued) {
+      this.log({
+        type: "stop-request-fault",
+        fault,
+        disposition: "shutdown",
+      });
+      void this.beginShutdown({ ok: true, reason: "operator-stop" });
       return;
     }
 
@@ -2849,15 +2879,17 @@ export class ShowRunCoordinator {
     };
   }
 
-  private sendStatus(): void {
+  private sendStatus(reason?: string): void {
     if (this.surface === undefined) return;
     const event: RunStatusEvent = {
       schema: 1,
       type: "run-status",
       generationId: this.generationId,
       state: this.state,
-      ...(this.state === "safe-ready" && this.stateReason !== undefined
-        ? { reason: this.stateReason }
+      ...(reason !== undefined
+        ? { reason }
+        : this.state === "safe-ready" && this.stateReason !== undefined
+          ? { reason: this.stateReason }
         : {}),
     };
     bestEffortSync(() => this.surface?.send(event));
