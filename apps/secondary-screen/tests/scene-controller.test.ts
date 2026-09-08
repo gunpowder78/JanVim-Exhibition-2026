@@ -263,22 +263,30 @@ describe("secondary scene controller", () => {
     const unbind = bindTask9Runtime(controller, frames, []);
 
     expect(root.dataset.cursorVisibility).toBe("hidden");
-    root.dispatchEvent(new Event("pointerenter"));
+    root.dispatchEvent(new MouseEvent("pointerenter", { clientX: 120, clientY: 240 }));
     expect(root.dataset.cursorVisibility).toBe("visible");
 
-    vi.advanceTimersByTime(19_999);
-    expect(root.dataset.cursorVisibility).toBe("visible");
-    root.dispatchEvent(new Event("pointermove"));
-    vi.advanceTimersByTime(19_999);
+    for (let elapsed = 5_000; elapsed < 20_000; elapsed += 5_000) {
+      vi.advanceTimersByTime(5_000);
+      root.dispatchEvent(new MouseEvent("pointermove", { clientX: 120, clientY: 240 }));
+    }
+    vi.advanceTimersByTime(4_999);
     expect(root.dataset.cursorVisibility).toBe("visible");
     vi.advanceTimersByTime(1);
     expect(root.dataset.cursorVisibility).toBe("hidden");
 
-    root.dispatchEvent(new Event("pointermove"));
+    root.dispatchEvent(new MouseEvent("pointermove", { clientX: 121, clientY: 240 }));
     expect(root.dataset.cursorVisibility).toBe("visible");
+    vi.advanceTimersByTime(20_000);
+    expect(root.dataset.cursorVisibility).toBe("hidden");
+
+    root.dispatchEvent(new MouseEvent("pointerleave", { clientX: 121, clientY: 240 }));
+    root.dispatchEvent(new MouseEvent("pointerenter", { clientX: 121, clientY: 240 }));
+    expect(root.dataset.cursorVisibility).toBe("visible");
+
     unbind();
     expect(root.dataset.cursorVisibility).toBe("hidden");
-    root.dispatchEvent(new Event("pointermove"));
+    root.dispatchEvent(new MouseEvent("pointermove", { clientX: 122, clientY: 240 }));
     expect(root.dataset.cursorVisibility).toBe("hidden");
     expect(vi.getTimerCount()).toBe(0);
   });

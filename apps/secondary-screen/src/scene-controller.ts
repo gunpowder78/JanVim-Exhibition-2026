@@ -60,6 +60,7 @@ export class SecondarySceneController {
   private readonly pendingSoundMixTargets = new Set<SoundMixTarget>();
   private soundMixControlsArmed = false;
   private pointerIdleTimer?: number;
+  private lastPointerPosition?: { clientX: number; clientY: number };
   private shutdownNoticeLatched = false;
 
   public constructor(
@@ -125,7 +126,14 @@ export class SecondarySceneController {
     const windUp = (): void => this.emitSoundMixAdjustment("wind", 1);
     const instrumentDown = (): void => this.emitSoundMixAdjustment("instrument", -1);
     const instrumentUp = (): void => this.emitSoundMixAdjustment("instrument", 1);
-    const pointerActivity = (): void => this.showPointerTemporarily();
+    const pointerEnter = (event: PointerEvent): void => {
+      this.lastPointerPosition = { clientX: event.clientX, clientY: event.clientY };
+      this.showPointerTemporarily();
+    };
+    const pointerMove = (event: PointerEvent): void => this.handlePointerMove(event);
+    const pointerLeave = (): void => {
+      this.lastPointerPosition = undefined;
+    };
     this.startButton.addEventListener("click", start);
     this.restartButton.addEventListener("click", restart);
     this.stopButton.addEventListener("click", stop);
@@ -133,8 +141,9 @@ export class SecondarySceneController {
     this.windMix.plusButton.addEventListener("click", windUp);
     this.instrumentMix.minusButton.addEventListener("click", instrumentDown);
     this.instrumentMix.plusButton.addEventListener("click", instrumentUp);
-    this.root.addEventListener("pointerenter", pointerActivity);
-    this.root.addEventListener("pointermove", pointerActivity);
+    this.root.addEventListener("pointerenter", pointerEnter);
+    this.root.addEventListener("pointermove", pointerMove);
+    this.root.addEventListener("pointerleave", pointerLeave);
     this.releaseRuntimeListeners = () => {
       this.startButton.removeEventListener("click", start);
       this.restartButton.removeEventListener("click", restart);
@@ -143,8 +152,9 @@ export class SecondarySceneController {
       this.windMix.plusButton.removeEventListener("click", windUp);
       this.instrumentMix.minusButton.removeEventListener("click", instrumentDown);
       this.instrumentMix.plusButton.removeEventListener("click", instrumentUp);
-      this.root.removeEventListener("pointerenter", pointerActivity);
-      this.root.removeEventListener("pointermove", pointerActivity);
+      this.root.removeEventListener("pointerenter", pointerEnter);
+      this.root.removeEventListener("pointermove", pointerMove);
+      this.root.removeEventListener("pointerleave", pointerLeave);
     };
 
     let bound = true;
@@ -158,6 +168,7 @@ export class SecondarySceneController {
   public dispose(): void {
     this.cancelPresentationAck();
     this.hidePointer();
+    this.lastPointerPosition = undefined;
     this.releaseRuntimeListeners?.();
     this.releaseRuntimeListeners = undefined;
     this.runtime = undefined;
@@ -352,6 +363,18 @@ export class SecondarySceneController {
       this.pointerIdleTimer = undefined;
       this.root.dataset.cursorVisibility = "hidden";
     }, POINTER_IDLE_TIMEOUT_MS);
+  }
+
+  private handlePointerMove(event: PointerEvent): void {
+    const position = { clientX: event.clientX, clientY: event.clientY };
+    if (
+      this.lastPointerPosition?.clientX === position.clientX &&
+      this.lastPointerPosition.clientY === position.clientY
+    ) {
+      return;
+    }
+    this.lastPointerPosition = position;
+    this.showPointerTemporarily();
   }
 
   private hidePointer(): void {
