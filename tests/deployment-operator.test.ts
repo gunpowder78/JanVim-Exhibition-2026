@@ -22,6 +22,17 @@ const modulePath = join(
 const defaultsPath = join(root, "deployment", "config", "site-defaults.json");
 const tempRoot = mkdtempSync(join(tmpdir(), "janvim-deployment-operator-"));
 
+it("pins the same controller identity in outer preflight and inner show launcher", () => {
+  const verifier = readFileSync(join(root, "deployment/operator/Verify-Deployment.ps1"), "utf8");
+  const launcher = readFileSync(join(root, "scripts/start-show.ps1"), "utf8");
+  const outer = /-Path \$electron -Bytes (\d+)\s+`\s+-Sha256 '([a-f0-9]{64})'/.exec(verifier);
+  const innerBytes = /\$reviewedElectronMainBytes = (\d+)L/.exec(launcher);
+  const innerHash = /\$reviewedElectronMainSha256 = '([a-f0-9]{64})'/.exec(launcher);
+  expect(outer).not.toBeNull();
+  expect(innerBytes?.[1]).toBe(outer?.[1]);
+  expect(innerHash?.[1]).toBe(outer?.[2]);
+});
+
 afterAll(() => {
   const resolved = resolve(tempRoot);
   if (!resolved.startsWith(resolve(tmpdir()))) throw new Error("unsafe-test-root");
