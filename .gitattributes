@@ -7,3 +7,4 @@ content/p0.1/** text eol=lf
 janvim-artifact.lock.json text eol=lf
 nvim/**/*.lua text eol=lf
 docs/operations/rehearsal-runbook.md text eol=lf
+deployment/docs/golden-002-site/*.json text eol=lf
