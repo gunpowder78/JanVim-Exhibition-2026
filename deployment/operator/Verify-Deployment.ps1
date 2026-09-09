@@ -162,8 +162,8 @@ Add-Check -Name 'JanVim 固定产物' -Passed ($runtimeVerification.ExitCode -eq
 
 $electron = Join-Path $packageRoot 'app\apps\controller\dist\main\electron-main.js'
 Assert-FileIdentity `
-    -Path $electron -Bytes 554384 `
-    -Sha256 '54e189293b9e1675ad9af3309d39e42cfb663bd12a05af2b28d157624e7aedc2' `
+    -Path $electron -Bytes 556427 `
+    -Sha256 '9d5fdc13099e77f9d0e1c64d9a880714c95a214e4d8e911041a5ffe8645e6e31' `
     -Label 'electron-main'
 Add-Check -Name '控制器 Electron bundle' -Passed $true -Detail '字节数与 SHA-256 匹配'
 
