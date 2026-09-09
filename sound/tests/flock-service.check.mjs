@@ -299,45 +299,63 @@ test("site sound mix updates current and future stems independently", { timeout:
 
 test("stone-and-signal uses the existing service, stem gain, Wind, node bound, and whole Stop", { timeout: 60000 }, async t => {
   const service = await launch(["flock-v1", "instrument-stone-and-signal-v2"]);
-  const candidateVoice = name => ["jvSignalCall", "jvSignalAM", "jvSignalFlint", "jvSignalRelic",
-    "jvSignalEarth", "jvSignalBlade", "jvSignalBass"].includes(name);
+  const candidateVoice = name => name === "jvPluck" || (name.startsWith("jvSignal") && name !== "jvSignalSpace");
   try {
     await service.ready();
-    assert.ok((await service.tree()).some(({ name }) => name === "jvSignalSpace"),
-      "candidate profile alone instantiates its shared ambience node");
+    assert.ok((await service.tree()).some(({ name }) => name === "jvSignalSpace"));
     await service.send("site-mix", [float(-6), float(-4)]);
     await service.send("cursor", [float(0.5), float(0.5), float(0.5)]);
-    await delay(150);
-    assert.ok(!(await service.tree()).some(({ name }) => candidateVoice(name)),
-      "candidate starts with silence instead of sounding on its first cursor");
+    let nodes = await until(service.tree, list => list.some(({ name }) => name === "jvPluck"),
+      "first cursor group immediately uses the original plucked instrument");
+    const pluck = nodes.find(({ name }) => name === "jvPluck");
+    assert.ok(Math.abs(pluck.controls.gain - (2 * (10 ** (-4 / 20)))) < 0.00001,
+      "candidate keeps the approved gain above persisted Instrument gain");
+    await delay(400);
+    await service.send("cursor", [float(0.6), float(0.6), float(0.5)]);
+    nodes = await until(service.tree, list => list.filter(({ name }) => name === "jvPluck").length === 2,
+      "fresh input in one group repeats its melodic instrument");
 
-    for (let second = 0; second < 4; second += 1) {
-      await delay(1000);
-      await service.send("heartbeat");
-    }
+    await delay(750);
+    await service.send("heartbeat");
     await service.send("cursor", [float(0.5), float(0.5), float(0.5)]);
-    let nodes = await until(service.tree, list => list.some(({ name }) => name === "jvSignalCall"),
-      "fixed production seed selects the first signal call");
-    const call = nodes.find(({ name }) => name === "jvSignalCall");
-    assert.ok(Math.abs(call.controls.gain - (10 ** (-4 / 20))) < 0.00001,
-      "candidate instrument inherits the existing persisted Instrument gain");
-    assert.ok(nodes.filter(({ name }) => candidateVoice(name) || name === "jvPluck").length <= 8,
-      "all instrument types share the existing eight-node capacity");
+    nodes = await until(service.tree, list => list.some(({ name }) => name === "jvSignalBass"),
+      "next input group selects bass");
+    const bass = nodes.find(({ name }) => name === "jvSignalBass");
+    assert.ok(bass.controls.duration <= 1.5, "bass is a single pluck with a finite tail");
 
+    await delay(750);
+    await service.send("heartbeat");
+    await service.send("cursor", [float(0.5), float(0.5), float(0.5)]);
+    nodes = await until(service.tree, list => list.some(({ name }) => name === "jvSignalAM"),
+      "third input group selects radio tuning");
+    const tuning = nodes.find(({ name }) => name === "jvSignalAM");
+    assert.equal(tuning.controls.cursorPulse, 1,
+      "service forwards activity-driven single-attack mode to the radio synth");
+
+    await service.send("site-mix", [float(-6), float(6)]);
+    nodes = await until(service.tree, list => {
+      const node = list.find(node => node.id === tuning.id);
+      return node && Math.abs(node.controls.gain - 1.9952623) < 0.00001;
+    }, "live mix updates preserve the candidate gain ceiling");
+    const admittedIds = new Set(nodes.filter(({ name }) => candidateVoice(name)).map(node => node.id));
     await service.live();
     nodes = await until(service.tree, list => list.some(({ name }) => name === "jvWind"),
       "Wind remains independently driven by flock ingress");
-    assert.equal(nodes.filter(({ name }) => name === "jvSignalCall").length, 1);
+    assert.ok(Math.abs(nodes.find(node => node.name === "jvWind").controls.gain - 10 ** (-6 / 20)) < 0.00001);
+    await delay(250);
+    nodes = await service.tree();
+    assert.ok(nodes.filter(({ name }) => candidateVoice(name)).every(node => admittedIds.has(node.id)),
+      "heartbeats and Wind cannot create new instrument onsets");
+    assert.ok(nodes.filter(({ name }) => candidateVoice(name)).length <= 8);
 
     await service.stop();
     await service.send("cursor", [float(0.5), float(0.5), float(0.5)]);
     const fading = await service.tree();
-    assert.ok(fading.some(({ name, controls }) => name === "jvMix" && controls.stop === 1),
-      "candidate uses the existing 1.5-second whole-show fade");
-    assert.equal(fading.filter(({ name }) => name === "jvSignalCall").length, 1,
+    assert.ok(fading.some(({ name, controls }) => name === "jvMix" && controls.stop === 1));
+    assert.ok(fading.filter(({ name }) => candidateVoice(name)).every(node => admittedIds.has(node.id)),
       "late cursor cannot create a candidate node after Stop");
     await service.complete();
-    t.diagnostic(`silent stone-and-signal service evidence: ${service.evidence}; no hearing claim`);
+    t.diagnostic("silent cursor-linked candidate evidence: " + service.evidence + "; no hearing claim");
   } finally { await service.cleanup(); }
 });
 

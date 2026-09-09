@@ -44,12 +44,14 @@
         }),
 
         SynthDef(\jvSignalCall, { |outBus = 16, duration = 7, freq = 165, pan = 0,
-            seed = 1, gain = 1|
+            seed = 1, gain = 1, cursorPulse = 0|
             var envelope, pitch, vibrato, modulation, tone, breath, position, safeGain;
             RandSeed.ir(1, seed);
             safeGain = Lag.kr(gain.clip(0.0630957, 1.9952623), 0.05);
             envelope = EnvGen.kr(Env([0, 0.85, 1, 0.35, 0],
                 [0.25, 0.22, 0.25, 0.28] * duration, \sine), doneAction: Done.freeSelf);
+            envelope = Select.kr(cursorPulse.clip(0, 1), [envelope,
+                EnvGen.kr(Env.perc(0.02, duration - 0.02, curve: -4))]);
             pitch = EnvGen.kr(Env([freq * 1.08, freq * 0.82, freq * 1.32, freq * 0.98],
                 [0.36, 0.29, 0.35] * duration, \sine));
             vibrato = SinOsc.kr(4.1, 0, 0.004, 1);
@@ -62,14 +64,18 @@
                 position));
         }),
 
-        SynthDef(\jvSignalAM, { |outBus = 16, duration = 2.7, pan = 0, seed = 1, gain = 1|
+        SynthDef(\jvSignalAM, { |outBus = 16, duration = 2.7, pan = 0, seed = 1, gain = 1,
+            cursorPulse = 0|
             var envelope, tuning, lock, chopped, static, whistle, station, signal, safeGain;
             RandSeed.ir(1, seed);
             safeGain = Lag.kr(gain.clip(0.0630957, 1.9952623), 0.05);
             envelope = EnvGen.kr(Env([0, 1, 0.72, 0.92, 0],
                 [0.025, 0.32, 0.60, 0.055] * duration, \sine), doneAction: Done.freeSelf);
+            envelope = Select.kr(cursorPulse.clip(0, 1), [envelope,
+                EnvGen.kr(Env.perc(0.01, duration - 0.01, curve: -4))]);
             tuning = EnvGen.kr(Env([2500, 1580, 240, 940, 3100, 560],
-                [0.15, 0.24, 0.18, 0.16, 0.27] * duration, \lin));
+                [0.15, 0.24, 0.18, 0.16, 0.27] * duration *
+                    Select.kr(cursorPulse.clip(0, 1), [1, 0.18]), \lin));
             lock = (-1 * ((tuning - 850) / 160).squared).exp;
             chopped = LFNoise0.kr(24).range(0.08, 1).lag(0.006);
             static = LPF.ar(HPF.ar(WhiteNoise.ar(0.40), 330), 3800) * chopped *
@@ -113,12 +119,14 @@
         }),
 
         SynthDef(\jvSignalEarth, { |outBus = 16, duration = 5.2, pan = 0,
-            seed = 1, gain = 1|
+            seed = 1, gain = 1, cursorPulse = 0|
             var envelope, rubble, uneven, tectonic, signal, safeGain;
             RandSeed.ir(1, seed);
             safeGain = Lag.kr(gain.clip(0.0630957, 1.9952623), 0.05);
             envelope = EnvGen.kr(Env([0, 0.6, 1, 0.3, 0],
                 [0.13, 0.22, 0.29, 0.36] * duration, \sine), doneAction: Done.freeSelf);
+            envelope = Select.kr(cursorPulse.clip(0, 1), [envelope,
+                EnvGen.kr(Env.perc(0.03, duration - 0.03, curve: -4))]);
             uneven = LFNoise1.kr(7).range(0.25, 1);
             rubble = BPF.ar(BrownNoise.ar(1), [75, 148, 265], [0.65, 0.4, 0.3]).sum *
                 uneven * 0.55;
@@ -146,23 +154,27 @@
                 0.055 * safeGain, position));
         }),
 
-        SynthDef(\jvSignalBass, { |outBus = 16, duration = 3.3, midi = 28,
+        SynthDef(\jvSignalBass, { |outBus = 16, duration = 1.2, midi = 28,
             seed = 1, gain = 1|
-            var frequency, pitch, envelope, harmonics, cutoff, body, click, safeGain;
+            var frequency, trigger, pitchDrop, pitch, articulation, life;
+            var harmonics, cutoff, body, click, safeGain;
             RandSeed.ir(1, seed);
             safeGain = Lag.kr(gain.clip(0.0630957, 1.9952623), 0.05);
             frequency = midi.clip(24, 40).midicps;
-            pitch = EnvGen.kr(Env([frequency * 1.13, frequency, frequency * 0.993],
-                [0.065, duration - 0.065], [-5, -1]));
-            envelope = EnvGen.kr(Env([0, 1, 0.78, 0],
-                [0.015, duration * 0.21, duration * 0.79 - 0.015], [-2, -2, -4]),
+            // A note has one attack. Only another accepted cursor can start another note.
+            trigger = Impulse.kr(0);
+            pitchDrop = Decay2.kr(trigger, 0.002, 0.085);
+            pitch = frequency * (1 + (pitchDrop * 0.13));
+            articulation = Decay2.kr(trigger, 0.008, 0.65);
+            life = EnvGen.kr(Env.linen(0.005, duration - 0.055, 0.05),
                 doneAction: Done.freeSelf);
             harmonics = SinOsc.ar(pitch) + (SinOsc.ar(pitch * 2.001) * 0.31) +
                 (LFTri.ar(pitch) * 0.22) + (Pulse.ar(pitch, 0.42) * 0.08);
             cutoff = XLine.kr(760, 145, duration);
             body = RLPF.ar((harmonics * 1.6).tanh * 0.66, cutoff, 0.7);
-            click = HPF.ar(PinkNoise.ar(1), 1100) * EnvGen.kr(Env.perc(0.001, 0.022)) * 0.023;
-            Out.ar(outBus, Pan2.ar(HPF.ar(body + click, 30) * envelope * 0.11 * safeGain, 0));
+            click = HPF.ar(PinkNoise.ar(1), 1100) * Decay2.kr(trigger, 0.001, 0.022) * 0.023;
+            Out.ar(outBus, Pan2.ar(HPF.ar((body * articulation) + click, 30) *
+                life * 0.16 * safeGain, 0));
         }),
 
         SynthDef(\jvSignalSpace, { |inBus = 16, outBus = 18|

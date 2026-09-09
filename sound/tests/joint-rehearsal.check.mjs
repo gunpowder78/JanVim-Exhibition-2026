@@ -30,6 +30,7 @@ param(
     [string] $RunRoot,
     [Alias('Input')][string] $SoundInput,
     [switch] $FlockIngress,
+    [ValidateSet('LegacyPluckV1', 'StoneAndSignalV2')][string] $InstrumentProfile = 'LegacyPluckV1',
     [string] $NodeExecutable
 )
 $record = [ordered]@{
@@ -41,6 +42,7 @@ $record = [ordered]@{
     flockIngress = [bool]$FlockIngress
 }
 if (-not [string]::IsNullOrWhiteSpace($NodeExecutable)) { $record.nodeExecutable = $NodeExecutable }
+if ($InstrumentProfile -ne 'LegacyPluckV1') { $record.instrumentProfile = $InstrumentProfile }
 [IO.File]::AppendAllText($env:JOINT_CAPTURE, (($record | ConvertTo-Json -Compress) + [Environment]::NewLine))
 if ($env:JOINT_SOUND_EXIT) { exit [int]$env:JOINT_SOUND_EXIT }
 exit 0
@@ -285,10 +287,20 @@ test("Sound uses the selected session rather than newest state, stays silent by 
   assert.equal(silent.exitCode, 0, `Sound should delegate successfully: ${silent.stderr}`);
   const listening = await fixture.run(["-Action", "Sound", "-SessionFile", selected.sessionFile, "-Listen"]);
   assert.equal(listening.exitCode, 0, `explicit Listen should delegate successfully: ${listening.stderr}`);
+  const candidate = await fixture.run(["-Action", "Sound", "-SessionFile", selected.sessionFile,
+    "-Listen", "-InstrumentProfile", "StoneAndSignalV2"]);
+  assert.equal(candidate.exitCode, 0, `candidate profile should delegate successfully: ${candidate.stderr}`);
+  const caseVariant = await fixture.run(["-Action", "Sound", "-SessionFile", selected.sessionFile,
+    "-Listen", "-InstrumentProfile", "stoneandsignalv2"]);
+  assert.equal(caseVariant.exitCode, 0, "ValidateSet's accepted casing must preserve the selected candidate");
 
   assert.deepEqual(await captureRecords(fixture), [
     { launcher: "start-sound", listen: false, duration: 73, runRoot: selected.soundRoot, input: "RealCursor", flockIngress: true },
     { launcher: "start-sound", listen: true, duration: 73, runRoot: selected.soundRoot, input: "RealCursor", flockIngress: true },
+    { launcher: "start-sound", listen: true, duration: 73, runRoot: selected.soundRoot, input: "RealCursor", flockIngress: true,
+      instrumentProfile: "StoneAndSignalV2" },
+    { launcher: "start-sound", listen: true, duration: 73, runRoot: selected.soundRoot, input: "RealCursor", flockIngress: true,
+      instrumentProfile: "StoneAndSignalV2" },
   ]);
 });
 

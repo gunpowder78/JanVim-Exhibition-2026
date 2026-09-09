@@ -1,7 +1,7 @@
 (
 var argv, session, mode, durationText, duration, capturePath, hardwareOutput, argumentError;
 var flockIngress = false, instrumentProfile = \legacyPluckV1, optionalModes;
-var windGain = 1.0, instrumentGain = 1.0;
+var windGain = 1.0, instrumentGain = 1.0, effectiveInstrumentGain;
 var finiteFloat, validSession, validDurationText, jsonString, emit;
 var emitReady, emitEvent, emitOwnershipCheckFailure, emitStats, emitComplete;
 var completeEmitted = false, readyEmitted = false;
@@ -162,6 +162,13 @@ if(argumentError.notNil) {
     2.exit;
 } {
 hardwareOutput = ["listen"].includesEqual(mode);
+effectiveInstrumentGain = {
+    if(instrumentProfile == \stoneAndSignalV2) {
+        (instrumentGain * 2.0).min(1.9952623)
+    } {
+        instrumentGain
+    }
+};
 
 soundRoot = thisProcess.nowExecutingPath.dirname;
 endpointHelperPath = soundRoot +/+ "server-port-owner.ps1";
@@ -456,7 +463,7 @@ startInstrument = { |definition, controls, usesSpace = false|
         var output = if(usesSpace) { spaceBus.index } { voiceBus.index };
         var node = Synth.before(target, definition, [
             \outBus, output,
-            \gain, instrumentGain
+            \gain, effectiveInstrumentGain.value
         ] ++ controls);
         livePlucks = livePlucks + 1;
         maxPlucks = maxPlucks.max(livePlucks);
@@ -486,10 +493,12 @@ processAction = { |action|
             \signalCall, {
                 startInstrument.value(\jvSignalCall, [\freq, action.at(\freq),
                     \duration, action.at(\duration), \pan, action.at(\pan),
+                    \cursorPulse, action.at(\cursorPulse) ? 0,
                     \seed, action.at(\seed)], true);
             },
             \amTuning, {
                 startInstrument.value(\jvSignalAM, [\duration, action.at(\duration),
+                    \cursorPulse, action.at(\cursorPulse) ? 0,
                     \pan, action.at(\pan), \seed, action.at(\seed)]);
             },
             \flint, {
@@ -502,6 +511,7 @@ processAction = { |action|
             },
             \earth, {
                 startInstrument.value(\jvSignalEarth, [\duration, action.at(\duration),
+                    \cursorPulse, action.at(\cursorPulse) ? 0,
                     \pan, action.at(\pan), \seed, action.at(\seed)]);
             },
             \blade, {
@@ -546,7 +556,7 @@ processAction = { |action|
                 windGain = action.at(\windGainDb).dbamp;
                 instrumentGain = action.at(\instrumentGainDb).dbamp;
                 windNodes.do { |node| node.set(\gain, windGain) };
-                pluckNodes.do { |node| node.set(\gain, instrumentGain) };
+                pluckNodes.do { |node| node.set(\gain, effectiveInstrumentGain.value) };
             },
             \stop, { beginStop.value(action.at(\reason).asString, true) }
         );

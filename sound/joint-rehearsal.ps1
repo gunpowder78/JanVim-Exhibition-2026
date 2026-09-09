@@ -9,6 +9,10 @@ the script prompts for the explicit path; it never searches for a recent run.
 
 .PARAMETER Listen
 Enables hardware sound only for this Sound invocation. Sound is silent by default.
+
+.PARAMETER InstrumentProfile
+Selects the opt-in sound profile for this Sound invocation. The default preserves
+LegacyPluckV1; StoneAndSignalV2 remains an attended candidate.
 #>
 [CmdletBinding(PositionalBinding = $false)]
 param(
@@ -24,6 +28,9 @@ param(
     [int] $Duration = 600,
 
     [switch] $Listen,
+
+    [ValidateSet('LegacyPluckV1', 'StoneAndSignalV2')]
+    [string] $InstrumentProfile = 'LegacyPluckV1',
 
     [switch] $OfflineRequired,
 
@@ -381,6 +388,9 @@ function Assert-SoundReady {
 if ($Listen -and $Action -cne 'Sound') {
     throw 'Listen is valid only for the Sound action'
 }
+if ($InstrumentProfile -ne 'LegacyPluckV1' -and $Action -cne 'Sound') {
+    throw 'InstrumentProfile is valid only for the Sound action'
+}
 if ($OfflineRequired -and $Action -cne 'Show') {
     throw 'OfflineRequired is valid only for the Show action'
 }
@@ -452,6 +462,9 @@ switch ($Action) {
         )
         if ($Listen) {
             $childArguments += '-Listen'
+        }
+        if ($InstrumentProfile -eq 'StoneAndSignalV2') {
+            $childArguments += @('-InstrumentProfile', 'StoneAndSignalV2')
         }
         if ($null -ne $resolvedNodeExecutable) {
             $childArguments += @('-NodeExecutable', $resolvedNodeExecutable)

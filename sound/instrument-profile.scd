@@ -1,8 +1,8 @@
 (
 { |profile = \legacyPluckV1, seed = 20260909|
     var int32Max = 2147483647, randomState;
-    var state = \running, startedAt, lastObservedAt, lastOpportunityAt;
-    var opportunitySpacing = 4.0, opportunityChance = 0.6;
+    var state = \running, lastObservedAt, lastOnsetAt, phraseType, lastAccentAt;
+    var activityGap = 0.65, spacing, singleAccent;
     var notes, bassNotes, cooldowns, lastByType, emitted = 0, sparseDropped = 0;
     var saturatingIncrement, nextRandom, legacyAction, candidateAction, select, stop, snapshot;
 
@@ -17,15 +17,16 @@
     notes = [48, 50, 52, 55, 57, 60, 62, 64, 67, 69, 72];
     bassNotes = [28, 31, 33, 35];
     cooldowns = IdentityDictionary[
-        \signalCall -> 22.0,
-        \amTuning -> 48.0,
+        \signalCall -> 16.0,
+        \amTuning -> 12.0,
         \flint -> 12.0,
-        \relic -> 42.0,
-        \earth -> 60.0,
-        \blade -> 22.0,
-        \bass -> 30.0
+        \relic -> 30.0,
+        \earth -> 24.0,
+        \blade -> 18.0
     ];
     lastByType = IdentityDictionary.new;
+    spacing = (bass: 0.3, pluck: 0.3, amTuning: 0.375, signalCall: 0.625, earth: 0.625);
+    singleAccent = [\flint, \blade, \relic];
 
     saturatingIncrement = { |value| if(value < int32Max) { value + 1 } { int32Max } };
     nextRandom = {
@@ -47,103 +48,86 @@
     };
 
     candidateAction = { |cursor, now|
-        var x, y, motion, roll, type, previous, action;
-        if(startedAt.isNil) {
-            startedAt = now;
-            lastObservedAt = now;
-            sparseDropped = saturatingIncrement.value(sparseDropped);
-            action = nil;
+        var x, y, motion, roll, type, previous, action, newGroup;
+        if(lastObservedAt.notNil and: { now < lastObservedAt }) {
+            nil
         } {
-            if(now < lastObservedAt) {
-                action = nil;
-            } {
-                lastObservedAt = now;
-                if(
-                    now < (startedAt + opportunitySpacing) or: {
-                        lastOpportunityAt.notNil and: {
-                            now < (lastOpportunityAt + opportunitySpacing)
-                        }
+            // Infer one activity group from fresh editor cursor samples. The wire intentionally
+            // carries no text/cue metadata. No timer, pending note or heartbeat can generate notes.
+            newGroup = lastObservedAt.isNil or: { (now - lastObservedAt) >= activityGap };
+            lastObservedAt = now;
+            if(newGroup) {
+                roll = nextRandom.value * 100.0;
+                type = case
+                    { roll < 40.0 } { \bass }
+                    { roll < 67.0 } { \pluck }
+                    { roll < 82.0 } { \amTuning }
+                    { roll < 88.0 } { \signalCall }
+                    { roll < 93.0 } { \earth }
+                    { roll < 96.0 } { \flint }
+                    { roll < 99.0 } { \blade }
+                    { \relic };
+                previous = lastByType.at(type);
+                if((previous.notNil and: { now < (previous + cooldowns.at(type)) }) or: {
+                    singleAccent.includes(type) and: {
+                        lastAccentAt.notNil and: { now < (lastAccentAt + 3.2) }
                     }
-                ) {
-                    sparseDropped = saturatingIncrement.value(sparseDropped);
-                    action = nil;
-                } {
-                    lastOpportunityAt = now;
-                    if(nextRandom.value >= opportunityChance) {
-                        sparseDropped = saturatingIncrement.value(sparseDropped);
-                        action = nil;
-                    } {
-                        roll = nextRandom.value * 100.0;
-                        type = case
-                            { roll < 24.0 } { \signalCall }
-                            { roll < 34.0 } { \amTuning }
-                            { roll < 56.0 } { \flint }
-                            { roll < 62.0 } { \relic }
-                            { roll < 70.0 } { \earth }
-                            { roll < 84.0 } { \blade }
-                            { \bass };
-                        previous = lastByType.at(type);
-                        if(previous.notNil and: { now < (previous + cooldowns.at(type)) }) {
-                            sparseDropped = saturatingIncrement.value(sparseDropped);
-                            action = nil;
-                        } {
-                            x = cursor.at(\x).clip(0.0, 1.0);
-                            y = cursor.at(\y).clip(0.0, 1.0);
-                            motion = cursor.at(\motion).clip(0.0, 1.0);
-                            lastByType.put(type, now);
-                            emitted = saturatingIncrement.value(emitted);
-                            action = switch(type,
-                                \signalCall, { (
-                                    type: type,
-                                    freq: 132.0 + ((1.0 - y) * 68.0),
-                                    duration: 6.2 + (motion * 1.6),
-                                    pan: (x * 1.2) - 0.6,
-                                    seed: randomState
-                                ) },
-                                \amTuning, { (
-                                    type: type,
-                                    duration: 2.3 + (motion * 0.9),
-                                    pan: (x * 1.2) - 0.6,
-                                    seed: randomState
-                                ) },
-                                \flint, { (
-                                    type: type,
-                                    scale: 0.9 + (y * 0.25),
-                                    pan: (x * 1.4) - 0.7,
-                                    seed: randomState
-                                ) },
-                                \relic, { (
-                                    type: type,
-                                    midi: notes.at((y * (notes.size - 1)).round.asInteger),
-                                    pan: (x * 1.2) - 0.6,
-                                    seed: randomState
-                                ) },
-                                \earth, { (
-                                    type: type,
-                                    duration: 4.6 + (motion * 1.0),
-                                    pan: (x * 0.4) - 0.2,
-                                    seed: randomState
-                                ) },
-                                \blade, { (
-                                    type: type,
-                                    freq: 680.0 + (y * 360.0),
-                                    duration: 1.8 + (motion * 0.8),
-                                    pan: (x * 1.4) - 0.7,
-                                    seed: randomState
-                                ) },
-                                \bass, { (
-                                    type: type,
-                                    midi: bassNotes.at((y * (bassNotes.size - 1)).round.asInteger),
-                                    duration: 3.0 + (motion * 0.8),
-                                    seed: randomState
-                                ) }
-                            );
-                        };
-                    };
+                }) {
+                    type = if((roll % 2.0) < 1.0) { \bass } { \pluck };
                 };
+                phraseType = type;
+                if(cooldowns.includesKey(type)) { lastByType.put(type, now) };
+                if(singleAccent.includes(type)) { lastAccentAt = now };
             };
-        };
-        action
+            type = phraseType;
+            if(newGroup or: {
+                singleAccent.includes(type).not and: {
+                    lastOnsetAt.isNil or: { (now - lastOnsetAt) >= spacing.at(type) }
+                }
+            }) {
+                x = cursor.at(\x).clip(0.0, 1.0);
+                y = cursor.at(\y).clip(0.0, 1.0);
+                motion = cursor.at(\motion).clip(0.0, 1.0);
+                lastOnsetAt = now;
+                emitted = saturatingIncrement.value(emitted);
+                action = switch(type,
+                    \pluck, { legacyAction.value(cursor) },
+                    \signalCall, { (
+                        type: type, freq: 132.0 + ((1.0 - y) * 68.0),
+                        duration: 1.5, cursorPulse: 1,
+                        pan: (x * 1.2) - 0.6, seed: randomState
+                    ) },
+                    \amTuning, { (
+                        type: type, duration: 0.9, cursorPulse: 1,
+                        pan: (x * 1.2) - 0.6, seed: randomState
+                    ) },
+                    \flint, { (
+                        type: type, scale: 0.9 + (y * 0.25),
+                        pan: (x * 1.4) - 0.7, seed: randomState
+                    ) },
+                    \relic, { (
+                        type: type, midi: notes.at((y * (notes.size - 1)).round.asInteger),
+                        pan: (x * 1.2) - 0.6, seed: randomState
+                    ) },
+                    \earth, { (
+                        type: type, duration: 1.5, cursorPulse: 1,
+                        pan: (x * 0.4) - 0.2, seed: randomState
+                    ) },
+                    \blade, { (
+                        type: type, freq: 680.0 + (y * 360.0),
+                        duration: 1.8 + (motion * 0.8),
+                        pan: (x * 1.4) - 0.7, seed: randomState
+                    ) },
+                    \bass, { (
+                        type: type, midi: bassNotes.at((y * (bassNotes.size - 1)).round.asInteger),
+                        duration: 1.2, strokes: 1, seed: randomState
+                    ) }
+                );
+            } {
+                sparseDropped = saturatingIncrement.value(sparseDropped);
+            };
+            action
+        }
     };
 
     select = { |cursor, now|
@@ -164,6 +148,8 @@
         seed: seed,
         emitted: emitted,
         sparseDropped: sparseDropped,
+        activityGap: activityGap,
+        phraseType: phraseType,
         queueDepth: 0,
         maxVoices: 8
     ) };

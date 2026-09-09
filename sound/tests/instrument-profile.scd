@@ -1,7 +1,7 @@
 (
 var assert, assertEqual, assertNil, assertThrows, profilePath, factory;
-var cursor, legacy, first, dense, emitted, snapshot, stopped, sameA, sameB, other;
-var expectedTimes, expectedTypes, cooldowns, lastByType;
+var cursor, legacy, first, dense, emitted, bassActions, snapshot, stopped, sameA, sameB, other;
+var cooldowns, lastByType, burst, actions;
 
 assert = { |condition, message|
     if(condition.not) { Error("ASSERTION FAILED: " ++ message).throw };
@@ -39,34 +39,81 @@ try {
     assert.value(legacy.at(\select).value(cursor, 10.125).notNil,
         "legacy profile leaves the existing 125ms policy admission unchanged");
 
-    // A wrong PRNG, weight boundary, cooldown, or opportunity clock changes this hand-derived sequence.
-    dense = factory.value(\stoneAndSignalV2, 20260005);
-    emitted = List.new;
-    1025.do { |tick|
-        var now = tick / 8.0;
-        var action = dense.at(\select).value(cursor, now);
-        if(action.notNil) { emitted.add([now, action.at(\type)]) };
+    // Withholding the first onset or scheduling repeats without a fresh input breaks visible write-back.
+    burst = factory.value(\stoneAndSignalV2, 1);
+    first = burst.at(\select).value(cursor, 10.0);
+    assert.value(first.notNil, "a fresh cursor activity group must respond immediately");
+    assertEqual.value(first.at(\type), \bass, "independent Park-Miller fixture begins with bass");
+    assertEqual.value(first.at(\strokes), 1, "one cursor admission can start only one bass pluck");
+    actions = List[first];
+    [10.125, 10.25, 10.375, 10.5, 10.625, 10.75].do { |now|
+        var action = burst.at(\select).value(cursor, now);
+        if(action.notNil) { actions.add(action) };
     };
-    expectedTimes = [4.0, 20.0, 24.0, 44.0, 48.0, 56.0, 60.0,
-        76.0, 84.0, 88.0, 104.0, 108.0, 116.0, 128.0];
-    expectedTypes = [\amTuning, \signalCall, \relic, \bass, \signalCall,
-        \blade, \flint, \signalCall, \earth, \flint, \bass, \flint,
-        \amTuning, \blade];
-    assertEqual.value(emitted.collect(_.at(0)), expectedTimes,
-        "dense 8Hz input keeps the fixed-seed four-second opportunity sequence");
-    assertEqual.value(emitted.collect(_.at(1)), expectedTypes,
-        "fixed seed selects every approved timbre with stable weights");
-    emitted.doAdjacentPairs { |left, right|
-        assert.value((right.at(0) - left.at(0)) >= 4.0,
-            "global spacing prevents dense cursor sound");
+    assertEqual.value(actions.size, 3, "dense 8Hz input is thinned to three fresh bass onsets in 750ms");
+    assert.value(actions.every { |action| action.at(\type) == \bass and: { action.at(\strokes) == 1 } },
+        "a continuous activity group keeps its timbre and never starts an autonomous phrase");
+    assertNil.value(burst.at(\select).value(cursor, 9.0), "backward clock input cannot retrigger sound");
+
+    // The exact idle boundary must allow a new group, while short sampling gaps keep a melody.
+    burst = factory.value(\stoneAndSignalV2, 20260909);
+    first = burst.at(\select).value(cursor, 0.0);
+    assertEqual.value(first.at(\type), \pluck, "first production group uses the original pluck");
+    assertEqual.value(burst.at(\select).value(cursor, 0.649).at(\type), \pluck,
+        "a short sampling gap does not switch the melodic unit");
+    assertEqual.value(burst.at(\select).value(cursor, 1.3).at(\type), \bass,
+        "an idle gap starts the next deterministic unit without waiting for another input");
+    burst = factory.value(\stoneAndSignalV2, 54321);
+    first = burst.at(\select).value((x: 0.5, y: 0.0, motion: 0.5), 0.0);
+    assertEqual.value(first.at(\midi), 48, "plucked melody follows the cursor's first pitch position");
+    assertEqual.value(burst.at(\select).value((x: 0.5, y: 1.0, motion: 0.5), 0.375).at(\midi), 72,
+        "later fresh positions change pitches inside the same melodic unit");
+
+    [120000, 123000, 127000].do { |seedValue|
+        var accent = factory.value(\stoneAndSignalV2, seedValue);
+        var onsets = 13.collect { |tick| accent.at(\select).value(cursor, tick / 8.0) }.reject(_.isNil);
+        assertEqual.value(onsets.size, 1, "stone, blade and relic accents do not repeat on every character");
     };
 
-    cooldowns = (signalCall: 22.0, relic: 42.0, amTuning: 48.0, flint: 12.0,
-        earth: 60.0, blade: 22.0, bass: 30.0);
+    // Each accepted carrier can repeat, but only on input, with a single-attack tail.
+    [[54321, \pluck], [90000, \amTuning], [110000, \signalCall], [116000, \earth]].do { |entry|
+        var profile = factory.value(\stoneAndSignalV2, entry.at(0));
+        var onsets = List.new;
+        13.do { |tick|
+            var action = profile.at(\select).value(cursor, tick / 8.0);
+            if(action.notNil) { onsets.add(action) };
+        };
+        assert.value(onsets.size >= 2, entry.at(1) ++ " follows continuous cursor activity");
+        assert.value(onsets.every { |action| action.at(\type) == entry.at(1) },
+            "one activity group does not randomly switch timbres between characters");
+        if([\amTuning, \signalCall, \earth].includes(entry.at(1))) {
+            assert.value(onsets.every { |action| action.at(\cursorPulse) == 1 },
+                "textures use one input-triggered attack and a natural release");
+        };
+    };
+
+    // A wrong PRNG, cooldown or idle boundary changes the independently specified phrase fixture.
+    dense = factory.value(\stoneAndSignalV2, 20260005);
+    emitted = List.new;
+    bassActions = List.new;
+    32.do { |tick|
+        var now = tick * 4.0;
+        var action = dense.at(\select).value(cursor, now);
+        if(action.notNil) {
+            emitted.add([now, action.at(\type)]);
+            if(action.at(\type) == \bass) { bassActions.add(action) };
+        };
+    };
+    assertEqual.value(emitted.copyRange(0, 3).collect(_.at(1)), [\pluck, \bass, \pluck, \blade],
+        "fixed seed selects stable types for separate activity groups");
+    assertEqual.value(emitted.size, 32, "every isolated activity group gets a fresh response");
+
+    cooldowns = (signalCall: 16.0, relic: 30.0, amTuning: 12.0, flint: 12.0,
+        earth: 24.0, blade: 18.0);
     lastByType = IdentityDictionary.new;
     emitted.do { |entry|
         var type = entry.at(1), previous = lastByType.at(type);
-        if(previous.notNil) {
+        if(previous.notNil and: { cooldowns.at(type).notNil }) {
             assert.value((entry.at(0) - previous) >= cooldowns.at(type),
                 type ++ " category cooldown is enforced");
         };
@@ -75,8 +122,19 @@ try {
     snapshot = dense.at(\snapshot).value;
     assertEqual.value(snapshot.at(\queueDepth), 0,
         "skipped cursor opportunities are never queued for replay");
-    assert.value(snapshot.at(\emitted) <= 32,
-        "four-second opportunities bound a 128-second dense input run");
+    assert.value(bassActions.every { |action| action.at(\strokes) == 1 },
+        "bass phrases contain only fresh input-triggered single plucks");
+    burst = factory.value(\stoneAndSignalV2, 1);
+    emitted = List.new;
+    12801.do { |tick|
+        var now = tick / 100.0;
+        var action = burst.at(\select).value(cursor, now);
+        if(action.notNil) { emitted.add(now) };
+    };
+    assert.value(emitted.size <= 428, "dense input cannot exceed the bounded bass onset rate");
+    emitted.doAdjacentPairs { |left, right|
+        assert.value(right - left >= 0.299, "even 100Hz input cannot stack bass attacks");
+    };
 
     // Replacing the deterministic state with ambient randomness breaks replay of identical evidence.
     sameA = factory.value(\stoneAndSignalV2, 12345);
@@ -87,8 +145,8 @@ try {
         (0..160).collect { |tick| sameB.at(\select).value(cursor, tick.asFloat) }.reject(_.isNil).collect(_[\type]),
         "same seed, cursor values, and fake times replay the same types"
     );
-    assert.value(other.at(\select).value(cursor, 0.0).isNil,
-        "candidate keeps its initial silence for every seed");
+    assert.value(other.at(\select).value(cursor, 0.0).notNil,
+        "new input groups do not wait for the old independent opportunity clock");
 
     // Removing the latch would let delayed cursor traffic sound after unified Stop.
     stopped = factory.value(\stoneAndSignalV2, 20260005);

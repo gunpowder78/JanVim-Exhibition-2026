@@ -2,7 +2,7 @@
 var assert, outputDirectory, outputPath, synthFactory, profileFactory, definitions;
 var hasDefinition, options, score, selector, instrumentGain, nodeId;
 var voiceBus = 22, wetBus = 20, finalBus = 24;
-var mixerNode = 9000, spaceNode = 9001, outputNode = 9002, stopTime = 129.0;
+var mixerNode = 9000, spaceNode = 9001, outputNode = 9002, stopTime = 121.0;
 
 assert = { |condition, message|
     if(condition.not) { Error("ASSERTION FAILED: " ++ message).throw };
@@ -25,7 +25,7 @@ try {
         definition.name == name
     }.notNil };
     [
-        \jvSignalCall, \jvSignalAM, \jvSignalFlint, \jvSignalRelic,
+        \jvPluck, \jvSignalCall, \jvSignalAM, \jvSignalFlint, \jvSignalRelic,
         \jvSignalEarth, \jvSignalBlade, \jvSignalBass, \jvSignalSpace,
         \jvMix, \jvOutput
     ].do { |name|
@@ -54,7 +54,7 @@ try {
         \inBus, finalBus, \hardware, 1]]);
 
     selector = profileFactory.value(\stoneAndSignalV2, 20260005);
-    instrumentGain = -10.dbamp;
+    instrumentGain = (-10.dbamp * 2.0).min(1.9952623);
     nodeId = 9100;
     1057.do { |tick|
         var now = tick / 8.0;
@@ -63,19 +63,30 @@ try {
             y: (tick % 13) / 12.0,
             motion: (tick % 11) / 10.0
         );
-        var action = selector.at(\select).value(cursor, now);
+        var action;
+        if(now >= (stopTime - 0.25)) { selector.at(\stop).value };
+        // Model 1.5-second editor activity followed by 2.5 seconds without input.
+        // Only the input samples can ask the production selector for an onset.
+        if((tick % 32) < 12) { action = selector.at(\select).value(cursor, now) };
         if(action.notNil) {
             var type = action.at(\type), definition, controls, usesSpace = false;
             switch(type,
+                \pluck, {
+                    definition = \jvPluck;
+                    controls = [\midi, action.at(\midi), \motion, action.at(\motion),
+                        \pan, action.at(\pan)];
+                },
                 \signalCall, {
                     definition = \jvSignalCall;
                     controls = [\freq, action.at(\freq), \duration, action.at(\duration),
-                        \pan, action.at(\pan), \seed, action.at(\seed)];
+                        \pan, action.at(\pan), \cursorPulse, action.at(\cursorPulse),
+                        \seed, action.at(\seed)];
                     usesSpace = true;
                 },
                 \amTuning, {
                     definition = \jvSignalAM;
                     controls = [\duration, action.at(\duration), \pan, action.at(\pan),
+                        \cursorPulse, action.at(\cursorPulse),
                         \seed, action.at(\seed)];
                 },
                 \flint, {
@@ -92,6 +103,7 @@ try {
                 \earth, {
                     definition = \jvSignalEarth;
                     controls = [\duration, action.at(\duration), \pan, action.at(\pan),
+                        \cursorPulse, action.at(\cursorPulse),
                         \seed, action.at(\seed)];
                 },
                 \blade, {
@@ -104,6 +116,7 @@ try {
                     definition = \jvSignalBass;
                     controls = [\midi, action.at(\midi), \duration, action.at(\duration),
                         \seed, action.at(\seed)];
+                    ("CANDIDATE_RENDER_BASS_STROKES " ++ action.at(\strokes).asString).postln;
                 },
                 { Error("unknown candidate render action").throw }
             );
@@ -120,8 +133,8 @@ try {
         "candidate renderer must not introduce an event queue");
 
     score.add([stopTime, [\n_set, mixerNode, \stop, 1]]);
-    score.add([133.45, [\n_free, outputNode]]);
-    score.add([133.48, [\c_set, 0, 0]]);
+    score.add([125.45, [\n_free, outputNode]]);
+    score.add([125.48, [\c_set, 0, 0]]);
     score.recordNRT(
         oscFilePath: outputDirectory +/+ "stone-and-signal-v2-candidate.osc",
         outputFilePath: outputPath,
@@ -130,7 +143,7 @@ try {
         headerFormat: "wav",
         sampleFormat: "int16",
         options: options,
-        duration: 133.5,
+        duration: 125.5,
         action: {
             "PASS: sound/tests/render-stone-and-signal.scd".postln;
             0.exit;

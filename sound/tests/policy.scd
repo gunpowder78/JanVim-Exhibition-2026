@@ -222,9 +222,10 @@ try {
     // and cannot be resurrected after the existing whole-show Stop.
     p = factory.value(session, nil, true, \stoneAndSignalV2, 20260005);
     p.at(\handle).value(["/janvim/sound/v1/start", session, 1, 100.0], 100.0);
-    assertNil.value(p.at(\handle).value([
+    action = p.at(\handle).value([
         "/janvim/sound/v1/cursor", session, 2, 100.0, 0.5, 0.5, 0.5
-    ], 100.0), "candidate begins with four seconds of silence");
+    ], 100.0);
+    assertEqual.value(action.at(\type), \pluck, "candidate immediately responds to its first cursor group");
     4.do { |offset|
         var now = 101.0 + offset;
         assertNil.value(p.at(\handle).value([
@@ -234,8 +235,8 @@ try {
     action = p.at(\handle).value([
         "/janvim/sound/v1/cursor", session, 7, 104.0, 0.5, 0.5, 0.5
     ], 104.0);
-    assertEqual.value(action.at(\type), \amTuning,
-        "approved profile replaces per-cursor plucks with sparse selected timbres");
+    assertEqual.value(action.at(\type), \bass,
+        "a later cursor group selects the next deterministic timbre");
     action = p.at(\handle).value([
         "/janvim/sound/v1/flock", session, 8, 104.1, 0.7, 0.25
     ], 104.1);
