@@ -317,7 +317,7 @@ try {
         -Arguments @(
             '-NoLogo', '-NoProfile', '-NonInteractive', '-File', $joint,
             '-Action', 'Sound', '-SessionFile', $sessionFile,
-            '-Listen', '-NodeExecutable', $node
+            '-Listen', '-InstrumentProfile', 'StoneAndSignalV2', '-NodeExecutable', $node
         )
     $soundIdentity = Get-DeploymentProcessIdentity -Process $soundProcess -ExpectedExecutable $powerShell
 

@@ -1,5 +1,8 @@
 # 同规格展览主机部署
 
+当前发行版为“展示版黄金极限 #002”，正式入口默认启用已通过三屏联调的光标节奏声音。
+版本身份、最终混音和上一版回退位置见 `GOLDEN-BASELINE.md`。
+
 本包用于有人值守的 Windows 11 Pro x64 三屏展演。安装根固定为
 `D:\github\JanVim-Exhibition-Deploy`，运行证据和现场配置固定写入
 `D:\VirtualData\JanVim-Exhibition-Rehearsals`。不要从源码工作树直接开演。
