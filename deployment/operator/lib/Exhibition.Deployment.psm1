@@ -647,7 +647,37 @@ function Stop-DeploymentProcessExact {
     return Wait-DeploymentProcessExit -Identity $Identity -TimeoutMs $TimeoutMs
 }
 
+function Invoke-ExhibitionPowerOff {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)] $TerminalMarker,
+        [Parameter(Mandatory = $true)][string] $ExpectedRunId,
+        [Parameter(Mandatory = $true)][int] $ExpectedControllerPid,
+        [Parameter(Mandatory = $true)][int] $ShowExitCode,
+        [Parameter(Mandatory = $true)][bool] $SoundClean,
+        [Parameter(Mandatory = $true)][bool] $ChildrenExited
+    )
+    $names = @($TerminalMarker.PSObject.Properties.Name)
+    $required = @('schema','runId','controllerRunId','controllerPid','outcome','reason')
+    if ($names.Count -ne $required.Count -or @($required | Where-Object { $_ -cnotin $names }).Count -ne 0) { throw 'poweroff-terminal-invalid' }
+    if ($TerminalMarker.schema -isnot [long] -and $TerminalMarker.schema -isnot [int]) { throw 'poweroff-terminal-invalid' }
+    if (($TerminalMarker.controllerPid -isnot [long] -and $TerminalMarker.controllerPid -isnot [int]) -or
+        $TerminalMarker.schema -ne 1 -or $TerminalMarker.runId -cne $ExpectedRunId -or
+        $TerminalMarker.controllerPid -ne $ExpectedControllerPid -or $ExpectedControllerPid -lt 1 -or
+        $TerminalMarker.controllerRunId -isnot [string] -or $TerminalMarker.controllerRunId -cnotmatch '^[A-Za-z0-9._-]{1,96}$' -or
+        $TerminalMarker.outcome -cne 'intentional-success') { throw 'poweroff-terminal-invalid' }
+    if ($ShowExitCode -ne 0 -or -not $SoundClean -or -not $ChildrenExited) { throw 'poweroff-cleanup-incomplete' }
+    if ($TerminalMarker.reason -cne 'operator-stop-poweroff') { return }
+    # Standard Windows shutdown; do not force-close unrelated applications.
+    $process = Start-Process -FilePath (Join-Path ([Environment]::GetFolderPath('Windows')) 'System32\shutdown.exe') -ArgumentList @('/s','/t','0') -WindowStyle Hidden -PassThru
+    try {
+        if (-not $process.WaitForExit(5000)) { throw 'windows-shutdown-request-timeout' }
+        if ($process.ExitCode -ne 0) { throw 'windows-shutdown-request-failed' }
+    } finally { $process.Dispose() }
+}
+
 Export-ModuleMember -Function @(
+    'Invoke-ExhibitionPowerOff',
     'Assert-DeploymentElectronRuntime',
     'Read-ExhibitionSiteDefaults',
     'Read-ProductionDisplayMap',

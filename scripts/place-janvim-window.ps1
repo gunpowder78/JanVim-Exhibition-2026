@@ -19,7 +19,9 @@ param(
     [int]$Height,
 
     [ValidateRange(1, 10000)]
-    [int]$TimeoutMs = 10000
+    [int]$TimeoutMs = 10000,
+
+    [switch]$Maximize
 )
 
 $ErrorActionPreference = 'Stop'
@@ -32,7 +34,7 @@ Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
 
-public static class JanVimExhibitionWindowV2
+public static class JanVimExhibitionWindowV3
 {
     public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
 
@@ -44,6 +46,20 @@ public static class JanVimExhibitionWindowV2
         public int Right;
         public int Bottom;
     }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct MONITORINFO { public int Size; public RECT Monitor; public RECT Work; public uint Flags; }
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool IsZoomed(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr MonitorFromWindow(IntPtr hWnd, uint flags);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool GetMonitorInfo(IntPtr monitor, ref MONITORINFO info);
 
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
@@ -95,16 +111,16 @@ $matchCount = 0
 
 while ($clock.ElapsedMilliseconds -lt $TimeoutMs) {
     $matches = [System.Collections.Generic.List[IntPtr]]::new()
-    $callback = [JanVimExhibitionWindowV2+EnumWindowsProc]{
+    $callback = [JanVimExhibitionWindowV3+EnumWindowsProc]{
         param([IntPtr]$handle, [IntPtr]$state)
 
         $windowPid = [uint32]0
-        [void][JanVimExhibitionWindowV2]::GetWindowThreadProcessId($handle, [ref]$windowPid)
-        $isVisible = [JanVimExhibitionWindowV2]::IsWindowVisible($handle)
-        $owner = [JanVimExhibitionWindowV2]::GetWindow($handle, $ownerCommand)
+        [void][JanVimExhibitionWindowV3]::GetWindowThreadProcessId($handle, [ref]$windowPid)
+        $isVisible = [JanVimExhibitionWindowV3]::IsWindowVisible($handle)
+        $owner = [JanVimExhibitionWindowV3]::GetWindow($handle, $ownerCommand)
         if ($windowPid -eq [uint32]$ChildProcessId -and $isVisible -and $owner -eq [IntPtr]::Zero) {
-            $client = [JanVimExhibitionWindowV2+RECT]::new()
-            $hasClient = [JanVimExhibitionWindowV2]::GetClientRect($handle, [ref]$client)
+            $client = [JanVimExhibitionWindowV3+RECT]::new()
+            $hasClient = [JanVimExhibitionWindowV3]::GetClientRect($handle, [ref]$client)
             $clientWidth = $client.Right - $client.Left
             $clientHeight = $client.Bottom - $client.Top
             if ($hasClient -and $clientWidth -gt 0 -and $clientHeight -gt 0) {
@@ -114,7 +130,7 @@ while ($clock.ElapsedMilliseconds -lt $TimeoutMs) {
         return $true
     }
 
-    if (-not [JanVimExhibitionWindowV2]::EnumWindows($callback, [IntPtr]::Zero)) {
+    if (-not [JanVimExhibitionWindowV3]::EnumWindows($callback, [IntPtr]::Zero)) {
         throw 'EnumWindows failed.'
     }
 
@@ -134,7 +150,7 @@ if ($window -eq [IntPtr]::Zero) {
 }
 
 $flags = $noZOrder -bor $noActivate
-if (-not [JanVimExhibitionWindowV2]::SetWindowPos(
+if (-not [JanVimExhibitionWindowV3]::SetWindowPos(
     $window,
     [IntPtr]::Zero,
     $X,
@@ -145,10 +161,18 @@ if (-not [JanVimExhibitionWindowV2]::SetWindowPos(
 )) {
     throw "SetWindowPos failed with Win32 error $([Runtime.InteropServices.Marshal]::GetLastWin32Error())."
 }
-[void][JanVimExhibitionWindowV2]::ShowWindowAsync($window, $showCommand)
+[void][JanVimExhibitionWindowV3]::ShowWindowAsync($window, $showCommand)
 
-$actual = [JanVimExhibitionWindowV2+RECT]::new()
-if (-not [JanVimExhibitionWindowV2]::GetWindowRect($window, [ref]$actual)) {
+if ($Maximize) {
+    [void][JanVimExhibitionWindowV3]::ShowWindowAsync($window, 3)
+    while (-not [JanVimExhibitionWindowV3]::IsZoomed($window) -and $clock.ElapsedMilliseconds -lt $TimeoutMs) {
+        [Threading.Thread]::Sleep(50)
+    }
+    if (-not [JanVimExhibitionWindowV3]::IsZoomed($window)) { throw 'janvim-maximize-timeout' }
+}
+
+$actual = [JanVimExhibitionWindowV3+RECT]::new()
+if (-not [JanVimExhibitionWindowV3]::GetWindowRect($window, [ref]$actual)) {
     throw "GetWindowRect failed with Win32 error $([Runtime.InteropServices.Marshal]::GetLastWin32Error())."
 }
 
@@ -157,8 +181,8 @@ $receipt = [ordered]@{
     pid = $ChildProcessId
     matchedWindowCount = $matchCount
     hwnd = ('0x{0:X16}' -f $window.ToInt64())
-    visible = [JanVimExhibitionWindowV2]::IsWindowVisible($window)
-    owned = [JanVimExhibitionWindowV2]::GetWindow($window, $ownerCommand) -ne [IntPtr]::Zero
+    visible = [JanVimExhibitionWindowV3]::IsWindowVisible($window)
+    owned = [JanVimExhibitionWindowV3]::GetWindow($window, $ownerCommand) -ne [IntPtr]::Zero
     requested = [ordered]@{
         x = $X
         y = $Y
@@ -173,4 +197,14 @@ $receipt = [ordered]@{
     }
 }
 
+if ($Maximize) {
+    $monitor = [JanVimExhibitionWindowV3]::MonitorFromWindow($window, [uint32]0)
+    $info = [JanVimExhibitionWindowV3+MONITORINFO]::new()
+    $info.Size = [Runtime.InteropServices.Marshal]::SizeOf($info)
+    if ($monitor -eq [IntPtr]::Zero -or -not [JanVimExhibitionWindowV3]::GetMonitorInfo($monitor, [ref]$info)) { throw 'janvim-monitor-unavailable' }
+    $receipt.maximized = [JanVimExhibitionWindowV3]::IsZoomed($window)
+    $receipt.monitorBounds = [ordered]@{ x=$info.Monitor.Left; y=$info.Monitor.Top; width=$info.Monitor.Right-$info.Monitor.Left; height=$info.Monitor.Bottom-$info.Monitor.Top }
+    $receipt.workingArea = [ordered]@{ x=$info.Work.Left; y=$info.Work.Top; width=$info.Work.Right-$info.Work.Left; height=$info.Work.Bottom-$info.Work.Top }
+    if ($info.Monitor.Left -ne $X -or $info.Monitor.Top -ne $Y -or $info.Monitor.Right-$info.Monitor.Left -ne $Width -or $info.Monitor.Bottom-$info.Monitor.Top -ne $Height) { throw 'janvim-maximized-on-wrong-monitor' }
+}
 $receipt | ConvertTo-Json -Depth 4 -Compress

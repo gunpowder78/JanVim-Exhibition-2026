@@ -426,6 +426,10 @@ try {
         showExitCode = $showExitCode
         soundClean = $true
     } | ConvertTo-Json -Compress
+
+    # Power off only after the complete show/sound/Jianshan cleanup above succeeded.
+    $terminal = Read-DeploymentJson -Path (Join-Path $showRoot 'controller-terminal.json') -MaximumBytes 4096 -Reason 'controller-terminal'
+    Invoke-ExhibitionPowerOff -TerminalMarker $terminal -ExpectedRunId ([IO.Path]::GetFileName($showRoot)) -ExpectedControllerPid $controllerIdentity.pid -ShowExitCode $showExitCode -SoundClean $summary.clean -ChildrenExited $true
 }
 catch {
     $failure = $_.Exception.Message

@@ -358,7 +358,7 @@ export function resolveAutomaticDisplayMap(
   snapshot: ConfigurationSnapshot,
   savedBytes: Uint8Array | undefined,
   capturedAtUtc: string,
-): { bytes: Buffer; source: "saved-map" | "default-left-to-right" } {
+): { bytes: Buffer; source: "saved-map" | "saved-geometry" | "default-left-to-right" } {
   if (snapshot.displays.length < 3) {
     throw new Error("Exhibition requires at least three extended displays");
   }
@@ -377,15 +377,32 @@ export function resolveAutomaticDisplayMap(
   catch { saved = undefined; }
   const applicable = saved?.mode === "production-3" && saved.layoutSha256 === layout.layoutSha256 &&
     saved.bindings.every(binding => snapshot.displays.some(display => display.displayId === binding.displayId));
+  // Electron IDs can change across Windows boots. Reuse technician roles only
+  // when every saved desktop area still has one exact, unique counterpart.
+  const geometryKey = (display: DisplayMapPhysicalSnapshot): string => JSON.stringify([
+    display.bounds.x, display.bounds.y, display.bounds.width, display.bounds.height,
+    display.scaleFactor, display.rotation,
+  ]);
+  const byGeometry = new Map(snapshot.displays.map(display => [geometryKey(display), display]));
+  const savedDisplays = saved === undefined ? [] : [...saved.bindings, ...saved.unassignedDisplays];
+  const geometryApplicable = saved?.mode === "production-3" &&
+    saved.layoutSha256 === layout.layoutSha256 && savedDisplays.length === snapshot.displays.length &&
+    byGeometry.size === snapshot.displays.length &&
+    new Set(savedDisplays.map(geometryKey)).size === savedDisplays.length &&
+    savedDisplays.every(display => byGeometry.has(geometryKey(display)));
+  const rebindGeometry = geometryApplicable && saved !== undefined && saved.bindings.some(binding =>
+    byGeometry.get(geometryKey(binding))!.displayId !== binding.displayId);
   const ordered = [...snapshot.displays].sort((a, b) => a.bounds.x - b.bounds.x || a.bounds.y - b.bounds.y);
-  const bindings = applicable && saved !== undefined
-    ? saved.bindings.map(({ softId, displayId }) => ({ softId, displayId }))
+  const bindings = rebindGeometry && saved !== undefined
+    ? saved.bindings.map(binding => ({ softId: binding.softId, displayId: byGeometry.get(geometryKey(binding))!.displayId }))
+    : applicable && saved !== undefined
+      ? saved.bindings.map(({ softId, displayId }) => ({ softId, displayId }))
     : SOFT_ROLE_ORDER.map((softId, index) => ({ softId, displayId: ordered[index]!.displayId }));
   return {
     bytes: buildDisplayMapBytes(layout, snapshot, {
       mode: "production-3", topologySha256: snapshot.topologySha256, bindings,
     }, capturedAtUtc),
-    source: applicable ? "saved-map" : "default-left-to-right",
+    source: rebindGeometry ? "saved-geometry" : applicable ? "saved-map" : "default-left-to-right",
   };
 }
 

@@ -239,6 +239,45 @@ function receipt(overrides: Partial<WindowPlacementReceipt> = {}): WindowPlaceme
 }
 
 describe("JanVim PID window placement contract", () => {
+  windowsIt("maximizes a real Windows window on the requested monitor", async () => {
+    const probe = spawnSync("pwsh", ["-NoProfile", "-Command", "Add-Type -AssemblyName System.Windows.Forms; $r=[Windows.Forms.Screen]::PrimaryScreen.Bounds; @{x=$r.X;y=$r.Y;width=$r.Width;height=$r.Height}|ConvertTo-Json -Compress"], { encoding: "utf8", windowsHide: true });
+    expect(probe.status, probe.stderr).toBe(0);
+    const bounds = JSON.parse(probe.stdout);
+    const fixtureRoot = mkdtempSync(join(tmpdir(), "janvim-maximize-fixture-"));
+    const fixturePath = join(fixtureRoot, "window-fixture.ps1");
+    const stopPath = join(fixtureRoot, "stop");
+    writeFileSync(fixturePath, windowFixture, "utf8");
+    const fixture = spawn("pwsh", ["-NoProfile", "-File", fixturePath, "-StopPath", stopPath], { stdio: "pipe", windowsHide: false });
+    try {
+      await waitForReady(fixture);
+      const result = spawnSync("pwsh", ["-NoProfile", "-File", join(process.cwd(), "scripts/place-janvim-window.ps1"), "-ChildProcessId", String(fixture.pid), "-X", String(bounds.x), "-Y", String(bounds.y), "-Width", String(bounds.width), "-Height", String(bounds.height), "-Maximize"], { encoding: "utf8", windowsHide: true, timeout: 15_000 });
+      expect(result.status, result.stderr).toBe(0);
+      expect(JSON.parse(result.stdout)).toMatchObject({ maximized: true, monitorBounds: bounds });
+    } finally { await closeFixture(fixture, stopPath); rmSync(fixtureRoot, { recursive: true, force: true }); }
+  }, 25_000);
+
+  it("requests native maximization and validates the resulting monitor instead of treating border expansion as failure", async () => {
+    const maximizedTarget = { ...target, maximize: true };
+    const result = await placeJanVimWindow({
+      helperPath: "D:\\show\\scripts\\place-janvim-window.ps1", target: maximizedTarget,
+      runHelper: async invocation => {
+        expect(invocation.args).toContain("-Maximize");
+        return { exitCode: 0, stderr: "", stdout: JSON.stringify(receipt({
+          maximized: true, monitorBounds: target.bounds,
+          workingArea: { x: 0, y: 0, width: 1920, height: 1032 },
+          actual: { x: -8, y: -8, width: 1936, height: 1048 },
+        })) };
+      },
+    });
+    expect(result.ok).toBe(true);
+  });
+
+  it("rejects a merely enlarged or wrongly located window when native maximization is required", () => {
+    const maximizedTarget = { ...target, maximize: true };
+    expect(validateWindowPlacementReceipt(receipt(), maximizedTarget).ok).toBe(false);
+    expect(validateWindowPlacementReceipt(receipt({ maximized: true, monitorBounds: { ...target.bounds, x: 1920 }, workingArea: target.bounds }), maximizedTarget).ok).toBe(false);
+  });
+
   it("passes only the just-created child PID and target rectangle as separate arguments", () => {
     const invocation = createWindowPlacementInvocation({
       helperPath: "D:\\show\\scripts\\place-janvim-window.ps1",

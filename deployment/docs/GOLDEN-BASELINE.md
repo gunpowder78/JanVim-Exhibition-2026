@@ -1,5 +1,10 @@
 # 展示版黄金极限 #002
 
+当前安装可为基于 #002 的美术馆现场维护版，实际身份以包内 `evidence/source-identities.json`
+为准。维护版增加重启设备 ID 变化时按完整桌面几何恢复人工映射、JanVim 原生最大化，
+并将 Ctrl+Shift+S 改为完整退出后关机；STOP SHOW 仍只退出展示。下文的 #002 标签和
+归档保持原件，不把维护版新增行为归给旧黄金包。日常操作以本包操作说明为准。
+
 2026-09-09，用户确认完整三屏“画面和整体声音都正常”，授权正式固化为本版本。
 声音实现基点为 `b5fbadb43cdcc70b4303b533bcb1a6ead195fea9`；本包完整源码身份以
 `evidence/source-identities.json` 为准，包与 ZIP 的身份以外部 `deployment-handoff.json` 为准。
