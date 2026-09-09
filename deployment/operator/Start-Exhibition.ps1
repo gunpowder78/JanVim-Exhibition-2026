@@ -238,9 +238,10 @@ $sessionFile = ''
 $soundRoot = ''
 $runRoot = ''
 $pointerWritten = $false
+$launchMutex = $null
 
 try {
-    if (Test-Path -LiteralPath $pointerPath) { throw 'active-deployment-already-exists' }
+    $launchMutex = Enter-ExhibitionLaunchGuard
 
     # Allocate evidence before preflight: login failures must survive a closing console.
     $runId = 'deployment-{0}-{1}' -f `
@@ -254,6 +255,12 @@ try {
         verificationTimeoutMs = 240000
     } | ConvertTo-Json -Compress))
     Write-Host "正在校验展演部署；进度记录：$runRoot"
+
+    if (Test-Path -LiteralPath $pointerPath) {
+        $bootTimeUtc = (Get-CimInstance Win32_OperatingSystem -OperationTimeoutSec 5 -ErrorAction Stop).LastBootUpTime.ToUniversalTime()
+        $recovery = Restore-ExhibitionStartupAfterReboot -Path $pointerPath -ArchiveRoot $runRoot -BootTimeUtc $bootTimeUtc
+        $recovery | ConvertTo-Json -Compress | Set-Content -LiteralPath (Join-Path $runRoot 'reboot-recovery.json') -Encoding utf8
+    }
 
     # Deployment stage: verify
     # A cold manifest read has its own 120 s deadline. The complete verifier also
@@ -488,7 +495,13 @@ catch {
     throw $failure
 }
 finally {
-    foreach ($process in @($showProcess, $jianshanProcess, $soundProcess)) {
-        if ($null -ne $process) { $process.Dispose() }
+    try {
+        foreach ($process in @($showProcess, $jianshanProcess, $soundProcess)) {
+            if ($null -ne $process) { $process.Dispose() }
+        }
+    } finally {
+        if ($null -ne $launchMutex) {
+            try { $launchMutex.ReleaseMutex() } finally { $launchMutex.Dispose() }
+        }
     }
 }

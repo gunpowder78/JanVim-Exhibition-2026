@@ -491,6 +491,55 @@ function Remove-ActiveDeploymentPointer {
     Remove-Item -LiteralPath $resolved -Force
 }
 
+function Enter-ExhibitionLaunchGuard {
+    [CmdletBinding()]
+    param()
+    $guard = [Threading.Mutex]::new($false, 'Global\JanVimExhibitionDeployment')
+    try {
+        $owned = $false
+        try { $owned = $guard.WaitOne(0) }
+        catch [Threading.AbandonedMutexException] { $owned = $true }
+        if (-not $owned) { throw 'exhibition-launch-already-running' }
+        return $guard
+    } catch {
+        $guard.Dispose()
+        throw
+    }
+}
+
+function Restore-ExhibitionStartupAfterReboot {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string] $Path,
+        [Parameter(Mandatory = $true)][string] $ArchiveRoot,
+        [Parameter(Mandatory = $true)][datetime] $BootTimeUtc
+    )
+
+    $resolved = Resolve-DeploymentAbsolutePath -Path $Path -Reason 'active-deployment'
+    if (-not (Test-Path -LiteralPath $resolved)) { return }
+    $pointer = Read-ActiveDeploymentPointer -Path $resolved
+    $boot = $BootTimeUtc.ToUniversalTime()
+    $item = Get-Item -LiteralPath $resolved -Force -ErrorAction Stop
+    # Only a previous Windows boot proves that all original processes are gone.
+    # Current-boot and inconsistent records remain fail-closed, including reused PIDs.
+    if ($item.LastWriteTimeUtc -ge $boot) { throw 'active-deployment-already-exists' }
+    foreach ($name in @('soundWrapper','jianshan','showWrapper','controller')) {
+        $identity = $pointer.$name
+        if ($null -eq $identity) { continue }
+        $started = [DateTimeOffset]::ParseExact($identity.startedAtUtc, 'o', [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind).UtcDateTime
+        if ($started -ge $boot) { throw 'active-deployment-already-exists' }
+    }
+    $archiveDirectory = Resolve-DeploymentAbsolutePath -Path $ArchiveRoot -Reason 'recovery-archive'
+    $directory = Get-Item -LiteralPath $archiveDirectory -Force -ErrorAction Stop
+    if (-not $directory.PSIsContainer -or ($directory.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'recovery-archive-invalid' }
+    $archive = [IO.Path]::GetFullPath((Join-Path $archiveDirectory 'previous-active-deployment.json'))
+    if ([IO.Path]::GetDirectoryName($archive) -ine $archiveDirectory -or (Test-Path -LiteralPath $archive)) { throw 'recovery-archive-invalid' }
+    # Caller holds the launch mutex until the whole show exits. Preserve exact bytes;
+    # do not read old session/control files, stop unrelated processes or restore maps.
+    Move-Item -LiteralPath $resolved -Destination $archive -ErrorAction Stop
+    return [pscustomobject]@{status='previous-boot-marker-preserved';archivePath=$archive}
+}
+
 function Get-DeploymentProcessIdentity {
     [CmdletBinding()]
     param(
@@ -677,6 +726,8 @@ function Invoke-ExhibitionPowerOff {
 }
 
 Export-ModuleMember -Function @(
+    'Enter-ExhibitionLaunchGuard',
+    'Restore-ExhibitionStartupAfterReboot',
     'Invoke-ExhibitionPowerOff',
     'Assert-DeploymentElectronRuntime',
     'Read-ExhibitionSiteDefaults',
