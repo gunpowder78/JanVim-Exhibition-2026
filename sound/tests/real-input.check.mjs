@@ -165,7 +165,8 @@ test("strict schema, Show ID bounds, int32 sequence, identity and generation rej
   input.attach(identity);
   for (const extra of [{ seq: 0 }, { seq: 2147483648 }, { seq: 1.5 },
     { generationId: 0 }, { generationId: 2147483648 }, { generationId: 1.5 },
-    { elapsedMs: -1 }, { elapsedMs: Infinity }, { elapsedMs: 3600001 },
+    { elapsedMs: -1 }, { elapsedMs: NaN }, { elapsedMs: Infinity },
+    { elapsedMs: Number.MAX_SAFE_INTEGER + 1 }, { elapsedMs: Number.MAX_VALUE },
     { loopId: "x".repeat(65) }, { loopId: "bad space" }, { loopId: "界" }, { loopId: "loop-1\n" },
     { controllerRunId: "wrong" }, { text: "private" }, { x: 0 }]) {
     assert.equal(input.accept(heartbeat(1, 0, extra)), false, JSON.stringify(extra));
@@ -184,15 +185,28 @@ test("strict schema, Show ID bounds, int32 sequence, identity and generation rej
     { ...ids, loopId: "x".repeat(64), generationId: 2147483647 })), true);
 });
 
-test("source elapsed accepts the one-hour boundary with a continuously renewed fake-clock lease", async () => {
-  const { input, at } = await fixture();
-  input.attach(identity);
-  for (let seconds = 0; seconds <= 3600; seconds += 1) {
-    at(seconds * 1000);
-    assert.equal(input.accept(heartbeat(seconds + 1, seconds * 1000)), true);
+test("source heartbeat and cursor survive 24 hours until Stop, disconnect, or lease expiry", async () => {
+  for (const reason of ["show-stop", "source-disconnect", "producer-timeout"]) {
+    const { input, at, stopped } = await fixture();
+    input.attach(identity);
+    let seq = 0;
+    for (let elapsedMs = 0; elapsedMs <= 86_400_000; elapsedMs += 1000) {
+      at(elapsedMs);
+      assert.equal(input.accept(heartbeat(++seq, elapsedMs)), true, `heartbeat at ${elapsedMs}`);
+      assert.equal(input.accept(cursor(++seq, elapsedMs)), true, `cursor at ${elapsedMs}`);
+      assert.deepEqual(input.take().map(event => event.kind), ["heartbeat", "cursor"]);
+    }
+    assert.equal(input.isShowAuthorized(), true);
+    assert.deepEqual(stopped, []);
+    assert.equal(input.accept(cursor(++seq, 86_400_000)), true);
+    if (reason === "producer-timeout") at(86_402_000);
+    else input.close(reason);
+    assert.deepEqual(input.take(), []);
+    assert.equal(input.isShowAuthorized(), false);
+    assert.equal(input.accept(heartbeat(seq + 1, 86_402_000)), false);
+    input.close();
+    assert.deepEqual(stopped, [reason]);
   }
-  assert.equal(input.accept(cursor(3602, 3600000)), true);
-  assert.equal(notes(input.take()).length, 1);
 });
 
 test("source close latches Stop and cannot be replaced or revived", async () => {

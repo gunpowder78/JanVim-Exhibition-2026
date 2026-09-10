@@ -436,7 +436,11 @@ try {
     }
     Write-CurrentPointer
 
-    if (-not $showProcess.WaitForExit(([int]$plan.durationSeconds + 120) * 1000)) {
+    if ($plan.durationSeconds -eq 0) {
+        # Continuous exhibition: controller Stop owns normal termination.
+        $showProcess.WaitForExit()
+    }
+    elseif (-not $showProcess.WaitForExit(([int]$plan.durationSeconds + 120) * 1000)) {
         throw 'show-wrapper-timeout'
     }
     $showExitCode = $showProcess.ExitCode

@@ -162,13 +162,13 @@ Add-Check -Name 'JanVim 固定产物' -Passed ($runtimeVerification.ExitCode -eq
 
 $electron = Join-Path $packageRoot 'app\apps\controller\dist\main\electron-main.js'
 Assert-FileIdentity `
-    -Path $electron -Bytes 556427 `
-    -Sha256 '9d5fdc13099e77f9d0e1c64d9a880714c95a214e4d8e911041a5ffe8645e6e31' `
+    -Path $electron -Bytes 556446 `
+    -Sha256 'ffdc4e82119206ad07ef7079cce0b677d22fa93f8263978f7e69a51a8dcbf08f' `
     -Label 'electron-main'
 Add-Check -Name '控制器 Electron bundle' -Passed $true -Detail '字节数与 SHA-256 匹配'
 
 $jianshanFiles = @(
-    @('runtime\jianshan\jianshan.exe', 9799168, 'ac160b7eb4e34c52906b151aed441ea683ad093d89e59459b5ecb12c3055770f'),
+    @('runtime\jianshan\jianshan.exe', 9818112, '07d0ba1cbdba692fe4919476799219d698ce11469be5abb5f954a561c8dfb526'),
     @('runtime\jianshan\jianshan-flock-v1.toml', 6238, '510398aeff0f567bf351aa2ce025cbb6989a6865328115f726032549821a3fae'),
     @('runtime\jianshan\jianshan.toml', 5894, '9b83e9d471cfbde76224b8c565ccd9fd4427c143c65201d36312f966bb9e56cf'),
     @('runtime\jianshan\assets\gpu_rankings.toml', 4099, '503ab9637470722f3ce2766c6820667f99c27ee952a119239d6da537410d9932'),

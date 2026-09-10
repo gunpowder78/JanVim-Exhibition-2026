@@ -351,6 +351,45 @@ describe("optional Show sound client", () => {
     for (const event of ["connect", "data", "drain", "error", "close"]) expect(socket.listenerCount(event)).toBe(0);
     expect(clock.jobs.size).toBe(0);
   });
+  it.each(["show-stop", "source-disconnect"])("sends heartbeat and cursor for 24 hours and cleans up on %s", async reason => {
+    const p = await peer(); let socket!: Socket;
+    const { client, clock, diagnostics } = setup(p.root, () => (socket = new Socket()));
+    client.start(); await until(() => p.frames.length === 2);
+    // Capture the transport boundary so a fake day does not flood a real TCP buffer.
+    let latest: Frame | undefined;
+    let heartbeatCount = 0;
+    const capture = vi.spyOn(socket, "write").mockImplementation(((data: string) => {
+      latest = JSON.parse(data) as Frame;
+      if (latest.command === "heartbeat") heartbeatCount++;
+      return true;
+    }) as Socket["write"]);
+    client.beginLoop(1, "loop-1");
+    client.observe(observation(1));
+    for (let second = 1; second <= 86_400; second++) {
+      clock.advance(1000);
+      if (second % 3600 === 0 || second === 3601) {
+        expect(latest).toMatchObject({ command: "heartbeat", elapsedMs: second * 1000 });
+        client.observe(observation(second + 1, { cellCol: second, viewCol: 10 }));
+        expect(latest).toMatchObject({ command: "cursor", elapsedMs: second * 1000 });
+      }
+    }
+    expect(heartbeatCount).toBe(86_401);
+    expect(diagnostics).toEqual([]);
+    capture.mockRestore();
+    if (reason === "show-stop") {
+      client.stop(reason);
+      await until(() => p.frames.some(frame => frame.command === "stop"));
+      clock.advance(300);
+    } else {
+      p.sockets[0]!.destroy();
+    }
+    await until(() => socket.listenerCount("close") === 0);
+    expect(socket.destroyed).toBe(true);
+    expect(clock.jobs.size).toBe(0);
+    const count = p.frames.length;
+    client.beginLoop(2, "late"); client.observe(observation(100_000)); clock.advance(1000);
+    expect(p.frames).toHaveLength(count);
+  });
   it("expires a paused producer heartbeat and releases timers when the peer closes", async () => {
     const p = await peer(); const { client, clock, diagnostics } = setup(p.root); client.start(); await until(() => p.frames.length === 2);
     clock.advance(2000); await until(() => p.sockets[0]!.destroyed);

@@ -194,7 +194,7 @@ Import-Module (Join-Path $source 'deployment\operator\lib\Exhibition.Deployment.
 $electronRuntime = Assert-DeploymentElectronRuntime -AppRoot $source
 
 $candidateIdentities = @(
-    @('jianshan-rust\jianshan.exe', 9799168, 'ac160b7eb4e34c52906b151aed441ea683ad093d89e59459b5ecb12c3055770f'),
+    @('jianshan-rust\jianshan.exe', 9818112, '07d0ba1cbdba692fe4919476799219d698ce11469be5abb5f954a561c8dfb526'),
     @('jianshan-rust\jianshan-flock-v1.toml', 6238, '510398aeff0f567bf351aa2ce025cbb6989a6865328115f726032549821a3fae'),
     @('public\models\hand_landmarker.task', 7819105, 'fbc2a30080c3c557093b5ddfc334698132eb341044ccee322ccf8bcf3607cde1')
 )
@@ -256,7 +256,7 @@ $sourceEvidence = [ordered]@{
     fixedInstallRoot = $fixedInstallRoot
     electronMain = [ordered]@{ bytes = $electronItem.Length; sha256 = $electronHash }
     electronRuntime = $electronRuntime
-    jianshan = [ordered]@{ bytes = 9799168; sha256 = $candidateIdentities[0][2] }
+    jianshan = [ordered]@{ bytes = 9818112; sha256 = $candidateIdentities[0][2] }
     node = [ordered]@{ version = 'v22.23.0'; bytes = 86988616; sha256 = $expectedNodeHash }
 }
 [IO.File]::WriteAllText(
@@ -293,7 +293,7 @@ $receipt = [ordered]@{
         coreBytes = $artifactLock.coreBytes
         coreSha256 = $artifactLock.coreSha256
     }
-    jianshan = [ordered]@{ bytes = 9799168; sha256 = $candidateIdentities[0][2] }
+    jianshan = [ordered]@{ bytes = 9818112; sha256 = $candidateIdentities[0][2] }
     node = [ordered]@{ version = 'v22.23.0'; bytes = 86988616; sha256 = $expectedNodeHash }
     acceptance = 'awaiting-mini-pc-attended-acceptance'
 }

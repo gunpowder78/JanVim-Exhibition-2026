@@ -16,7 +16,7 @@ const SNAPSHOT_KEYS = ["epoch", "revision", "closed", "expiresAtMs"];
 function validFrame(frame) {
   return exactKeys(frame, frame?.state === "sample" ? SAMPLE_KEYS : DATA_KEYS) &&
     frame.version === 1 && frame.command === "flock" && id(frame.sourceId) &&
-    positiveInteger(frame.seq) && positiveInteger(frame.epoch) && bounded(frame.sampledAtMs, 3600000) &&
+    positiveInteger(frame.seq) && positiveInteger(frame.epoch) && bounded(frame.sampledAtMs, Number.MAX_SAFE_INTEGER) &&
     ["sample", "empty", "unavailable"].includes(frame.state) &&
     (frame.state !== "sample" || [frame.energy, frame.centroidX].every(v => bounded(v, 1)));
 }

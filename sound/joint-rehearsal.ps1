@@ -24,7 +24,7 @@ param(
 
     [string] $DisplayMapPath,
 
-    [ValidateRange(1, 3600)]
+    [ValidateRange(0, 3600)]
     [int] $Duration = 600,
 
     [switch] $Listen,
@@ -233,7 +233,7 @@ function Read-OperatorSession {
         -not (Test-JsonInteger -Value $session.version) -or [long]$session.version -ne 1 -or
         $session.sessionId -isnot [string] -or $session.sessionId -cnotmatch '^\d{8}T\d{9}Z-[0-9a-f]{12}$' -or
         -not (Test-JsonInteger -Value $session.duration) -or
-        [long]$session.duration -lt 1 -or [long]$session.duration -gt 3600
+        [long]$session.duration -lt 0 -or [long]$session.duration -gt 3600
     ) {
         throw 'operator session schema invalid'
     }
@@ -276,7 +276,7 @@ function Assert-ReadyShape {
         -not (Test-JsonInteger -Value $Ready.version) -or [long]$Ready.version -ne 1 -or
         $Ready.runRoot -isnot [string] -or -not (Test-SamePath -Left $Ready.runRoot -Right $SoundRoot) -or
         -not (Test-JsonInteger -Value $Ready.duration) -or
-        [long]$Ready.duration -lt 1 -or [long]$Ready.duration -gt 3600 -or
+        [long]$Ready.duration -lt 0 -or [long]$Ready.duration -gt 3600 -or
         $Ready.mode -isnot [string] -or $Ready.mode -cnotin @('silent', 'listen') -or
         -not (Test-JsonInteger -Value $Ready.nodePid) -or [long]$Ready.nodePid -lt 1 -or
         $Ready.nodeExecutable -isnot [string] -or -not [IO.Path]::IsPathFullyQualified($Ready.nodeExecutable) -or

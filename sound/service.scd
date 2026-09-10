@@ -146,12 +146,14 @@ if(argv.size < 4 or: { argv.size > 6 }) {
         argumentError = "invalidArguments";
     };
     if(argumentError.isNil and: {
-        finiteFloat.value(duration).not or: { duration < 1 or: { duration > 3600 } }
+        validDurationText.not or: { finiteFloat.value(duration).not or: {
+            if(duration == 0) { durationText != "0" } { duration < 1 or: { duration > 3600 } }
+        } }
     }) {
         argumentError = "invalidDuration";
     };
     if(argumentError.isNil and: {
-        capturePath.isString.not or: { capturePath.notEmpty and: { duration > (120 - 1.5) } }
+        capturePath.isString.not or: { capturePath.notEmpty and: { duration == 0 or: { duration > (120 - 1.5) } } }
     }) {
         argumentError = "invalidCapture";
     };
@@ -702,10 +704,13 @@ setupApplication = {
                                 if(phase == \ready) { emitStats.value };
                             };
                         }.play(AppClock);
-                        durationTask = Routine {
-                            duration.wait;
-                            beginStop.value("duration", true);
-                        }.play(AppClock);
+                        // Exhibition duration 0 is owned by the existing Stop/lease path.
+                        if(duration > 0) {
+                            durationTask = Routine {
+                                duration.wait;
+                                beginStop.value("duration", true);
+                            }.play(AppClock);
+                        };
                     };
                 } {
                     abortStartup.value("ownershipLost");

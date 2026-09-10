@@ -2,7 +2,7 @@
 param(
     [switch] $Listen,
 
-    [ValidateRange(1, 3600)]
+    [ValidateRange(0, 3600)]
     [double] $Duration = 45,
 
     [string] $RunRoot,
@@ -20,6 +20,9 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+if ($Duration -eq 0 -and $SoundInput -ne 'RealCursor') {
+    throw 'Duration 0 (until Stop) requires -Input RealCursor'
+}
 if ($FlockIngress -and $SoundInput -ne 'RealCursor') {
     throw 'FlockIngress requires -Input RealCursor'
 }

@@ -278,6 +278,18 @@ test("Prepare creates unique external roots, copies map bytes, and leaves planne
   assert.equal(second.session.duration, 321);
 });
 
+test("continuous session preserves zero duration through Prepare, Sound and READY validation", async t => {
+  const fixture = await makeFixture(t);
+  const selected = await prepareSession(t, fixture, { duration: 0 });
+  assert.equal(selected.session.duration, 0);
+  const sound = await fixture.run(["-Action", "Sound", "-SessionFile", selected.sessionFile]);
+  assert.equal(sound.exitCode, 0, sound.stderr);
+  assert.equal((await captureRecords(fixture))[0].duration, 0);
+  await writeReady(selected);
+  const show = await fixture.run(["-Action", "Show", "-SessionFile", selected.sessionFile]);
+  assert.equal(show.exitCode, 0, show.stderr);
+});
+
 test("Sound uses the selected session rather than newest state, stays silent by default, and forwards explicit Listen", async t => {
   const fixture = await makeFixture(t);
   const selected = await prepareSession(t, fixture, { duration: 73 });

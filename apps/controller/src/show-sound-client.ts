@@ -259,7 +259,7 @@ export function createShowSoundClient(options: ShowSoundClientOptions): ShowSoun
   const send = (command: "heartbeat" | "cursor", at: number, features?: { x: number; y: number; motion: number }): boolean => {
     if (attachedAt === undefined || receipt === undefined) return false;
     const elapsedMs = at - attachedAt;
-    if (sequence >= INT32_MAX || elapsedMs < sentElapsed || elapsedMs > 3_600_000 || !Number.isFinite(elapsedMs)) {
+    if (sequence >= INT32_MAX || elapsedMs < sentElapsed || elapsedMs > Number.MAX_SAFE_INTEGER || !Number.isFinite(elapsedMs)) {
       disable("sound-clock-or-sequence-exhausted"); return false;
     }
     const sent = write({ command, token: receipt.token, runId: options.runId,

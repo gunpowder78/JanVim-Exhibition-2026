@@ -92,7 +92,7 @@ export function parseFlockFrame(bytes) {
   const frame = parseFlatJson(bytes);
   if (!exactKeys(frame, frame?.state === "sample" ? SAMPLE_KEYS : DATA_KEYS) ||
       frame.version !== 1 || frame.command !== "flock" || !sourceId(frame.sourceId) ||
-      !int32(frame.seq) || !int32(frame.epoch) || !bounded(frame.sampledAtMs, 3600000) ||
+      !int32(frame.seq) || !int32(frame.epoch) || !bounded(frame.sampledAtMs, Number.MAX_SAFE_INTEGER) ||
       !["sample", "empty", "unavailable"].includes(frame.state) ||
       (frame.state === "sample" && ![frame.energy, frame.centroidX].every(v => bounded(v, 1)))) return null;
   return frame;

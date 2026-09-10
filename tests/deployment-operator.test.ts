@@ -294,7 +294,7 @@ describe("attended deployment operator module", () => {
     expect(result.status, result.stderr).toBe(0);
     expect(JSON.parse(result.stdout)).toMatchObject({
       audioOutputDevice: "Windows WASAPI : Speakers (Realtek High Definition Audio)",
-      durationSeconds: 3600,
+      durationSeconds: 0,
     });
   });
 
@@ -324,7 +324,7 @@ describe("attended deployment operator module", () => {
       siteConfigRoot:
         "D:\\VirtualData\\JanVim-Exhibition-Rehearsals\\site-config",
       audioOutputDevice: "Windows WASAPI : Speakers (Realtek High Definition Audio)",
-      durationSeconds: 3600,
+      durationSeconds: 0,
     });
     for (const name of [
       "Start-Exhibition.ps1",

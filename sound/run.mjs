@@ -67,8 +67,9 @@ export function parseCli(argv) {
   }
   if (!/^(?:0|[1-9]\d*)(?:\.\d+)?$/.test(values.duration)) invalid("duration is malformed");
   const duration = Number(values.duration);
-  if (!Number.isFinite(duration) || duration < 1 || duration > 3600) {
-    invalid("duration must be from 1 through 3600 seconds");
+  if (!Number.isFinite(duration) || (duration === 0
+    ? values.input !== "real-cursor" : duration < 1 || duration > 3600)) {
+    invalid("duration must be 1 through 3600 seconds, or 0 for real-cursor until Stop");
   }
   if (values.output !== null && !path.isAbsolute(values.output)) {
     invalid("output must be absolute");
@@ -82,6 +83,18 @@ export function parseCli(argv) {
     ...(seen.has("--flock-input") ? { flockInput: "enabled" } : {}),
     ...(values["instrument-profile"] === "stone-and-signal-v2"
       ? { instrumentProfile: "stone-and-signal-v2" } : {}),
+  };
+}
+
+// Zero is an explicit exhibition lifetime, never a large/overflowing timer.
+export const durationExpired = (duration, elapsed) => duration > 0 && elapsed >= duration;
+export function runTiming(duration) {
+  const serviceDuration = duration === 0 ? 0 : Math.min(3600, duration + 5);
+  return {
+    serviceDuration,
+    senderDuration: duration === 3600 ? 3599.75 : duration,
+    serviceTimeoutMs: duration === 0 ? 0 : Math.ceil((serviceDuration + 45) * 1000),
+    senderTimeoutMs: duration === 0 ? 0 : Math.ceil((duration + 10) * 1000),
   };
 }
 
@@ -681,6 +694,8 @@ export async function spawnManagedChild({
   let limitReason = null;
   let stdoutBytes = 0;
   let stderrBytes = 0;
+  let streamWindowAt = performance.now();
+  const streamWindowBytes = { stdout: 0, stderr: 0 };
   let terminating = null;
   let identity = null;
   const pending = { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
@@ -708,6 +723,17 @@ export async function spawnManagedChild({
   if (ownedLifetime) child.stdin.on("error", () => setLimit("lifetimePipe"));
 
   function consume(name, chunk, callback, log) {
+    // Continuous services retain bounded logs and a per-second output budget;
+    // ordinary periodic diagnostics must not exhaust a lifetime byte allowance.
+    if (timeoutMs === 0) {
+      const now = performance.now();
+      if (now - streamWindowAt >= 1000) {
+        streamWindowAt = now;
+        streamWindowBytes.stdout = 0;
+        streamWindowBytes.stderr = 0;
+      }
+      streamWindowBytes[name] += chunk.length;
+    }
     log.write(chunk);
     if (name === "stdout") stdoutBytes += chunk.length;
     else stderrBytes += chunk.length;
@@ -744,12 +770,12 @@ export async function spawnManagedChild({
       offset = newline + 1;
     }
     const total = name === "stdout" ? stdoutBytes : stderrBytes;
-    if (total > maxStreamBytes) setLimit(`${name}Stream`);
+    if ((timeoutMs === 0 ? streamWindowBytes[name] : total) > maxStreamBytes) setLimit(`${name}Stream`);
   }
 
   child.stdout.on("data", (chunk) => consume("stdout", chunk, onStdoutLine, stdoutLog));
   child.stderr.on("data", (chunk) => consume("stderr", chunk, onStderrLine, stderrLog));
-  const timeout = setTimeout(() => setLimit("timeout"), timeoutMs);
+  const timeout = timeoutMs === 0 ? null : setTimeout(() => setLimit("timeout"), timeoutMs);
 
   const completion = new Promise((resolve) => {
     child.once("close", (exitCode, signal) => {
@@ -1271,7 +1297,7 @@ async function runInternalSender() {
   const timelineStart = performance.now();
   while (!stopping) {
     const elapsed = (performance.now() - timelineStart) / 1000;
-    if (stopRequested || elapsed >= config.duration) {
+    if (stopRequested || durationExpired(config.duration, elapsed)) {
       return finishStop(stopRequested ? "requested" : "duration");
     }
     // One request in flight; constant-size input and watermark. This sender
@@ -1327,9 +1353,10 @@ async function runSupervisor(options) {
   let senderFallbackTimer;
   let orphanReclaimed = false;
   const resourceAggregate = { maxLivePlucks: 0, maxPlucks: 0, maxWorkingSet: {}, samples: 0 };
-  const captureEnabled = options.mode === "silent" && options.duration + 5 <= 118.5;
+  const captureEnabled = options.duration > 0 && options.mode === "silent" && options.duration + 5 <= 118.5;
   const capturePath = captureEnabled ? path.join(runRoot, "capture.wav") : "";
-  const serviceDuration = Math.min(3600, options.duration + 5);
+  const timing = runTiming(options.duration);
+  const serviceDuration = timing.serviceDuration;
   let summary = null;
 
   const record = (source, type, body, atPerformance = performance.now()) => {
@@ -1444,7 +1471,7 @@ async function runSupervisor(options) {
       },
       stderrPath: path.join(runRoot, "sclang.stderr.log"),
       stdoutPath: path.join(runRoot, "sclang.stdout.log"),
-      timeoutMs: Math.ceil((serviceDuration + 45) * 1000),
+      timeoutMs: timing.serviceTimeoutMs,
     });
 
     await withTimeout(
@@ -1484,7 +1511,7 @@ async function runSupervisor(options) {
       maxStreamBytes: 131072,
       stderrPath: path.join(runRoot, "sender.stderr.log"),
       stdoutPath: path.join(runRoot, "sender.stdout.log"),
-      timeoutMs: Math.ceil((options.duration + 10) * 1000),
+      timeoutMs: timing.senderTimeoutMs,
     });
     const senderIdentity = await inspectProcess(sender.child.pid);
     if (senderIdentity.parentPid !== process.pid) {
@@ -1508,7 +1535,7 @@ async function runSupervisor(options) {
       if (message.type === "finished") senderFinished = true;
     });
     sendIpc(sender.child, {
-      duration: options.duration === 3600 ? 3599.75 : options.duration,
+      duration: timing.senderDuration,
       session,
       type: "initialize",
       siteMix: siteMix.take(),

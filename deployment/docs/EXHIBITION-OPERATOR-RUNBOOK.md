@@ -3,7 +3,8 @@
 当前版本：**#002 的美术馆现场维护版**（屏序持久化、JanVim 最大化、快捷键退出后关机）。
 原始黄金 #002 保留为回退点；当前源码身份以 `evidence/source-identities.json` 为准。
 电贝司、拨弦、寻台和地音跟随文字回写；
-停写后只保留尾音。现场最终面板混音为 Wind `+6 dB`、Instrument `-2 dB`。
+停写后只保留尾音。2026-09-10 读取的现场活动混音为 Wind `+6 dB`、Instrument `-6 dB`。
+启动时沿用外部保存值；包内 9 月 9 日较早的混音快照仅供历史核对。
 无需在启动命令中增加声音参数，正式入口已固定该版本。
 
 适用对象：现场值守人员和技术人员。适用主机：PELADN WO4。固定部署目录：
@@ -91,7 +92,7 @@ pwsh -NoProfile -File 'D:\github\JanVim-Exhibition-Deploy\operator\Start-Exhibit
 
 ## 四、运行中值守
 
-1. 工作人员必须在场。单场最长 3,600 秒，到时正常关闭并开新场。
+1. 正式展演按原 90 秒循环持续运行，没有一小时自动结束；闭馆时由工作人员人工停止。
 2. 观察三个画面持续更新；《见山》应保持在 `SCREEN-3` 无边框全屏。
 3. 确认拨弦和风声都可听见，音量舒适且没有持续爆音。
 4. 不修改源诗、媒体、TOML、部署文件或用户 Neovim 配置。
@@ -112,7 +113,7 @@ pwsh -NoProfile -File 'D:\github\JanVim-Exhibition-Deploy\operator\Start-Exhibit
    `showExitCode: 0` 和 `soundClean: true` 对应的完成信息。
 4. 黄色提示应保持到 B 屏关闭；确认淡出后没有复响，三个展演画面均已关闭。
 5. 快捷键路径在以上步骤及《见山》、声音服务清理成功后请求 Windows 正常关机。
-   错误退出、清理失败和一小时到时退出不自动关机；不要直接断电。
+   错误退出和清理失败不自动关机；不要直接断电。
 
 准备下一场时，重新执行“开演前验证”，看到 `DEPLOYMENT_VERIFY_PASS` 后再启动。
 

@@ -18,6 +18,7 @@
 | 用户 | `hxj` 交互会话 |
 | 权限 | Highest |
 | 重复实例 | `IgnoreNew` |
+| 运行时间限制 | `PT0S`（不按运行时长结束任务；2026-09-10 实机核对） |
 | 程序 | PowerShell 7.6.5 `pwsh.exe` |
 | 参数 | `-NoLogo -NoProfile -WindowStyle Minimized -File "D:\github\JanVim-Exhibition-Deploy\operator\Start-Exhibition.ps1"` |
 | 工作目录 | `D:\github\JanVim-Exhibition-Deploy` |

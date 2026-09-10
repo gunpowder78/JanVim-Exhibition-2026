@@ -238,7 +238,7 @@ function New-ExhibitionLaunchPlan {
     param(
         [Parameter(Mandatory = $true)][string] $PackageRoot,
         [Parameter(Mandatory = $true)][string] $DisplayMapPath,
-        [ValidateRange(1, 3600)][int] $DurationSeconds = 3600
+        [ValidateRange(0, 3600)][int] $DurationSeconds = 0
     )
 
     $resolvedPackage = Resolve-DeploymentAbsolutePath -Path $PackageRoot -Reason 'package-root'
@@ -292,7 +292,7 @@ function Read-ExhibitionSiteDefaults {
         $value.audioOutputDevice -isnot [string] -or
         $value.audioOutputDevice -cne 'Windows WASAPI : Speakers (Realtek High Definition Audio)' -or
         -not (Test-DeploymentInteger -Value $value.durationSeconds) -or
-        [int64]$value.durationSeconds -ne 3600
+        [int64]$value.durationSeconds -notin @(0, 3600)
     ) {
         throw 'site-defaults-invalid'
     }

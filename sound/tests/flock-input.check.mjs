@@ -245,15 +245,42 @@ test("producer sequence/epoch overflow disables without wrap and revision is ind
   }
 });
 
-test("sample time includes one hour but rejects values outside the frozen range", () => {
+test("sample input and codec continue beyond one hour through 24 hours until closed", () => {
+  for (const reason of ["show-stop", "source-disconnect"]) {
+    const { input, at, disabled } = fixture();
+    let seq = 0;
+    for (const sampledAtMs of [0, 3_600_000, 3_600_000.001, 7_200_000, 86_400_000]) {
+      at(1000 + sampledAtMs);
+      const frame = sample({ seq: ++seq, sampledAtMs });
+      assert.deepEqual(parseFlockFrame(bytes(frame)), frame);
+      assert.equal(input.accept(frame), true);
+      if (sampledAtMs !== 3_600_000.001) {
+        assert.equal(take(input).kind, "flock-live");
+      }
+    }
+    assert.deepEqual(disabled, []);
+    input.close(reason);
+    assert.equal(take(input).kind, "flock-mute");
+    assert.equal(take(input), null);
+    assert.equal(input.accept(sample({ seq: seq + 1, sampledAtMs: 86_400_000 })), false);
+    input.close(reason);
+    assert.deepEqual(disabled, [reason]);
+  }
+});
+
+test("sample time has a finite safe-number bound and retains its original freshness deadline", () => {
   const { input, at } = fixture();
-  at(3601000);
-  assert.equal(input.accept(sample({ sampledAtMs: 3600000 })), true);
-  assert.deepEqual(take(input), live({ expiresAtMs: 3601500 }));
-  assert.equal(input.accept(sample({ seq: 2, sampledAtMs: 3600000.001 })), false);
-  assert.equal(input.accept(sample({ seq: 2, sampledAtMs: -1 })), false);
-  assert.equal(input.snapshot().expiresAtMs, 3601500);
-  at(3601500);
+  at(86_401_000);
+  assert.equal(input.accept(sample({ sampledAtMs: 86_400_000 })), true);
+  assert.deepEqual(take(input), live({ expiresAtMs: 86_401_500 }));
+  for (const sampledAtMs of [-1, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1, Number.MAX_VALUE]) {
+    assert.equal(input.accept(sample({ seq: 2, sampledAtMs })), false);
+    assert.equal(parseFlockFrame(bytes(sample({ sampledAtMs }))), null);
+  }
+  const maximum = sample({ sampledAtMs: Number.MAX_SAFE_INTEGER });
+  assert.deepEqual(parseFlockFrame(bytes(maximum)), maximum);
+  assert.equal(input.snapshot().expiresAtMs, 86_401_500);
+  at(86_401_500);
   assert.equal(take(input).kind, "flock-mute");
 });
 
@@ -412,7 +439,7 @@ test("codec accepts only the frozen sample and non-sample fieldsets without coer
   for (const extra of [{ state: "empty" }, { state: "unavailable" }, { state: "other" },
     { seq: 0 }, { seq: 2147483648 }, { seq: 1.1 }, { seq: "1" }, { epoch: 0 },
     { epoch: 2147483648 }, { version: true }, { sourceId: "A".repeat(32) }, { sourceId: sourceId + "\n" },
-    { sampledAtMs: -1 }, { sampledAtMs: 3600000.001 }, { energy: null },
+    { sampledAtMs: -1 }, { sampledAtMs: Number.MAX_SAFE_INTEGER + 1 }, { energy: null },
     { energy: 1.001 }, { centroidX: -0.001 }, { centroidX: {} }, { energy: [] },
     { command: "stop" }, { extra: true }]) assert.equal(parseFlockFrame(bytes(sample(extra))), null);
   assert.equal(parseFlockFrame(bytes(silent("empty", { energy: 0, centroidX: 0 }))), null);
