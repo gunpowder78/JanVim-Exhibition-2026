@@ -518,15 +518,19 @@ describe("offline JanVim artifact scripts", () => {
     expect(existsSync(join(mutated.root, "runtime", "janvim"))).toBe(false);
   });
 
-  it("rejects checksum disagreement, an unconfirmed show layout, and an existing runtime", () => {
+  it("rejects checksum disagreement", () => {
     const badChecksum = makeFixture();
     writeText(badChecksum.checksum, `${"0".repeat(64)}  ${ARCHIVE_NAME}\n`);
     expectFailure(prepareFromArchive(badChecksum), /archive-checksum-mismatch/i);
+  });
 
+  it("rejects an unconfirmed show layout", () => {
     const unconfirmed = makeFixture();
     writeShowConfig(unconfirmed.showConfig, "unconfirmed");
     expectFailure(prepareFromArchive(unconfirmed), /show-layout-unconfirmed/i);
+  });
 
+  it("preserves an existing runtime when refusing installation", () => {
     const occupied = makeFixture();
     const sentinel = join(occupied.root, "runtime", "janvim", "sentinel.txt");
     writeText(sentinel, "preserve me\n");

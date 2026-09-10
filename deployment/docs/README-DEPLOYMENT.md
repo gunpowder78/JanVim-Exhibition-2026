@@ -1,5 +1,9 @@
 # 同规格展览主机部署
 
+当前发行版为“#002 的美术馆现场维护版”，正式入口保留已通过三屏联调的光标节奏声音，
+并增加屏序持久化、JanVim 原生最大化和快捷键退出后关机。黄金 #002 原包保持可回退。
+版本身份、最终混音和上一版回退位置见 `GOLDEN-BASELINE.md`。
+
 本包用于有人值守的 Windows 11 Pro x64 三屏展演。安装根固定为
 `D:\github\JanVim-Exhibition-Deploy`，运行证据和现场配置固定写入
 `D:\VirtualData\JanVim-Exhibition-Rehearsals`。不要从源码工作树直接开演。
@@ -66,7 +70,8 @@ pwsh -NoProfile -File 'D:\github\JanVim-Exhibition-Deploy\operator\Start-Exhibit
 C 屏、无标题栏、无任务栏、无需按 F 的无边框全屏并永久置顶。A 屏持续长文回写，B 屏显示
 叙事和声音控制；鼠标进入或移动到 B 屏后显示，再移动时会重新显示。若静止 20 秒后仍未隐藏，
 把指针移到 B 屏空白处单击一次即可隐藏，不要点击控制按钮。正常停止首选点击 B 屏
-一次 `STOP SHOW`；也可按一次 `Ctrl+Shift+S`。B 屏中央出现黄色退出提示后，等待当前循环
+一次 `STOP SHOW`（只退出展示）；需要退出后关闭小主机时按一次 `Ctrl+Shift+S`。
+B 屏中央出现黄色退出提示后，等待当前循环
 到复位边界、声音淡出和启动命令返回，不要重复停止。
 
 每次会话最多 3,600 秒，且需要工作人员在场。本包不声明断网、强制恢复、HP 性能、热插拔

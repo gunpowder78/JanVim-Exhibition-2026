@@ -2440,6 +2440,7 @@ describe("show run coordinator", () => {
       ok: true,
       reason: "operator-stop",
     });
+    expect(harness.terminalMarkers).toEqual([{ ok: true, reason: "operator-stop", powerOffRequested: true }]);
     expect(harness.coordinator.diagnostics().transitions).toEqual([
       { from: "booting", to: "ready" },
       { from: "ready", to: "shutting-down", reason: "operator-stop" },
@@ -2478,6 +2479,7 @@ describe("show run coordinator", () => {
       ok: true,
       reason: "operator-stop",
     });
+    expect(harness.terminalMarkers).toEqual([{ ok: true, reason: "operator-stop", powerOffRequested: true }]);
   });
 
   it("publishes and records an accepted Narrative Stop while waiting for the reset boundary", async () => {
@@ -2507,6 +2509,7 @@ describe("show run coordinator", () => {
       ok: true,
       reason: "operator-stop",
     });
+    expect(harness.terminalMarkers).toEqual([{ ok: true, reason: "operator-stop" }]);
   });
 
   it("shuts down instead of recovering when the session fails after Stop is queued", async () => {

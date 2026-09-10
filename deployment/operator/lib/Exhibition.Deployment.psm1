@@ -238,7 +238,7 @@ function New-ExhibitionLaunchPlan {
     param(
         [Parameter(Mandatory = $true)][string] $PackageRoot,
         [Parameter(Mandatory = $true)][string] $DisplayMapPath,
-        [ValidateRange(1, 3600)][int] $DurationSeconds = 3600
+        [ValidateRange(0, 3600)][int] $DurationSeconds = 0
     )
 
     $resolvedPackage = Resolve-DeploymentAbsolutePath -Path $PackageRoot -Reason 'package-root'
@@ -292,7 +292,7 @@ function Read-ExhibitionSiteDefaults {
         $value.audioOutputDevice -isnot [string] -or
         $value.audioOutputDevice -cne 'Windows WASAPI : Speakers (Realtek High Definition Audio)' -or
         -not (Test-DeploymentInteger -Value $value.durationSeconds) -or
-        [int64]$value.durationSeconds -ne 3600
+        [int64]$value.durationSeconds -notin @(0, 3600)
     ) {
         throw 'site-defaults-invalid'
     }
@@ -491,6 +491,55 @@ function Remove-ActiveDeploymentPointer {
     Remove-Item -LiteralPath $resolved -Force
 }
 
+function Enter-ExhibitionLaunchGuard {
+    [CmdletBinding()]
+    param()
+    $guard = [Threading.Mutex]::new($false, 'Global\JanVimExhibitionDeployment')
+    try {
+        $owned = $false
+        try { $owned = $guard.WaitOne(0) }
+        catch [Threading.AbandonedMutexException] { $owned = $true }
+        if (-not $owned) { throw 'exhibition-launch-already-running' }
+        return $guard
+    } catch {
+        $guard.Dispose()
+        throw
+    }
+}
+
+function Restore-ExhibitionStartupAfterReboot {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string] $Path,
+        [Parameter(Mandatory = $true)][string] $ArchiveRoot,
+        [Parameter(Mandatory = $true)][datetime] $BootTimeUtc
+    )
+
+    $resolved = Resolve-DeploymentAbsolutePath -Path $Path -Reason 'active-deployment'
+    if (-not (Test-Path -LiteralPath $resolved)) { return }
+    $pointer = Read-ActiveDeploymentPointer -Path $resolved
+    $boot = $BootTimeUtc.ToUniversalTime()
+    $item = Get-Item -LiteralPath $resolved -Force -ErrorAction Stop
+    # Only a previous Windows boot proves that all original processes are gone.
+    # Current-boot and inconsistent records remain fail-closed, including reused PIDs.
+    if ($item.LastWriteTimeUtc -ge $boot) { throw 'active-deployment-already-exists' }
+    foreach ($name in @('soundWrapper','jianshan','showWrapper','controller')) {
+        $identity = $pointer.$name
+        if ($null -eq $identity) { continue }
+        $started = [DateTimeOffset]::ParseExact($identity.startedAtUtc, 'o', [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind).UtcDateTime
+        if ($started -ge $boot) { throw 'active-deployment-already-exists' }
+    }
+    $archiveDirectory = Resolve-DeploymentAbsolutePath -Path $ArchiveRoot -Reason 'recovery-archive'
+    $directory = Get-Item -LiteralPath $archiveDirectory -Force -ErrorAction Stop
+    if (-not $directory.PSIsContainer -or ($directory.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'recovery-archive-invalid' }
+    $archive = [IO.Path]::GetFullPath((Join-Path $archiveDirectory 'previous-active-deployment.json'))
+    if ([IO.Path]::GetDirectoryName($archive) -ine $archiveDirectory -or (Test-Path -LiteralPath $archive)) { throw 'recovery-archive-invalid' }
+    # Caller holds the launch mutex until the whole show exits. Preserve exact bytes;
+    # do not read old session/control files, stop unrelated processes or restore maps.
+    Move-Item -LiteralPath $resolved -Destination $archive -ErrorAction Stop
+    return [pscustomobject]@{status='previous-boot-marker-preserved';archivePath=$archive}
+}
+
 function Get-DeploymentProcessIdentity {
     [CmdletBinding()]
     param(
@@ -647,7 +696,39 @@ function Stop-DeploymentProcessExact {
     return Wait-DeploymentProcessExit -Identity $Identity -TimeoutMs $TimeoutMs
 }
 
+function Invoke-ExhibitionPowerOff {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)] $TerminalMarker,
+        [Parameter(Mandatory = $true)][string] $ExpectedRunId,
+        [Parameter(Mandatory = $true)][int] $ExpectedControllerPid,
+        [Parameter(Mandatory = $true)][int] $ShowExitCode,
+        [Parameter(Mandatory = $true)][bool] $SoundClean,
+        [Parameter(Mandatory = $true)][bool] $ChildrenExited
+    )
+    $names = @($TerminalMarker.PSObject.Properties.Name)
+    $required = @('schema','runId','controllerRunId','controllerPid','outcome','reason')
+    if ($names.Count -ne $required.Count -or @($required | Where-Object { $_ -cnotin $names }).Count -ne 0) { throw 'poweroff-terminal-invalid' }
+    if ($TerminalMarker.schema -isnot [long] -and $TerminalMarker.schema -isnot [int]) { throw 'poweroff-terminal-invalid' }
+    if (($TerminalMarker.controllerPid -isnot [long] -and $TerminalMarker.controllerPid -isnot [int]) -or
+        $TerminalMarker.schema -ne 1 -or $TerminalMarker.runId -cne $ExpectedRunId -or
+        $TerminalMarker.controllerPid -ne $ExpectedControllerPid -or $ExpectedControllerPid -lt 1 -or
+        $TerminalMarker.controllerRunId -isnot [string] -or $TerminalMarker.controllerRunId -cnotmatch '^[A-Za-z0-9._-]{1,96}$' -or
+        $TerminalMarker.outcome -cne 'intentional-success') { throw 'poweroff-terminal-invalid' }
+    if ($ShowExitCode -ne 0 -or -not $SoundClean -or -not $ChildrenExited) { throw 'poweroff-cleanup-incomplete' }
+    if ($TerminalMarker.reason -cne 'operator-stop-poweroff') { return }
+    # Standard Windows shutdown; do not force-close unrelated applications.
+    $process = Start-Process -FilePath (Join-Path ([Environment]::GetFolderPath('Windows')) 'System32\shutdown.exe') -ArgumentList @('/s','/t','0') -WindowStyle Hidden -PassThru
+    try {
+        if (-not $process.WaitForExit(5000)) { throw 'windows-shutdown-request-timeout' }
+        if ($process.ExitCode -ne 0) { throw 'windows-shutdown-request-failed' }
+    } finally { $process.Dispose() }
+}
+
 Export-ModuleMember -Function @(
+    'Enter-ExhibitionLaunchGuard',
+    'Restore-ExhibitionStartupAfterReboot',
+    'Invoke-ExhibitionPowerOff',
     'Assert-DeploymentElectronRuntime',
     'Read-ExhibitionSiteDefaults',
     'Read-ProductionDisplayMap',

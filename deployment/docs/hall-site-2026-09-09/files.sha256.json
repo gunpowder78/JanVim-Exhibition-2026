@@ -1,0 +1,12 @@
+[
+  {
+    "path": "display-map.json",
+    "sha256": "6736cb1d459b6cf56885429582defa3b287d87e537576f70de8c11047da9ce6b",
+    "bytes": 1703
+  },
+  {
+    "path": "sound-mix-v1.json",
+    "sha256": "a1e3f92ef293ea6486106cc9de9d336488a3eb8dc330aeacdb701ef78ca29be6",
+    "bytes": 50
+  }
+]

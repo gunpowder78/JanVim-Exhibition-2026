@@ -30,6 +30,7 @@ param(
     [string] $RunRoot,
     [Alias('Input')][string] $SoundInput,
     [switch] $FlockIngress,
+    [ValidateSet('LegacyPluckV1', 'StoneAndSignalV2')][string] $InstrumentProfile = 'LegacyPluckV1',
     [string] $NodeExecutable
 )
 $record = [ordered]@{
@@ -41,6 +42,7 @@ $record = [ordered]@{
     flockIngress = [bool]$FlockIngress
 }
 if (-not [string]::IsNullOrWhiteSpace($NodeExecutable)) { $record.nodeExecutable = $NodeExecutable }
+if ($InstrumentProfile -ne 'LegacyPluckV1') { $record.instrumentProfile = $InstrumentProfile }
 [IO.File]::AppendAllText($env:JOINT_CAPTURE, (($record | ConvertTo-Json -Compress) + [Environment]::NewLine))
 if ($env:JOINT_SOUND_EXIT) { exit [int]$env:JOINT_SOUND_EXIT }
 exit 0
@@ -276,6 +278,18 @@ test("Prepare creates unique external roots, copies map bytes, and leaves planne
   assert.equal(second.session.duration, 321);
 });
 
+test("continuous session preserves zero duration through Prepare, Sound and READY validation", async t => {
+  const fixture = await makeFixture(t);
+  const selected = await prepareSession(t, fixture, { duration: 0 });
+  assert.equal(selected.session.duration, 0);
+  const sound = await fixture.run(["-Action", "Sound", "-SessionFile", selected.sessionFile]);
+  assert.equal(sound.exitCode, 0, sound.stderr);
+  assert.equal((await captureRecords(fixture))[0].duration, 0);
+  await writeReady(selected);
+  const show = await fixture.run(["-Action", "Show", "-SessionFile", selected.sessionFile]);
+  assert.equal(show.exitCode, 0, show.stderr);
+});
+
 test("Sound uses the selected session rather than newest state, stays silent by default, and forwards explicit Listen", async t => {
   const fixture = await makeFixture(t);
   const selected = await prepareSession(t, fixture, { duration: 73 });
@@ -285,10 +299,20 @@ test("Sound uses the selected session rather than newest state, stays silent by 
   assert.equal(silent.exitCode, 0, `Sound should delegate successfully: ${silent.stderr}`);
   const listening = await fixture.run(["-Action", "Sound", "-SessionFile", selected.sessionFile, "-Listen"]);
   assert.equal(listening.exitCode, 0, `explicit Listen should delegate successfully: ${listening.stderr}`);
+  const candidate = await fixture.run(["-Action", "Sound", "-SessionFile", selected.sessionFile,
+    "-Listen", "-InstrumentProfile", "StoneAndSignalV2"]);
+  assert.equal(candidate.exitCode, 0, `candidate profile should delegate successfully: ${candidate.stderr}`);
+  const caseVariant = await fixture.run(["-Action", "Sound", "-SessionFile", selected.sessionFile,
+    "-Listen", "-InstrumentProfile", "stoneandsignalv2"]);
+  assert.equal(caseVariant.exitCode, 0, "ValidateSet's accepted casing must preserve the selected candidate");
 
   assert.deepEqual(await captureRecords(fixture), [
     { launcher: "start-sound", listen: false, duration: 73, runRoot: selected.soundRoot, input: "RealCursor", flockIngress: true },
     { launcher: "start-sound", listen: true, duration: 73, runRoot: selected.soundRoot, input: "RealCursor", flockIngress: true },
+    { launcher: "start-sound", listen: true, duration: 73, runRoot: selected.soundRoot, input: "RealCursor", flockIngress: true,
+      instrumentProfile: "StoneAndSignalV2" },
+    { launcher: "start-sound", listen: true, duration: 73, runRoot: selected.soundRoot, input: "RealCursor", flockIngress: true,
+      instrumentProfile: "StoneAndSignalV2" },
   ]);
 });
 

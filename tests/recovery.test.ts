@@ -844,6 +844,7 @@ function createComposedHost(options: {
             owned: false,
             requested,
             actual: requested,
+            ...(args.includes("-Maximize") ? { maximized: true, monitorBounds: requested, workingArea: requested } : {}),
           }),
           stderr: "",
         };

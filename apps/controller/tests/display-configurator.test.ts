@@ -512,6 +512,30 @@ describe("automatic exhibition display selection", () => {
     expect(map.bindings.every(binding => binding.workingArea.height === 1000)).toBe(true);
   });
 
+  it("preserves manual roles after reboot replaces every ID but leaves the full desktop geometry unchanged", () => {
+    const changed = RAW_DISPLAYS.map(display => ({ ...display, id: `boot-${display.id}`, label: "hdmi", workArea: { ...display.workArea, height: 1080 } }));
+    const before = Buffer.from(saved);
+    const result = resolveAutomaticDisplayMap(layout, captureConfigurationSnapshot(changed.reverse()), saved, utc);
+    expect(result.source).toBe("saved-geometry");
+    expect(parseDisplayMap(result.bytes).bindings.map(binding => binding.displayId)).toEqual(["boot-C", "boot-A", "boot-B"]);
+    expect(saved.equals(before)).toBe(true);
+  });
+
+  it("does not reuse saved geometry when a reboot also changes a screen's scale", () => {
+    const changed = RAW_DISPLAYS.map(display => ({ ...display, id: `boot-${display.id}` }));
+    changed[0]!.scaleFactor = 2;
+    const result = resolveAutomaticDisplayMap(layout, captureConfigurationSnapshot(changed), saved, utc);
+    expect(result.source).toBe("default-left-to-right");
+    expect(parseDisplayMap(result.bytes).bindings.map(binding => binding.displayId)).toEqual(["boot-A", "boot-B", "boot-C"]);
+  });
+
+  it("keeps exhibition roles at saved positions when a reboot recycles IDs onto other screens", () => {
+    const changed = RAW_DISPLAYS.map((display, index) => ({ ...display, id: ["B", "C", "A"][index]! }));
+    const result = resolveAutomaticDisplayMap(layout, captureConfigurationSnapshot(changed), saved, utc);
+    expect(result.source).toBe("saved-geometry");
+    expect(parseDisplayMap(result.bytes).bindings.map(binding => binding.displayId)).toEqual(["A", "B", "C"]);
+  });
+
   it.each([
     { displays: RAW_DISPLAYS.slice(0, 2) },
     { displays: [rawDisplay("A", "mirror", 0), rawDisplay("B", "mirror", 0), RAW_DISPLAYS[2]] },

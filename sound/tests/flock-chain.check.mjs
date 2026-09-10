@@ -403,7 +403,8 @@ for (const disconnect of [false, true]) {
       }
       const sources = {};
       for (const file of ["sound/run.mjs", "sound/flock-input.mjs", "sound/flock-protocol.mjs", "sound/real-input.mjs",
-        "sound/osc.mjs", "sound/policy.scd", "sound/service.scd", "sound/synths.scd", "sound/tests/flock-chain.check.mjs"]) {
+        "sound/osc.mjs", "sound/policy.scd", "sound/instrument-profile.scd", "sound/service.scd",
+        "sound/synths.scd", "sound/tests/flock-chain.check.mjs"]) {
         sources[file] = hash(await readFile(path.join(root, file)));
       }
       const proof = { producer: "SYNTHETIC Show and flock fixtures; actual supervisor/TCP/sender/SC",

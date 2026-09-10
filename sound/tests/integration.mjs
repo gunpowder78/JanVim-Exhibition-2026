@@ -569,7 +569,7 @@ test("PowerShell start and stop wrappers work from an unrelated cwd with no prel
   }
 });
 
-test("PowerShell wrappers accept and use one explicit absolute Node executable", async () => {
+test("PowerShell wrappers preserve candidate identity with one explicit absolute Node executable", async () => {
   const runRoot = freshRunRoot("wrappers-explicit-node");
   const start = spawnCaptured(
     "pwsh.exe",
@@ -582,6 +582,10 @@ test("PowerShell wrappers accept and use one explicit absolute Node executable",
       runRoot,
       "-Duration",
       "30",
+      "-Input",
+      "RealCursor",
+      "-InstrumentProfile",
+      "StoneAndSignalV2",
       "-NodeExecutable",
       process.execPath,
     ],
@@ -593,6 +597,7 @@ test("PowerShell wrappers accept and use one explicit absolute Node executable",
       path.resolve(ready.nodeExecutable).toLowerCase(),
       path.resolve(process.execPath).toLowerCase(),
     );
+    assert.equal(ready.instrumentProfile, "stone-and-signal-v2");
     const stop = spawnCaptured(
       "pwsh.exe",
       [
@@ -611,6 +616,8 @@ test("PowerShell wrappers accept and use one explicit absolute Node executable",
     assert.equal(stopResult.exitCode, 0, stopResult.stdout + stopResult.stderr);
     const startResult = await waitForCompletion(start, 20_000);
     assert.equal(startResult.exitCode, 0, startResult.stdout + startResult.stderr);
+    const summary = await waitForJson(path.join(runRoot, "summary.json"), start);
+    assert.equal(summary.instrumentProfile, "stone-and-signal-v2");
   } finally {
     await terminateOwnedTree(start);
   }

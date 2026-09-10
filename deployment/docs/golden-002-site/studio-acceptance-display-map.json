@@ -1,0 +1,71 @@
+{
+  "schema": 2,
+  "mappingStatus": "confirmed",
+  "mode": "production-3",
+  "layoutSha256": "469002e89b3ed6b0357b082520efd01f2f4626a480c996faa61fb61bef97ef9b",
+  "capturedAtUtc": "2026-09-09T06:17:41.941Z",
+  "topologySha256": "2a41b2eea936f5b068f288867af379f2d22ba1ba7ed35c20c0176cf99c3a070a",
+  "bindings": [
+    {
+      "softId": "SCREEN-1",
+      "displayId": "779793126",
+      "label": "DELL S2309W",
+      "bounds": {
+        "x": 0,
+        "y": 0,
+        "width": 1920,
+        "height": 1080
+      },
+      "workingArea": {
+        "x": 0,
+        "y": 0,
+        "width": 1920,
+        "height": 1032
+      },
+      "scaleFactor": 1,
+      "rotation": 0,
+      "geometrySha256": "189ad4c2c89e0b0686b0e28fca1a4cd45ff5a03394d056adf65fb7815ca73587"
+    },
+    {
+      "softId": "SCREEN-2",
+      "displayId": "3513127176",
+      "label": "Mi TV",
+      "bounds": {
+        "x": 1920,
+        "y": 0,
+        "width": 1920,
+        "height": 1080
+      },
+      "workingArea": {
+        "x": 1920,
+        "y": 0,
+        "width": 1920,
+        "height": 1032
+      },
+      "scaleFactor": 1,
+      "rotation": 0,
+      "geometrySha256": "5ac5f80f3c9955b87dd5f289fff239cb6203e6da7f177041facf7beb6b445a24"
+    },
+    {
+      "softId": "SCREEN-3",
+      "displayId": "407237437",
+      "label": "DELL U2410",
+      "bounds": {
+        "x": 3840,
+        "y": -133,
+        "width": 1920,
+        "height": 1200
+      },
+      "workingArea": {
+        "x": 3840,
+        "y": -133,
+        "width": 1920,
+        "height": 1152
+      },
+      "scaleFactor": 1,
+      "rotation": 0,
+      "geometrySha256": "9b6420d16f8a66c88e80c941304f1831b0def88f1bdc5045b5016425e17abdd3"
+    }
+  ],
+  "unassignedDisplays": []
+}

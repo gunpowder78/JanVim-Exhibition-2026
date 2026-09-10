@@ -571,7 +571,7 @@ function createCoordinator(
           controllerRunId: command.controllerRunId,
           controllerPid: host.source.controllerProcess.pid,
           outcome: result.ok ? "intentional-success" : "intentional-failure",
-          reason: result.reason,
+          reason: result.ok && result.powerOffRequested === true ? "operator-stop-poweroff" : result.reason,
         },
         signal,
       );
@@ -2259,6 +2259,7 @@ class RuntimeShowSession implements ShowRunSession {
       helperPath: this.options.paths.windowPlacementScript,
       target: {
         pid: child.pid,
+        maximize: true,
         bounds: requireDisplayRole(
           this.options.inputs.displayRoute,
           "SCREEN-1",

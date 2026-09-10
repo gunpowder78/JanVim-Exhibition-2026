@@ -5,6 +5,7 @@ import type { Rectangle } from "./display-router";
 export interface PlacementTarget {
   pid: number;
   bounds: Rectangle;
+  maximize?: boolean;
 }
 
 export interface WindowPlacementReceipt {
@@ -16,6 +17,9 @@ export interface WindowPlacementReceipt {
   owned: boolean;
   requested: Rectangle;
   actual: Rectangle;
+  maximized?: boolean;
+  monitorBounds?: Rectangle;
+  workingArea?: Rectangle;
 }
 
 export interface WindowPlacementInvocation {
@@ -79,6 +83,7 @@ export function createWindowPlacementInvocation(input: {
       String(bounds.height),
       "-TimeoutMs",
       "10000",
+      ...(input.target.maximize === true ? ["-Maximize"] : []),
     ],
   };
 }
@@ -102,7 +107,16 @@ export function validateWindowPlacementReceipt(
   if (!rectanglesEqual(receipt.requested, target.bounds)) {
     return { ok: false, reason: "requested-rectangle-mismatch" };
   }
-  if (!isRectangle(receipt.actual) || !withinTolerance(receipt.actual, target.bounds, 2)) {
+  if (target.maximize === true) {
+    if (receipt.maximized !== true || !isRectangle(receipt.monitorBounds) ||
+        !rectanglesEqual(receipt.monitorBounds, target.bounds) || !isRectangle(receipt.workingArea) ||
+        receipt.workingArea.x < target.bounds.x || receipt.workingArea.y < target.bounds.y ||
+        receipt.workingArea.x + receipt.workingArea.width > target.bounds.x + target.bounds.width ||
+        receipt.workingArea.y + receipt.workingArea.height > target.bounds.y + target.bounds.height ||
+        !withinTolerance(receipt.actual, receipt.workingArea, 32)) {
+      return { ok: false, reason: "window-not-maximized-on-target" };
+    }
+  } else if (!withinTolerance(receipt.actual, target.bounds, 2)) {
     return { ok: false, reason: "window-rectangle-mismatch" };
   }
   return { ok: true, receipt };

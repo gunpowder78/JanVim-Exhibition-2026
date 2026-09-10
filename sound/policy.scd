@@ -1,11 +1,13 @@
 (
-{ |session, initialCounters, flockIngress = false|
-    var paths, lengths, notes, counterKeys, int32Max, validSeed;
+var instrumentProfileFactory = (thisProcess.nowExecutingPath.dirname +/+ "instrument-profile.scd").load;
+{ |session, initialCounters, flockIngress = false, instrumentProfile = \legacyPluckV1,
+    instrumentSeed = 20260909|
+    var paths, lengths, counterKeys, int32Max, validSeed;
     var state, lastSeq, lastHeartbeat, lastCursor, lastFlock;
     var flockEpoch = 0, flockRevision = 0, windExpiresAt;
-    var acceptedPlucks, acceptedFlocks, rejected, rateDropped;
+    var acceptedPlucks, acceptedFlocks, rejected, rateDropped, sparseDropped;
     var finiteFloat, saturatingIncrement, reject, stop, timeout;
-    var handle, tick, snapshot;
+    var handle, tick, snapshot, instrumentSelector;
 
     paths = [
         "/janvim/sound/v1/start",
@@ -20,8 +22,7 @@
         paths = paths ++ ["/janvim/sound/v1/flock-live", "/janvim/sound/v1/flock-mute"];
         lengths = lengths ++ [9, 6];
     };
-    notes = [48, 50, 52, 55, 57, 60, 62, 64, 67, 69, 72];
-    counterKeys = [\acceptedPlucks, \acceptedFlocks, \rejected, \rateDropped];
+    counterKeys = [\acceptedPlucks, \acceptedFlocks, \rejected, \rateDropped, \sparseDropped];
     int32Max = 2147483647;
 
     if(initialCounters.notNil) {
@@ -55,6 +56,11 @@
     acceptedFlocks = if(initialCounters.isNil) { 0 } { initialCounters.at(\acceptedFlocks) ? 0 };
     rejected = if(initialCounters.isNil) { 0 } { initialCounters.at(\rejected) ? 0 };
     rateDropped = if(initialCounters.isNil) { 0 } { initialCounters.at(\rateDropped) ? 0 };
+    sparseDropped = if(initialCounters.isNil) { 0 } { initialCounters.at(\sparseDropped) ? 0 };
+    if(instrumentProfileFactory.isKindOf(Function).not) {
+        Error("instrument profile factory failed to load").throw;
+    };
+    instrumentSelector = instrumentProfileFactory.value(instrumentProfile, instrumentSeed);
 
     finiteFloat = { |value|
         value.isFloat and: {
@@ -77,6 +83,7 @@
         } {
             state = \stopped;
             windExpiresAt = nil;
+            instrumentSelector.at(\stop).value;
             (type: \stop, reason: reason)
         }
     };
@@ -95,7 +102,7 @@
 
     handle = { |msg, now|
         var timeoutAction, valid, path, pathIndex, seq, sentAt;
-        var x, y, motion, energy, centroid, noteIndex;
+        var x, y, motion, energy, centroid, instrumentAction;
         var epoch, revision, expiresAt, windGainDb, instrumentGainDb;
 
         if(finiteFloat.value(now).not) {
@@ -226,17 +233,20 @@
                                         nil
                                     } {
                                         lastCursor = now;
-                                        acceptedPlucks = saturatingIncrement.value(acceptedPlucks);
                                         x = msg.at(4).clip(0.0, 1.0);
                                         y = msg.at(5).clip(0.0, 1.0);
                                         motion = msg.at(6).clip(0.0, 1.0);
-                                        noteIndex = (y * (notes.size - 1)).round.asInteger;
-                                        (
-                                            type: \pluck,
-                                            midi: notes.at(noteIndex),
-                                            motion: motion,
-                                            pan: (x * 1.6) - 0.8
-                                        )
+                                        instrumentAction = instrumentSelector.at(\select).value(
+                                            (x: x, y: y, motion: motion), now
+                                        );
+                                        if(instrumentAction.notNil) {
+                                            acceptedPlucks = saturatingIncrement.value(acceptedPlucks);
+                                        } {
+                                            if(instrumentProfile == \stoneAndSignalV2) {
+                                                sparseDropped = saturatingIncrement.value(sparseDropped);
+                                            };
+                                        };
+                                        instrumentAction
                                     }
                                 } {
                                     if(pathIndex == 3) {
@@ -315,7 +325,8 @@
             acceptedPlucks: acceptedPlucks,
             acceptedFlocks: acceptedFlocks,
             rejected: rejected,
-            rateDropped: rateDropped
+            rateDropped: rateDropped,
+            sparseDropped: sparseDropped
         )
     };
 

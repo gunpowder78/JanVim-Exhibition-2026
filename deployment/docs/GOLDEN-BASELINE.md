@@ -1,4 +1,55 @@
-# 小主机展览保底黄金基线
+# 展示版黄金极限 #002
+
+当前安装可为基于 #002 的美术馆现场维护版，实际身份以包内 `evidence/source-identities.json`
+为准。维护版增加重启设备 ID 变化时按完整桌面几何恢复人工映射、JanVim 原生最大化，
+并将 Ctrl+Shift+S 改为完整退出后关机；STOP SHOW 仍只退出展示。下文的 #002 标签和
+归档保持原件，不把维护版新增行为归给旧黄金包。日常操作以本包操作说明为准。
+
+2026-09-09，用户确认完整三屏“画面和整体声音都正常”，授权正式固化为本版本。
+声音实现基点为 `b5fbadb43cdcc70b4303b533bcb1a6ead195fea9`；本包完整源码身份以
+`evidence/source-identities.json` 为准，包与 ZIP 的身份以外部 `deployment-handoff.json` 为准。
+本地冻结标签为 `exhibition-golden-limit-002-2026-09-09`，不覆盖任何旧标签。
+
+## 本版固定行为
+
+- 沿用字速和 90 秒循环。电贝司、原拨弦、寻台和地音随真实文字光标起音，停写仅保留自然尾音。
+- 正式启动入口显式选择 `StoneAndSignalV2`；保留已认可音色、稀疏点缀、8 节点上限和统一淡出。
+- 《见山》沿用原 EXE：9,799,168 字节，SHA-256
+  `ac160b7eb4e34c52906b151aed441ea683ad093d89e59459b5ecb12c3055770f`。
+  黑底白鸟、第三屏无边框全屏及独立 Wind 通路保持原样。
+- 用户最后保存的混音面板值为 Wind `+6 dB`、Instrument `-2 dB`。
+  这是面板值；新音色内部保留已认可的 2 倍线性增益及既有上限。Windows 主音量不由脚本改动。
+- 正式启动、应急桌面快捷方式和登录后 30 秒计划任务继续使用固定部署路径。
+
+正常启动和关闭见 `EXHIBITION-OPERATOR-RUNBOOK.md`。本包的配置快照在
+`docs/golden-002-site/`：`sound-mix-v1.json` 为最终混音，
+`saved-hall-display-map.json` 为保留的展厅人工映射，
+`studio-acceptance-display-map.json` 为本轮工作室实际映射。不要把工作室映射自动覆盖到展厅；
+启动器继续按当前设备选择有效人工映射或默认扩展屏顺序。
+
+## 归档与回退
+
+完整 ZIP、包清单、源码身份、现场配置及验收回执归档到：
+
+```text
+D:\VirtualData\JanVim-Exhibition-Rehearsals\golden-baselines\exhibition-golden-limit-002-20260909
+C:\Users\hxj\Documents\JanVim-Exhibition-Baselines\exhibition-golden-limit-002-20260909
+```
+
+两份位置均在本机，不代表异机灾难备份。旧部署整体改名保留，精确路径写在 #002 的
+`golden-baseline.json`。旧黄金 ZIP 与标签继续保留。回退必须先正常停止、保存当前目录，
+再整体恢复旧包；不零散覆盖，不恢复与当前显示设备不符的映射。
+
+## 验收边界
+
+本次工作室三屏联调记录了 4 个完成循环、0 重试、0 恢复，累计可见漂移约 45.51 ms。
+声音运行约 485.55 秒，`clean=true / reason=requested`；用户确认整体画面与声音正常，
+此前同一声音实现的联合试听已确认淡出后无复响。实际物理投影、断网和强制重启验收
+仍需另外记录；当前批准不能写成这些项目已通过。自动门禁的实测结果见 #002 归档回执。
+
+---
+
+# 历史：小主机展览保底黄金基线
 
 状态：本机三屏有人值守验收通过；冻结为后续少量效果修改的回退点。
 

@@ -54,7 +54,7 @@ export function createRealInput({ nowMs, onStop }) {
           frame.runId !== owner.runId || frame.controllerRunId !== owner.controllerRunId ||
           !positiveInt32(frame.seq) || frame.seq <= sequence ||
           !positiveInt32(frame.generationId) || frame.generationId < generation ||
-          !id(frame.loopId, RUN_ID) || !bounded(frame.elapsedMs, 3600000) || frame.elapsedMs < elapsed) return false;
+          !id(frame.loopId, RUN_ID) || !bounded(frame.elapsedMs, Number.MAX_SAFE_INTEGER) || frame.elapsedMs < elapsed) return false;
       const age = now - originMs - frame.elapsedMs;
       if (age < 0 || age > 500) return false;
       if (frame.command === "cursor" && (loop === "idle" || frame.loopId !== loop ||

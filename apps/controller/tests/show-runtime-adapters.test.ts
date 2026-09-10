@@ -1373,6 +1373,7 @@ function createStartupHarness(options: {
             owned: false,
             requested: placement.bounds,
             actual: placement.bounds,
+            ...(args.includes("-Maximize") ? { maximized: true, monitorBounds: placement.bounds, workingArea: placement.bounds } : {}),
           }),
           stderr: "",
         };
@@ -4375,6 +4376,19 @@ describe("real Task 9 show runtime adapters", () => {
     expect(committed).toHaveLength(0);
     expect(observedSignal).toBeDefined();
     expect(observedSignal!.aborted).toBe(true);
+  });
+
+  it("writes the shortcut power-off terminal reason only after successful cleanup, while leaving evidence as operator-stop", async () => {
+    const harness = createStartupHarness();
+    const coordinator = harness.adapters.createCoordinator({ ...showCommand("Show"), networkPolicy: "DiagnosticConnected" });
+    await expect(coordinator.boot()).resolves.toEqual({ ready: true });
+    expect(coordinator.requestOperatorStop()).toBe(true);
+    await expect(coordinator.completion).resolves.toEqual({ ok: true, reason: "operator-stop" });
+    expect(harness.terminalWrites).toEqual([{
+      path: `${rehearsalRoot}\\controller-terminal.json`,
+      value: { schema: 1, runId: "show-001", controllerRunId: "controller-001", controllerPid: 8001, outcome: "intentional-success", reason: "operator-stop-poweroff" },
+    }]);
+    expect(harness.evidenceWrites[0]).toMatchObject({ value: { shutdown: { requestedBy: "operator-stop" } } });
   });
 
   it("forwards the bounded signal and prevents an aborted marker publication", async () => {

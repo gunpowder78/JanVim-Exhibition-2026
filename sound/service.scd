@@ -1,7 +1,7 @@
 (
 var argv, session, mode, durationText, duration, capturePath, hardwareOutput, argumentError;
-var flockIngress = false;
-var windGain = 1.0, instrumentGain = 1.0;
+var flockIngress = false, instrumentProfile = \legacyPluckV1, optionalModes;
+var windGain = 1.0, instrumentGain = 1.0, effectiveInstrumentGain;
 var finiteFloat, validSession, validDurationText, jsonString, emit;
 var emitReady, emitEvent, emitOwnershipCheckFailure, emitStats, emitComplete;
 var completeEmitted = false, readyEmitted = false;
@@ -12,13 +12,13 @@ var endpointCheckGeneration = 0, endpointCheckTimeout;
 var phase = \validating, bootRoutine, startupTimeout, startupMonitor;
 var cleanupRoutine, cleanupTimeout, captureWriteDoneResponder, captureWriteFailureResponder;
 var checker, statsTask, durationTask, serverFailureResponder, oscKeys = Array.new;
-var voiceBus, finalBus, mixer, outputSynth, captureBuffer, captureSynth, windSynth;
+var voiceBus, spaceBus, finalBus, mixer, spaceSynth, outputSynth, captureBuffer, captureSynth, windSynth;
 var windNodes = Array.new;
 var captureFrames, pluckNodes = Array.new, livePlucks = 0, maxPlucks = 0, heartbeatControl = 0;
 var capturePositionResponder, recordedFrames = 0, stopFrame = 0;
 var pidIsRunning, cancelEndpointCheck, inspectEndpoint, stopTasks, removeResponders;
 var ownsServerProcess, ownsServer, finishWithoutServer, terminateOwnedProcess, finishService;
-var abortStartup, beginStop, installOsc, processAction, setupApplication;
+var abortStartup, beginStop, installOsc, processAction, startInstrument, setupApplication;
 var beginBootWait, verifyStartupEndpoint, startSafeBoot;
 
 finiteFloat = { |value|
@@ -86,6 +86,7 @@ emitStats = {
         "\"acceptedFlocks\":" ++ snapshot.at(\acceptedFlocks).asString ++ "," ++
         "\"rejected\":" ++ snapshot.at(\rejected).asString ++ "," ++
         "\"rateDropped\":" ++ snapshot.at(\rateDropped).asString ++ "," ++
+        "\"sparseDropped\":" ++ snapshot.at(\sparseDropped).asString ++ "," ++
         "\"livePlucks\":" ++ livePlucks.asString ++ "," ++
         "\"maxPlucks\":" ++ maxPlucks.asString ++ "}"
     );
@@ -102,16 +103,30 @@ emitComplete = { |reason, clean|
 
 argv = thisProcess.argv;
 argumentError = nil;
-if((argv.size != 4) and: { argv.size != 5 }) {
+if(argv.size < 4 or: { argv.size > 6 }) {
     argumentError = "invalidArguments";
 } {
     session = argv.at(0);
     mode = argv.at(1);
     durationText = argv.at(2);
     capturePath = argv.at(3);
-    if(argv.size == 5) {
-        flockIngress = ["flock-v1"].includesEqual(argv.at(4));
-        if(flockIngress.not) { argumentError = "invalidArguments" };
+    if(argv.size > 4) {
+        optionalModes = argv.copyRange(4, argv.size - 1);
+        optionalModes.do { |option|
+            switch(option,
+                "flock-v1", {
+                    if(flockIngress) { argumentError = "invalidArguments" } { flockIngress = true };
+                },
+                "instrument-stone-and-signal-v2", {
+                    if(instrumentProfile == \stoneAndSignalV2) {
+                        argumentError = "invalidArguments"
+                    } {
+                        instrumentProfile = \stoneAndSignalV2
+                    };
+                },
+                { argumentError = "invalidArguments" }
+            );
+        };
     };
     validSession = session.isString and: {
         session.size == 32 and: {
@@ -131,12 +146,14 @@ if((argv.size != 4) and: { argv.size != 5 }) {
         argumentError = "invalidArguments";
     };
     if(argumentError.isNil and: {
-        finiteFloat.value(duration).not or: { duration < 1 or: { duration > 3600 } }
+        validDurationText.not or: { finiteFloat.value(duration).not or: {
+            if(duration == 0) { durationText != "0" } { duration < 1 or: { duration > 3600 } }
+        } }
     }) {
         argumentError = "invalidDuration";
     };
     if(argumentError.isNil and: {
-        capturePath.isString.not or: { capturePath.notEmpty and: { duration > (120 - 1.5) } }
+        capturePath.isString.not or: { capturePath.notEmpty and: { duration == 0 or: { duration > (120 - 1.5) } } }
     }) {
         argumentError = "invalidCapture";
     };
@@ -147,6 +164,13 @@ if(argumentError.notNil) {
     2.exit;
 } {
 hardwareOutput = ["listen"].includesEqual(mode);
+effectiveInstrumentGain = {
+    if(instrumentProfile == \stoneAndSignalV2) {
+        (instrumentGain * 2.0).min(1.9952623)
+    } {
+        instrumentGain
+    }
+};
 
 soundRoot = thisProcess.nowExecutingPath.dirname;
 endpointHelperPath = soundRoot +/+ "server-port-owner.ps1";
@@ -160,7 +184,7 @@ if(
     emitComplete.value("loadFailure", false);
     2.exit;
 } {
-policy = policyFactory.value(session, nil, flockIngress);
+policy = policyFactory.value(session, nil, flockIngress, instrumentProfile, 20260909);
 definitions = synthFactory.value;
 
 options = ServerOptions.new
@@ -329,10 +353,12 @@ finishService = { |reason, initiallyClean|
                     captureSynth !? { captureSynth.free };
                     outputSynth !? { outputSynth.free };
                     pluckNodes.do { |node| node.free };
+                    spaceSynth !? { spaceSynth.free; spaceSynth = nil };
                     windNodes.do { |node| node.free };
                     windNodes = Array.new;
                     windSynth = nil;
                     voiceBus !? { voiceBus.free };
+                    spaceBus !? { spaceBus.free };
                     finalBus !? { finalBus.free };
                     captureBuffer !? {
                         captureWriteResult = \pending;
@@ -433,6 +459,26 @@ beginStop = { |reason, clean = true|
     };
 };
 
+startInstrument = { |definition, controls, usesSpace = false|
+    if(livePlucks < 8) {
+        var target = if(usesSpace) { spaceSynth } { mixer };
+        var output = if(usesSpace) { spaceBus.index } { voiceBus.index };
+        var node = Synth.before(target, definition, [
+            \outBus, output,
+            \gain, effectiveInstrumentGain.value
+        ] ++ controls);
+        livePlucks = livePlucks + 1;
+        maxPlucks = maxPlucks.max(livePlucks);
+        pluckNodes = pluckNodes.add(node);
+        node.onFree {
+            {
+                livePlucks = (livePlucks - 1).max(0);
+                pluckNodes = pluckNodes.reject { |candidate| candidate === node };
+            }.defer;
+        };
+    };
+};
+
 processAction = { |action|
     if(action.notNil) {
         switch(action.at(\type),
@@ -442,24 +488,42 @@ processAction = { |action|
                 emitEvent.value("start", nil);
             },
             \pluck, {
-                if(livePlucks < 8) {
-                    var node = Synth.before(mixer, \jvPluck, [
-                        \outBus, voiceBus.index,
-                        \midi, action.at(\midi),
-                        \motion, action.at(\motion),
-                        \pan, action.at(\pan),
-                        \gain, instrumentGain
-                    ]);
-                    livePlucks = livePlucks + 1;
-                    maxPlucks = maxPlucks.max(livePlucks);
-                    pluckNodes = pluckNodes.add(node);
-                    node.onFree {
-                        {
-                            livePlucks = (livePlucks - 1).max(0);
-                            pluckNodes = pluckNodes.reject { |candidate| candidate === node };
-                        }.defer;
-                    };
-                };
+                startInstrument.value(\jvPluck, [
+                    \midi, action.at(\midi), \motion, action.at(\motion), \pan, action.at(\pan)
+                ]);
+            },
+            \signalCall, {
+                startInstrument.value(\jvSignalCall, [\freq, action.at(\freq),
+                    \duration, action.at(\duration), \pan, action.at(\pan),
+                    \cursorPulse, action.at(\cursorPulse) ? 0,
+                    \seed, action.at(\seed)], true);
+            },
+            \amTuning, {
+                startInstrument.value(\jvSignalAM, [\duration, action.at(\duration),
+                    \cursorPulse, action.at(\cursorPulse) ? 0,
+                    \pan, action.at(\pan), \seed, action.at(\seed)]);
+            },
+            \flint, {
+                startInstrument.value(\jvSignalFlint, [\scale, action.at(\scale),
+                    \pan, action.at(\pan), \seed, action.at(\seed)]);
+            },
+            \relic, {
+                startInstrument.value(\jvSignalRelic, [\midi, action.at(\midi),
+                    \pan, action.at(\pan), \seed, action.at(\seed)], true);
+            },
+            \earth, {
+                startInstrument.value(\jvSignalEarth, [\duration, action.at(\duration),
+                    \cursorPulse, action.at(\cursorPulse) ? 0,
+                    \pan, action.at(\pan), \seed, action.at(\seed)]);
+            },
+            \blade, {
+                startInstrument.value(\jvSignalBlade, [\freq, action.at(\freq),
+                    \duration, action.at(\duration), \pan, action.at(\pan),
+                    \seed, action.at(\seed)], true);
+            },
+            \bass, {
+                startInstrument.value(\jvSignalBass, [\midi, action.at(\midi),
+                    \duration, action.at(\duration), \seed, action.at(\seed)]);
             },
             \wind, {
                 if(windSynth.isNil) {
@@ -494,7 +558,7 @@ processAction = { |action|
                 windGain = action.at(\windGainDb).dbamp;
                 instrumentGain = action.at(\instrumentGainDb).dbamp;
                 windNodes.do { |node| node.set(\gain, windGain) };
-                pluckNodes.do { |node| node.set(\gain, instrumentGain) };
+                pluckNodes.do { |node| node.set(\gain, effectiveInstrumentGain.value) };
             },
             \stop, { beginStop.value(action.at(\reason).asString, true) }
         );
@@ -568,6 +632,7 @@ setupApplication = {
 
                 if(phase == \starting and: { ownsServer.value }) {
                     voiceBus = Bus.audio(server, 2);
+                    spaceBus = Bus.audio(server, 2);
                     finalBus = Bus.audio(server, 2);
                     mixer = Synth.head(server, \jvMix, [
                         \inBus, voiceBus.index,
@@ -576,6 +641,12 @@ setupApplication = {
                         \armed, 0,
                         \stop, 0
                     ]);
+                    if(instrumentProfile == \stoneAndSignalV2) {
+                        spaceSynth = Synth.before(mixer, \jvSignalSpace, [
+                            \inBus, spaceBus.index,
+                            \outBus, voiceBus.index
+                        ]);
+                    };
 
                     if(capturePath.notEmpty) {
                         captureFrames = ((duration + 1.5).min(120) * 48000).asInteger;
@@ -633,10 +704,13 @@ setupApplication = {
                                 if(phase == \ready) { emitStats.value };
                             };
                         }.play(AppClock);
-                        durationTask = Routine {
-                            duration.wait;
-                            beginStop.value("duration", true);
-                        }.play(AppClock);
+                        // Exhibition duration 0 is owned by the existing Stop/lease path.
+                        if(duration > 0) {
+                            durationTask = Routine {
+                                duration.wait;
+                                beginStop.value("duration", true);
+                            }.play(AppClock);
+                        };
                     };
                 } {
                     abortStartup.value("ownershipLost");

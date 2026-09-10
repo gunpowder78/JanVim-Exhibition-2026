@@ -22,6 +22,17 @@ const modulePath = join(
 const defaultsPath = join(root, "deployment", "config", "site-defaults.json");
 const tempRoot = mkdtempSync(join(tmpdir(), "janvim-deployment-operator-"));
 
+it("pins the same controller identity in outer preflight and inner show launcher", () => {
+  const verifier = readFileSync(join(root, "deployment/operator/Verify-Deployment.ps1"), "utf8");
+  const launcher = readFileSync(join(root, "scripts/start-show.ps1"), "utf8");
+  const outer = /-Path \$electron -Bytes (\d+)\s+`\s+-Sha256 '([a-f0-9]{64})'/.exec(verifier);
+  const innerBytes = /\$reviewedElectronMainBytes = (\d+)L/.exec(launcher);
+  const innerHash = /\$reviewedElectronMainSha256 = '([a-f0-9]{64})'/.exec(launcher);
+  expect(outer).not.toBeNull();
+  expect(innerBytes?.[1]).toBe(outer?.[1]);
+  expect(innerHash?.[1]).toBe(outer?.[2]);
+});
+
 afterAll(() => {
   const resolved = resolve(tempRoot);
   if (!resolved.startsWith(resolve(tmpdir()))) throw new Error("unsafe-test-root");
@@ -283,7 +294,7 @@ describe("attended deployment operator module", () => {
     expect(result.status, result.stderr).toBe(0);
     expect(JSON.parse(result.stdout)).toMatchObject({
       audioOutputDevice: "Windows WASAPI : Speakers (Realtek High Definition Audio)",
-      durationSeconds: 3600,
+      durationSeconds: 0,
     });
   });
 
@@ -313,7 +324,7 @@ describe("attended deployment operator module", () => {
       siteConfigRoot:
         "D:\\VirtualData\\JanVim-Exhibition-Rehearsals\\site-config",
       audioOutputDevice: "Windows WASAPI : Speakers (Realtek High Definition Audio)",
-      durationSeconds: 3600,
+      durationSeconds: 0,
     });
     for (const name of [
       "Start-Exhibition.ps1",
@@ -322,6 +333,34 @@ describe("attended deployment operator module", () => {
     ]) {
       expect(existsSync(join(root, "deployment", "operator", name)), name).toBe(true);
     }
+  });
+
+  it("starts the golden 002 sound child with the accepted real cursor profile", () => {
+    const launcher = join(root, "deployment", "operator", "Start-Exhibition.ps1");
+    const result = invoke([
+      "$source=Get-Content -LiteralPath " + psQuote(launcher) + " -Raw",
+      "$start=$source.IndexOf('# Deployment stage: sound',[StringComparison]::Ordinal)",
+      "$end=$source.IndexOf('[void](Wait-DeploymentFile',$start,[StringComparison]::Ordinal)",
+      "if($start -lt 0 -or $end -le $start){throw 'sound-stage-not-found'}",
+      "function Start-DeploymentChild { param($FilePath,$Arguments,$WorkingDirectory) [pscustomobject]@{file=$FilePath;arguments=$Arguments;directory=$WorkingDirectory} }",
+      "function Get-DeploymentProcessIdentity { param($Process,$ExpectedExecutable) @{pid=1} }",
+      "$packageRoot='D:\\github\\JanVim-Exhibition-Deploy'; $powerShell='pwsh.exe'",
+      "$joint='joint-rehearsal.ps1'; $sessionFile='fresh-session.json'; $node='node.exe'",
+      "$plan=@{durationSeconds=3600}",
+      "Invoke-Expression $source.Substring($start,$end-$start)",
+      "$soundProcess | ConvertTo-Json -Depth 4 -Compress",
+    ].join("\n"));
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual({
+      file: "pwsh.exe",
+      directory: "D:\\github\\JanVim-Exhibition-Deploy\\app",
+      arguments: [
+        "-NoLogo", "-NoProfile", "-NonInteractive", "-File", "joint-rehearsal.ps1",
+        "-Action", "Sound", "-SessionFile", "fresh-session.json",
+        "-Listen", "-InstrumentProfile", "StoneAndSignalV2", "-NodeExecutable", "node.exe",
+      ],
+    });
   });
 
   it("keeps the attended launcher sequence explicit and cleanup identity-scoped", () => {

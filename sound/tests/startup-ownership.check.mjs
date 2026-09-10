@@ -64,7 +64,7 @@ async function runFixture(mode) {
   const helperLogPath = path.join(evidenceRoot, "helper.ndjson");
   await mkdir(fixtureTestRoot, { recursive: true });
   await writeFile(helperLogPath, "", "utf8");
-  for (const name of ["service.scd", "policy.scd", "synths.scd"]) {
+  for (const name of ["service.scd", "policy.scd", "instrument-profile.scd", "synths.scd"]) {
     await copyFile(path.join(SOUND_ROOT, name), path.join(fixtureSoundRoot, name));
   }
   await copyFile(

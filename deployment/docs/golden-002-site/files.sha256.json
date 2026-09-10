@@ -1,0 +1,17 @@
+[
+  {
+    "path": "saved-hall-display-map.json",
+    "bytes": 1703,
+    "sha256": "2ba4526770f4f1498116d81be846950e26701183700d5b252dbcffc5000fe675"
+  },
+  {
+    "path": "sound-mix-v1.json",
+    "bytes": 50,
+    "sha256": "a1e3f92ef293ea6486106cc9de9d336488a3eb8dc330aeacdb701ef78ca29be6"
+  },
+  {
+    "path": "studio-acceptance-display-map.json",
+    "bytes": 1719,
+    "sha256": "1796a0e96c8d3236f7542e8e0e80c775132bc65327476b7058cb15695ed9ed05"
+  }
+]

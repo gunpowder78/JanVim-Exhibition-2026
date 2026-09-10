@@ -73,7 +73,7 @@ export type ShowCoordinatorState =
   | "stopped";
 
 export type ShowRunResult =
-  | { ok: true; reason: "soak-complete" | "operator-stop" }
+  | { ok: true; reason: "soak-complete" | "operator-stop"; powerOffRequested?: true }
   | { ok: false; reason: string };
 
 export type ShowValidationOutcome =
@@ -553,8 +553,12 @@ export class ShowRunCoordinator {
   }
 
   public requestOperatorStop(): boolean {
-    return this.handleStopAction("shortcut");
+    const accepted = this.handleStopAction("shortcut");
+    if (accepted) this.powerOffRequested = true;
+    return accepted;
   }
+
+  private powerOffRequested = false;
 
   public requestEmergencyStop(
     reason:
@@ -2701,7 +2705,9 @@ export class ShowRunCoordinator {
       await this.runShutdownPhase(
         "terminal-marker-failed",
         FINALIZATION_PHASE_TIMEOUT_MS,
-        (signal) => this.dependencies.writeTerminalMarker(finalResult, signal),
+        (signal) => this.dependencies.writeTerminalMarker(
+          finalResult.ok && finalResult.reason === "operator-stop" && this.powerOffRequested
+            ? { ...finalResult, powerOffRequested: true } : finalResult, signal),
       );
       finalResult = this.classifyShutdownResult(finalResult);
       this.transition("stopped", finalResult.reason);

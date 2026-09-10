@@ -73,7 +73,8 @@ async function cleanup(handle) {
 
 // Missing observer/age forwarding, wrong byte-to-cell mapping, simulated input,
 // reset notes, a broken audio Stop, or audio entering the ACK chain must fail here.
-test("actual Lua actions reach production sound silently and unavailable sound preserves text/ACK/reset", { timeout: 120000 }, async () => {
+for (const instrumentProfile of ["LegacyPluckV1", "StoneAndSignalV2"]) {
+test("actual Lua actions reach production sound silently and unavailable sound preserves text/ACK/reset: " + instrumentProfile, { timeout: 120000 }, async () => {
   assert.equal(await access(fixture).then(() => true, () => false), true,
     "actual headless Lua chain fixture must exist (no coordinate substitute)");
   // npm run typecheck is an explicit prerequisite; missing compiled modules fail, never skip.
@@ -134,7 +135,7 @@ test("actual Lua actions reach production sound silently and unavailable sound p
       if (available) {
         sound = launch("pwsh.exe", ["-NoProfile", "-NonInteractive", "-File",
           path.join(root, "sound/start-sound.ps1"), "-Input", "RealCursor",
-          "-Duration", "60", "-RunRoot", runRoot]); // No -Listen; existing caps unchanged.
+          "-Duration", "60", "-RunRoot", runRoot, "-InstrumentProfile", instrumentProfile]); // No -Listen.
         ready = await jsonWhenReady(path.join(runRoot, "ready.json"), sound);
         assert.equal(ready.mode, "silent");
         assert.equal(ready.service.hardwareOutput, false);
@@ -228,7 +229,7 @@ test("actual Lua actions reach production sound silently and unavailable sound p
       } else {
         assert.deepEqual(diagnostics, ["sound-receipt-or-connect-failed"]);
       }
-      const proof = { available, runRoot, acknowledgements, observations, snapshots, checkpoints, diagnostics, acoustic };
+      const proof = { available, instrumentProfile, runRoot, acknowledgements, observations, snapshots, checkpoints, diagnostics, acoustic };
       await writeFile(path.join(evidenceRoot, "chain-proof.json"), JSON.stringify(proof, null, 2));
       await writeFile(path.join(evidenceRoot, "chain-nvim-output.log"), luaResult.output);
       console.log(`REAL_CURSOR_CHAIN_EVIDENCE ${JSON.stringify({ available, evidenceRoot,
@@ -249,3 +250,4 @@ test("actual Lua actions reach production sound silently and unavailable sound p
   }
   assert.deepEqual(results[1], results[0], "unavailable sound changed actual Lua text/ACK/reset");
 });
+}

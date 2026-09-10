@@ -11,6 +11,7 @@ if (-not $rootItem.PSIsContainer -or ($rootItem.Attributes -band [IO.FileAttribu
 }
 $modulePath = Join-Path $PSScriptRoot 'lib\Exhibition.Deployment.psm1'
 Import-Module $modulePath -Force
+Import-Module (Join-Path $PSScriptRoot 'lib\Exhibition.Taskbar.psm1') -Force
 $defaults = Read-ExhibitionSiteDefaults -Path (Join-Path $packageRoot 'config\site-defaults.json')
 if (-not [string]::Equals($packageRoot, $defaults.packageRoot, [StringComparison]::OrdinalIgnoreCase)) {
     throw 'deployment-package-root-invalid'
@@ -52,7 +53,7 @@ function Invoke-DeploymentProcessCaptured {
         $stderr = $process.StandardError.ReadToEndAsync()
         if (-not $process.WaitForExit($TimeoutMs)) {
             try { $process.Kill($true) } catch {}
-            [void]$process.WaitForExit(2000)
+            if (-not $process.WaitForExit(2000)) { throw 'deployment-child-cleanup-incomplete' }
             throw 'deployment-child-timeout'
         }
         return [pscustomobject]@{
@@ -63,6 +64,41 @@ function Invoke-DeploymentProcessCaptured {
     }
     finally {
         $process.Dispose()
+    }
+}
+
+function Invoke-DeploymentWindowPlacement {
+    param(
+        [Parameter(Mandatory = $true)][string] $RunRoot,
+        [Parameter(Mandatory = $true)][scriptblock] $InvokePlacement,
+        [scriptblock] $Wait = { param($Milliseconds) [Threading.Thread]::Sleep($Milliseconds) }
+    )
+
+    # Retry only transient readiness/geometry failures of the SAME pinned process.
+    # Each helper invocation has a 20 s deadline and rechecks PID + creation time.
+    # No new JianShan process, session, mapping, or sound service is created here.
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        Write-Host "正在定位《见山》窗口（$attempt/3）……"
+        try { $result = & $InvokePlacement }
+        catch {
+            $result = [pscustomobject]@{ ExitCode = 1; Stdout = ''; Stderr = $_.Exception.Message }
+        }
+        foreach ($stream in @('Stdout', 'Stderr')) {
+            $content = [string]$result.$stream
+            if ($content.Length -gt 32768) { $content = $content.Substring(0, 32768) }
+            [IO.File]::WriteAllText((Join-Path $RunRoot "jianshan-placement-$attempt-$stream.txt"), $content)
+        }
+        if ($result.ExitCode -eq 0) { return $result }
+
+        # PowerShell reports the same exception more than once; distinct reasons
+        # must still identify exactly one known transient error before retrying.
+        $reasons = @([regex]::Matches([string]$result.Stderr, '(?:jianshan|deployment)-[a-z]+(?:-[a-z]+)+') |
+            ForEach-Object { $_.Value } | Sort-Object -Unique)
+        $reason = if ($reasons.Count -eq 1) { $reasons[0] } else { 'unknown-window-error' }
+        if ($attempt -eq 3 -or $reason -cnotin @(
+            'jianshan-window-not-found', 'jianshan-window-final-state-invalid', 'deployment-child-timeout'
+        )) { throw "jianshan-window-placement-failed:$reason" }
+        & $Wait 500
     }
 }
 
@@ -238,9 +274,11 @@ $sessionFile = ''
 $soundRoot = ''
 $runRoot = ''
 $pointerWritten = $false
+$launchMutex = $null
+$taskbarState = @{ RestoreRequired = $false }
 
 try {
-    if (Test-Path -LiteralPath $pointerPath) { throw 'active-deployment-already-exists' }
+    $launchMutex = Enter-ExhibitionLaunchGuard
 
     # Allocate evidence before preflight: login failures must survive a closing console.
     $runId = 'deployment-{0}-{1}' -f `
@@ -254,6 +292,12 @@ try {
         verificationTimeoutMs = 240000
     } | ConvertTo-Json -Compress))
     Write-Host "正在校验展演部署；进度记录：$runRoot"
+
+    if (Test-Path -LiteralPath $pointerPath) {
+        $bootTimeUtc = (Get-CimInstance Win32_OperatingSystem -OperationTimeoutSec 5 -ErrorAction Stop).LastBootUpTime.ToUniversalTime()
+        $recovery = Restore-ExhibitionStartupAfterReboot -Path $pointerPath -ArchiveRoot $runRoot -BootTimeUtc $bootTimeUtc
+        $recovery | ConvertTo-Json -Compress | Set-Content -LiteralPath (Join-Path $runRoot 'reboot-recovery.json') -Encoding utf8
+    }
 
     # Deployment stage: verify
     # A cold manifest read has its own 120 s deadline. The complete verifier also
@@ -275,6 +319,7 @@ try {
     }
 
     # Deployment stage: display-map
+    Write-Host '部署校验通过，正在匹配展厅屏幕……'
     # Resolve only after immutable payload verification; never open the configuration UI.
     $savedDisplayMapPath = $displayMapPath
     $displayMapPath = Join-Path $runRoot 'display-map.json'
@@ -310,6 +355,7 @@ try {
     $sessionFile = Get-OutputValue -Text $prepare.Stdout -Label 'SESSION_FILE'
     $soundRoot = Get-OutputValue -Text $prepare.Stdout -Label 'SOUND_ROOT'
 
+    Write-Host '屏幕匹配完成，正在启动声音与《见山》……'
     # Deployment stage: sound
     $soundProcess = Start-DeploymentChild `
         -FilePath $powerShell `
@@ -317,7 +363,7 @@ try {
         -Arguments @(
             '-NoLogo', '-NoProfile', '-NonInteractive', '-File', $joint,
             '-Action', 'Sound', '-SessionFile', $sessionFile,
-            '-Listen', '-NodeExecutable', $node
+            '-Listen', '-InstrumentProfile', 'StoneAndSignalV2', '-NodeExecutable', $node
         )
     $soundIdentity = Get-DeploymentProcessIdentity -Process $soundProcess -ExpectedExecutable $powerShell
 
@@ -349,7 +395,8 @@ try {
         -ExpectedExecutable $jianshanExecutable
 
     # Deployment stage: jianshan-place
-    $placement = Invoke-DeploymentProcessCaptured `
+    $placement = Invoke-DeploymentWindowPlacement -RunRoot $runRoot -InvokePlacement {
+        Invoke-DeploymentProcessCaptured `
         -FilePath $powerShell `
         -Arguments @(
             '-NoLogo', '-NoProfile', '-NonInteractive', '-File', $placementHelper,
@@ -360,12 +407,13 @@ try {
             '-TimeoutMs', '10000'
         ) `
         -TimeoutMs 20000
-    if ($placement.ExitCode -ne 0) { throw 'jianshan-window-placement-failed' }
+    }
 
     Write-CurrentPointer
     $pointerWritten = $true
 
     # Deployment stage: show
+    Write-Host '《见山》已就位，正在启动 JanVim 与 Narrative……'
     $showProcess = Start-DeploymentChild `
         -FilePath $powerShell `
         -WorkingDirectory (Join-Path $packageRoot 'app') `
@@ -390,7 +438,20 @@ try {
     }
     Write-CurrentPointer
 
-    if (-not $showProcess.WaitForExit(([int]$plan.durationSeconds + 120) * 1000)) {
+    # Hide only after verified three-screen startup, never for a rejected duplicate
+    # launch or preflight. The outer finally also restores after failed cleanup.
+    try {
+        Enter-ExhibitionTaskbar -State $taskbarState |
+            ConvertTo-Json -Compress | Set-Content -LiteralPath (Join-Path $runRoot 'taskbar-hidden.json') -Encoding utf8
+    } catch {
+        Write-Warning "任务栏隐藏未完成：$($_.Exception.Message)；展演继续，退出时仍会尝试恢复。"
+    }
+
+    if ($plan.durationSeconds -eq 0) {
+        # Continuous exhibition: controller Stop owns normal termination.
+        $showProcess.WaitForExit()
+    }
+    elseif (-not $showProcess.WaitForExit(([int]$plan.durationSeconds + 120) * 1000)) {
         throw 'show-wrapper-timeout'
     }
     $showExitCode = $showProcess.ExitCode
@@ -426,6 +487,14 @@ try {
         showExitCode = $showExitCode
         soundClean = $true
     } | ConvertTo-Json -Compress
+
+    # Power off only after the complete show/sound/Jianshan cleanup above succeeded.
+    try {
+        Exit-ExhibitionTaskbar -State $taskbarState |
+            ConvertTo-Json -Compress | Set-Content -LiteralPath (Join-Path $runRoot 'taskbar-restored.json') -Encoding utf8
+    } catch { Write-Warning '任务栏恢复未完成，可使用桌面“恢复任务栏”。' }
+    $terminal = Read-DeploymentJson -Path (Join-Path $showRoot 'controller-terminal.json') -MaximumBytes 4096 -Reason 'controller-terminal'
+    Invoke-ExhibitionPowerOff -TerminalMarker $terminal -ExpectedRunId ([IO.Path]::GetFileName($showRoot)) -ExpectedControllerPid $controllerIdentity.pid -ShowExitCode $showExitCode -SoundClean $summary.clean -ChildrenExited $true
 }
 catch {
     $failure = $_.Exception.Message
@@ -484,7 +553,19 @@ catch {
     throw $failure
 }
 finally {
-    foreach ($process in @($showProcess, $jianshanProcess, $soundProcess)) {
-        if ($null -ne $process) { $process.Dispose() }
+    try {
+        if ($taskbarState.RestoreRequired) {
+            try {
+                Exit-ExhibitionTaskbar -State $taskbarState |
+                    ConvertTo-Json -Compress | Set-Content -LiteralPath (Join-Path $runRoot 'taskbar-restored.json') -Encoding utf8
+            } catch { Write-Warning '任务栏恢复未完成，可使用桌面“恢复任务栏”。' }
+        }
+        foreach ($process in @($showProcess, $jianshanProcess, $soundProcess)) {
+            if ($null -ne $process) { $process.Dispose() }
+        }
+    } finally {
+        if ($null -ne $launchMutex) {
+            try { $launchMutex.ReleaseMutex() } finally { $launchMutex.Dispose() }
+        }
     }
 }

@@ -58,7 +58,7 @@ public static class SoundOwnedProcess {
     }
 
     public static int Run(string executable, string[] args, string cwd, int timeoutMs) {
-        if (timeoutMs < 1 || timeoutMs > 3645000) throw new ArgumentOutOfRangeException("timeoutMs");
+        if (timeoutMs < 0 || timeoutMs > 3645000) throw new ArgumentOutOfRangeException("timeoutMs");
         IntPtr job = IntPtr.Zero, attributes = IntPtr.Zero, jobs = IntPtr.Zero, handles = IntPtr.Zero;
         IntPtr nullInput = IntPtr.Zero;
         bool initialized = false;
@@ -112,7 +112,7 @@ public static class SoundOwnedProcess {
                 Interlocked.Exchange(ref inputEnded, 1);
             });
             var clock = Stopwatch.StartNew();
-            while (clock.ElapsedMilliseconds < timeoutMs && Volatile.Read(ref inputEnded) == 0) {
+            while ((timeoutMs == 0 || clock.ElapsedMilliseconds < timeoutMs) && Volatile.Read(ref inputEnded) == 0) {
                 uint wait = WaitForSingleObject(created.process, 50);
                 if (wait == 0) {
                     uint code; Check(GetExitCodeProcess(created.process, out code));

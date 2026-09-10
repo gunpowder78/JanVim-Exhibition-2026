@@ -19,9 +19,14 @@ try {
     assert.value(synthFactory.isKindOf(Function), "synths.scd must evaluate to a Function");
     definitions = synthFactory.value;
     assert.value(definitions.isArray, "synth factory must return an Array");
-    assert.value(definitions.size == 5, "synth factory must return exactly five definitions");
+    assert.value(definitions.size == 13, "synth factory must return exactly thirteen definitions");
     hasDefinition = { |name| definitions.detect { |definition| definition.name == name }.notNil };
-    [\jvPluck, \jvWind, \jvMix, \jvOutput, \jvCapture].do { |name|
+    [
+        \jvPluck, \jvWind,
+        \jvSignalCall, \jvSignalAM, \jvSignalFlint, \jvSignalRelic,
+        \jvSignalEarth, \jvSignalBlade, \jvSignalBass, \jvSignalSpace,
+        \jvMix, \jvOutput, \jvCapture
+    ].do { |name|
         assert.value(hasDefinition.value(name), "missing production SynthDef " ++ name);
     };
 
