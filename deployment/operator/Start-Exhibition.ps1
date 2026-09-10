@@ -11,6 +11,7 @@ if (-not $rootItem.PSIsContainer -or ($rootItem.Attributes -band [IO.FileAttribu
 }
 $modulePath = Join-Path $PSScriptRoot 'lib\Exhibition.Deployment.psm1'
 Import-Module $modulePath -Force
+Import-Module (Join-Path $PSScriptRoot 'lib\Exhibition.Taskbar.psm1') -Force
 $defaults = Read-ExhibitionSiteDefaults -Path (Join-Path $packageRoot 'config\site-defaults.json')
 if (-not [string]::Equals($packageRoot, $defaults.packageRoot, [StringComparison]::OrdinalIgnoreCase)) {
     throw 'deployment-package-root-invalid'
@@ -274,6 +275,7 @@ $soundRoot = ''
 $runRoot = ''
 $pointerWritten = $false
 $launchMutex = $null
+$taskbarState = @{ RestoreRequired = $false }
 
 try {
     $launchMutex = Enter-ExhibitionLaunchGuard
@@ -436,6 +438,15 @@ try {
     }
     Write-CurrentPointer
 
+    # Hide only after verified three-screen startup, never for a rejected duplicate
+    # launch or preflight. The outer finally also restores after failed cleanup.
+    try {
+        Enter-ExhibitionTaskbar -State $taskbarState |
+            ConvertTo-Json -Compress | Set-Content -LiteralPath (Join-Path $runRoot 'taskbar-hidden.json') -Encoding utf8
+    } catch {
+        Write-Warning "任务栏隐藏未完成：$($_.Exception.Message)；展演继续，退出时仍会尝试恢复。"
+    }
+
     if ($plan.durationSeconds -eq 0) {
         # Continuous exhibition: controller Stop owns normal termination.
         $showProcess.WaitForExit()
@@ -478,6 +489,10 @@ try {
     } | ConvertTo-Json -Compress
 
     # Power off only after the complete show/sound/Jianshan cleanup above succeeded.
+    try {
+        Exit-ExhibitionTaskbar -State $taskbarState |
+            ConvertTo-Json -Compress | Set-Content -LiteralPath (Join-Path $runRoot 'taskbar-restored.json') -Encoding utf8
+    } catch { Write-Warning '任务栏恢复未完成，可使用桌面“恢复任务栏”。' }
     $terminal = Read-DeploymentJson -Path (Join-Path $showRoot 'controller-terminal.json') -MaximumBytes 4096 -Reason 'controller-terminal'
     Invoke-ExhibitionPowerOff -TerminalMarker $terminal -ExpectedRunId ([IO.Path]::GetFileName($showRoot)) -ExpectedControllerPid $controllerIdentity.pid -ShowExitCode $showExitCode -SoundClean $summary.clean -ChildrenExited $true
 }
@@ -539,6 +554,12 @@ catch {
 }
 finally {
     try {
+        if ($taskbarState.RestoreRequired) {
+            try {
+                Exit-ExhibitionTaskbar -State $taskbarState |
+                    ConvertTo-Json -Compress | Set-Content -LiteralPath (Join-Path $runRoot 'taskbar-restored.json') -Encoding utf8
+            } catch { Write-Warning '任务栏恢复未完成，可使用桌面“恢复任务栏”。' }
+        }
         foreach ($process in @($showProcess, $jianshanProcess, $soundProcess)) {
             if ($null -ne $process) { $process.Dispose() }
         }
