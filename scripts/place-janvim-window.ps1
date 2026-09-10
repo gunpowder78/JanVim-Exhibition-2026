@@ -34,7 +34,7 @@ Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
 
-public static class JanVimExhibitionWindowV3
+public static class JanVimExhibitionWindowV4
 {
     public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
 
@@ -91,6 +91,10 @@ public static class JanVimExhibitionWindowV3
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool ShowWindowAsync(IntPtr hWnd, int command);
 
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool SetForegroundWindow(IntPtr hWnd);
+
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool GetWindowRect(IntPtr hWnd, out RECT rectangle);
@@ -111,16 +115,16 @@ $matchCount = 0
 
 while ($clock.ElapsedMilliseconds -lt $TimeoutMs) {
     $matches = [System.Collections.Generic.List[IntPtr]]::new()
-    $callback = [JanVimExhibitionWindowV3+EnumWindowsProc]{
+    $callback = [JanVimExhibitionWindowV4+EnumWindowsProc]{
         param([IntPtr]$handle, [IntPtr]$state)
 
         $windowPid = [uint32]0
-        [void][JanVimExhibitionWindowV3]::GetWindowThreadProcessId($handle, [ref]$windowPid)
-        $isVisible = [JanVimExhibitionWindowV3]::IsWindowVisible($handle)
-        $owner = [JanVimExhibitionWindowV3]::GetWindow($handle, $ownerCommand)
+        [void][JanVimExhibitionWindowV4]::GetWindowThreadProcessId($handle, [ref]$windowPid)
+        $isVisible = [JanVimExhibitionWindowV4]::IsWindowVisible($handle)
+        $owner = [JanVimExhibitionWindowV4]::GetWindow($handle, $ownerCommand)
         if ($windowPid -eq [uint32]$ChildProcessId -and $isVisible -and $owner -eq [IntPtr]::Zero) {
-            $client = [JanVimExhibitionWindowV3+RECT]::new()
-            $hasClient = [JanVimExhibitionWindowV3]::GetClientRect($handle, [ref]$client)
+            $client = [JanVimExhibitionWindowV4+RECT]::new()
+            $hasClient = [JanVimExhibitionWindowV4]::GetClientRect($handle, [ref]$client)
             $clientWidth = $client.Right - $client.Left
             $clientHeight = $client.Bottom - $client.Top
             if ($hasClient -and $clientWidth -gt 0 -and $clientHeight -gt 0) {
@@ -130,7 +134,7 @@ while ($clock.ElapsedMilliseconds -lt $TimeoutMs) {
         return $true
     }
 
-    if (-not [JanVimExhibitionWindowV3]::EnumWindows($callback, [IntPtr]::Zero)) {
+    if (-not [JanVimExhibitionWindowV4]::EnumWindows($callback, [IntPtr]::Zero)) {
         throw 'EnumWindows failed.'
     }
 
@@ -150,7 +154,7 @@ if ($window -eq [IntPtr]::Zero) {
 }
 
 $flags = $noZOrder -bor $noActivate
-if (-not [JanVimExhibitionWindowV3]::SetWindowPos(
+if (-not [JanVimExhibitionWindowV4]::SetWindowPos(
     $window,
     [IntPtr]::Zero,
     $X,
@@ -161,18 +165,18 @@ if (-not [JanVimExhibitionWindowV3]::SetWindowPos(
 )) {
     throw "SetWindowPos failed with Win32 error $([Runtime.InteropServices.Marshal]::GetLastWin32Error())."
 }
-[void][JanVimExhibitionWindowV3]::ShowWindowAsync($window, $showCommand)
+[void][JanVimExhibitionWindowV4]::ShowWindowAsync($window, $showCommand)
 
 if ($Maximize) {
-    [void][JanVimExhibitionWindowV3]::ShowWindowAsync($window, 3)
-    while (-not [JanVimExhibitionWindowV3]::IsZoomed($window) -and $clock.ElapsedMilliseconds -lt $TimeoutMs) {
+    [void][JanVimExhibitionWindowV4]::ShowWindowAsync($window, 3)
+    while (-not [JanVimExhibitionWindowV4]::IsZoomed($window) -and $clock.ElapsedMilliseconds -lt $TimeoutMs) {
         [Threading.Thread]::Sleep(50)
     }
-    if (-not [JanVimExhibitionWindowV3]::IsZoomed($window)) { throw 'janvim-maximize-timeout' }
+    if (-not [JanVimExhibitionWindowV4]::IsZoomed($window)) { throw 'janvim-maximize-timeout' }
 }
 
-$actual = [JanVimExhibitionWindowV3+RECT]::new()
-if (-not [JanVimExhibitionWindowV3]::GetWindowRect($window, [ref]$actual)) {
+$actual = [JanVimExhibitionWindowV4+RECT]::new()
+if (-not [JanVimExhibitionWindowV4]::GetWindowRect($window, [ref]$actual)) {
     throw "GetWindowRect failed with Win32 error $([Runtime.InteropServices.Marshal]::GetLastWin32Error())."
 }
 
@@ -181,8 +185,8 @@ $receipt = [ordered]@{
     pid = $ChildProcessId
     matchedWindowCount = $matchCount
     hwnd = ('0x{0:X16}' -f $window.ToInt64())
-    visible = [JanVimExhibitionWindowV3]::IsWindowVisible($window)
-    owned = [JanVimExhibitionWindowV3]::GetWindow($window, $ownerCommand) -ne [IntPtr]::Zero
+    visible = [JanVimExhibitionWindowV4]::IsWindowVisible($window)
+    owned = [JanVimExhibitionWindowV4]::GetWindow($window, $ownerCommand) -ne [IntPtr]::Zero
     requested = [ordered]@{
         x = $X
         y = $Y
@@ -198,13 +202,18 @@ $receipt = [ordered]@{
 }
 
 if ($Maximize) {
-    $monitor = [JanVimExhibitionWindowV3]::MonitorFromWindow($window, [uint32]0)
-    $info = [JanVimExhibitionWindowV3+MONITORINFO]::new()
+    $monitor = [JanVimExhibitionWindowV4]::MonitorFromWindow($window, [uint32]0)
+    $info = [JanVimExhibitionWindowV4+MONITORINFO]::new()
     $info.Size = [Runtime.InteropServices.Marshal]::SizeOf($info)
-    if ($monitor -eq [IntPtr]::Zero -or -not [JanVimExhibitionWindowV3]::GetMonitorInfo($monitor, [ref]$info)) { throw 'janvim-monitor-unavailable' }
-    $receipt.maximized = [JanVimExhibitionWindowV3]::IsZoomed($window)
+    if ($monitor -eq [IntPtr]::Zero -or -not [JanVimExhibitionWindowV4]::GetMonitorInfo($monitor, [ref]$info)) { throw 'janvim-monitor-unavailable' }
+    $receipt.maximized = [JanVimExhibitionWindowV4]::IsZoomed($window)
     $receipt.monitorBounds = [ordered]@{ x=$info.Monitor.Left; y=$info.Monitor.Top; width=$info.Monitor.Right-$info.Monitor.Left; height=$info.Monitor.Bottom-$info.Monitor.Top }
     $receipt.workingArea = [ordered]@{ x=$info.Work.Left; y=$info.Work.Top; width=$info.Work.Right-$info.Work.Left; height=$info.Work.Bottom-$info.Work.Top }
     if ($info.Monitor.Left -ne $X -or $info.Monitor.Top -ne $Y -or $info.Monitor.Right-$info.Monitor.Left -ne $Width -or $info.Monitor.Bottom-$info.Monitor.Top -ne $Height) { throw 'janvim-maximized-on-wrong-monitor' }
+    # Maximizing a background window alone can leave its taskbar attention state
+    # active. Hand foreground to this verified show HWND once, after placement.
+    # Windows may refuse while an operator uses another app; record that outcome
+    # without stealing focus repeatedly or interrupting the exhibition.
+    $receipt.foregroundActivationAccepted = [JanVimExhibitionWindowV4]::SetForegroundWindow($window)
 }
 $receipt | ConvertTo-Json -Depth 4 -Compress
